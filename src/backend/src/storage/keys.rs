@@ -1,0 +1,124 @@
+//! Generated storage keys.
+//!
+//! Keys are not user paths. Constructors validate shape so callers cannot
+//! smuggle absolute paths, parent traversal, or backend-specific separators.
+
+use uuid::Uuid;
+
+/// Valid object key relative to the storage root.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StorageKey(String);
+
+impl StorageKey {
+    /// Builds a staging key for an upload object.
+    pub fn staging_upload(upload_id: Uuid, object_name: &str) -> Result<Self, StorageKeyError> {
+        Self::new(format!("staging/uploads/{upload_id}/{object_name}"))
+    }
+
+    /// Builds the prefix that contains all staged objects for one upload.
+    pub fn staging_upload_prefix(upload_id: Uuid) -> Self {
+        Self(format!("staging/uploads/{upload_id}/"))
+    }
+
+    /// Builds immutable original key from BLAKE3 hex digest.
+    pub fn original_blake3(hash_hex: &str) -> Result<Self, StorageKeyError> {
+        validate_blake3_hex(hash_hex)?;
+        Self::new(format!(
+            "originals/blake3/{}/{}/{}",
+            &hash_hex[0..2],
+            &hash_hex[2..4],
+            hash_hex
+        ))
+    }
+
+    /// Builds a reproducible derivative key from original content and generator metadata.
+    pub fn derivative(
+        hash_hex: &str,
+        kind: &str,
+        format: &str,
+        generator_version: &str,
+    ) -> Result<Self, StorageKeyError> {
+        validate_blake3_hex(hash_hex)?;
+        validate_segment(kind)?;
+        validate_segment(format)?;
+        validate_segment(generator_version)?;
+        Self::new(format!(
+            "derivatives/{generator_version}/{kind}/{format}/{}/{}/{}.{}",
+            &hash_hex[0..2],
+            &hash_hex[2..4],
+            hash_hex,
+            format
+        ))
+    }
+
+    /// Validates a relative backend key.
+    pub fn new(key: impl Into<String>) -> Result<Self, StorageKeyError> {
+        let key = key.into();
+        validate_key(&key)?;
+        Ok(Self(key))
+    }
+
+    /// Returns the backend path.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Storage key validation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageKeyError {
+    /// Key is empty.
+    Empty,
+    /// Key attempts absolute pathing or parent traversal.
+    UnsafePath,
+    /// BLAKE3 hex digest is malformed.
+    InvalidHash,
+}
+
+impl std::fmt::Display for StorageKeyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::Empty => "empty storage key",
+            Self::UnsafePath => "unsafe storage key",
+            Self::InvalidHash => "invalid blake3 hash",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for StorageKeyError {}
+
+fn validate_key(key: &str) -> Result<(), StorageKeyError> {
+    if key.is_empty() {
+        return Err(StorageKeyError::Empty);
+    }
+    if key.starts_with('/') || key.starts_with('\\') || key.contains('\\') {
+        return Err(StorageKeyError::UnsafePath);
+    }
+    if key
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(StorageKeyError::UnsafePath);
+    }
+    Ok(())
+}
+
+fn validate_blake3_hex(hash_hex: &str) -> Result<(), StorageKeyError> {
+    if hash_hex.len() != 64 || !hash_hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StorageKeyError::InvalidHash);
+    }
+    Ok(())
+}
+
+fn validate_segment(segment: &str) -> Result<(), StorageKeyError> {
+    if segment.is_empty()
+        || !segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(StorageKeyError::UnsafePath);
+    }
+    Ok(())
+}
