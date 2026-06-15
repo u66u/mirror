@@ -56,7 +56,13 @@ Status values:
 - Related tasks: T301
 - Caveat: Image/video/metadata parsers process attacker-controlled bytes.
 - Mitigation: Non-root workers, read-only app filesystem, bounded temp dirs,
-  timeouts, resource limits, and no public serving from worker paths.
+  timeouts, resource limits, and no public serving from worker paths. Current
+  still-image path bounds source bytes, dimensions, decoder allocation,
+  persisted EXIF entry count, and EXIF value length. Videos stream into bounded
+  private temp files. External commands are killed on deadline; worker
+  heartbeat and wall timeout force process restart after stuck in-process work.
+  Container identity and deployment-level CPU/memory/disk limits remain
+  pending.
 
 ## C006: HEIC/HEIF Host Dependency
 
@@ -145,3 +151,62 @@ Status values:
 - Caveat: Web and Android clients are hand-written, so they can drift from
   OpenAPI and backend behavior.
 - Mitigation: Contract tests against OpenAPI examples and vertical flow tests.
+
+## C015: Dynamic Android Cleartext Scope
+
+- Status: Open
+- Risk: High
+- Related tasks: T105, T203
+- Caveat: Android network security XML cannot grant cleartext access to an
+  arbitrary private IP selected at runtime. Supporting explicit LAN HTTP means
+  the manifest permits cleartext transport process-wide.
+- Mitigation: `ServerEndpoint` accepts HTTP only after explicit user opt-in and
+  only for private, loopback, or link-local address literals. Hostnames and
+  public addresses are rejected. All app networking must remain behind
+  `MirrorApi`; HTTPS remains the default.
+
+## C016: Upload Creation Response Loss
+
+- Status: Mitigated
+- Risk: High
+- Related tasks: T202, T203
+- Caveat: The server can commit upload creation while the response or local
+  Room write is lost, otherwise a retry creates duplicate open sessions.
+- Mitigation: Android persists a random per-file `client_upload_key` first.
+  Postgres enforces owner-scoped uniqueness, returns the existing session for
+  matching retries, and rejects key reuse with different metadata.
+
+## C017: Android Room Schema Evolution
+
+- Status: Mitigated
+- Risk: High
+- Related tasks: T203 and later Android persistence tasks
+- Caveat: A Room entity change without an explicit migration can make an
+  installed vault app fail to open its local database. Destructive fallback
+  would erase upload progress and local/remote links.
+- Mitigation: Commit exported Room schemas, increment the schema version, add
+  explicit migrations, and test upgrade paths. Never enable destructive
+  migration fallback for production.
+
+## C018: Android Remote Vault Identity
+
+- Status: Open
+- Risk: High
+- Related tasks: T203, T206, T302
+- Caveat: Android v1 scopes durable upload progress by normalized server URL.
+  Device-token rotation on one vault should preserve progress, but replacing a
+  vault with a different instance at the same URL is not distinguishable.
+- Mitigation: A remote-generation fence prevents stale workers from updating a
+  newly selected URL. Add a stable backend instance ID before supporting
+  same-URL vault replacement or multi-account Android state.
+
+## C019: Reverse Proxy Upload Body Limit
+
+- Status: Open
+- Risk: Medium
+- Related tasks: T207, deployment
+- Caveat: A proxy limit below the 4 MiB upload-part protocol size rejects valid
+  Android parts before Actix can apply its route-local framing checks.
+- Mitigation: Ship proxy examples and deployment checks with a body limit above
+  4 MiB plus request overhead while retaining the exact 4 MiB application
+  limit.

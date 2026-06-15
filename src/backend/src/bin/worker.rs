@@ -3,10 +3,15 @@
 use std::{io, time::Duration as StdDuration};
 
 use mirror_backend::{
-    config::Config, db, media::RustImageProcessor, runtime::io_other, storage::ObjectStorage,
-    telemetry, worker,
+    config::Config,
+    db,
+    media::RustImageProcessor,
+    runtime::io_other,
+    storage::ObjectStorage,
+    telemetry,
+    video::FfmpegVideoProcessor,
+    worker::{self, WorkerPolicy},
 };
-use time::Duration;
 use tracing::{error, info};
 
 #[actix_web::main]
@@ -23,7 +28,8 @@ async fn main() -> io::Result<()> {
     db::run_migrations(&pool).await.map_err(io_other)?;
     std::fs::create_dir_all(&config.storage_root)?;
     let storage = ObjectStorage::local(&config.storage_root).map_err(io_other)?;
-    let processor = RustImageProcessor;
+    let image_processor = RustImageProcessor;
+    let video_processor = FfmpegVideoProcessor::production();
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
 
     info!(%worker_id, "starting mirror worker");
@@ -31,9 +37,10 @@ async fn main() -> io::Result<()> {
         match worker::run_once(
             &pool,
             &storage,
-            &processor,
+            &image_processor,
+            &video_processor,
             &worker_id,
-            Duration::minutes(30),
+            WorkerPolicy::production(),
         )
         .await
         {
@@ -42,6 +49,17 @@ async fn main() -> io::Result<()> {
             }
             Ok(worker::WorkerStep::Completed) => {}
             Ok(worker::WorkerStep::Failed) => {}
+            Ok(worker::WorkerStep::TimedOut) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "media job timed out; worker restart required",
+                ));
+            }
+            Err(worker::WorkerError::LeaseLost) => {
+                return Err(io::Error::other(
+                    "media job lease lost; worker restart required",
+                ));
+            }
             Err(error) => {
                 error!(%error, "worker iteration failed");
                 actix_web::rt::time::sleep(StdDuration::from_secs(5)).await;

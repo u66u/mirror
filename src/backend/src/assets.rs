@@ -16,10 +16,8 @@ use crate::storage::{ObjectStorage, StorageKey};
 /// Result of promoting a verified upload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PromotedUpload {
-    /// Logical asset row ID.
+    /// Stable public asset ID used by first-party API routes.
     pub asset_id: Uuid,
-    /// Shared immutable original row ID.
-    pub original_id: Uuid,
 }
 
 /// Asset timeline listing input.
@@ -190,6 +188,7 @@ pub async fn promote_verified_upload(
     let mut tx = pool.begin().await.map_err(PromoteError::Database)?;
     let original_id = upsert_original(&mut tx, &upload, final_key.as_str()).await?;
     let asset_id = Uuid::now_v7();
+    let asset_public_id = Uuid::now_v7();
 
     sqlx::query(
         r#"
@@ -198,7 +197,7 @@ pub async fn promote_verified_upload(
         "#,
     )
     .bind(asset_id)
-    .bind(Uuid::now_v7())
+    .bind(asset_public_id)
     .bind(owner_id)
     .bind(original_id)
     .execute(&mut *tx)
@@ -223,8 +222,7 @@ pub async fn promote_verified_upload(
     tx.commit().await.map_err(PromoteError::Database)?;
 
     Ok(PromotedUpload {
-        asset_id,
-        original_id,
+        asset_id: asset_public_id,
     })
 }
 
@@ -321,9 +319,9 @@ async fn existing_asset_for_upload(
     pool: &PgPool,
     upload_id: Uuid,
 ) -> Result<Option<PromotedUpload>, PromoteError> {
-    sqlx::query_as::<_, (Uuid, Uuid)>(
+    sqlx::query_scalar::<_, Uuid>(
         r#"
-        SELECT a.id, a.original_id
+        SELECT a.public_id
         FROM asset_sources s
         JOIN assets a ON a.id = s.asset_id
         WHERE s.upload_id = $1
@@ -332,12 +330,7 @@ async fn existing_asset_for_upload(
     .bind(upload_id)
     .fetch_optional(pool)
     .await
-    .map(|row| {
-        row.map(|(asset_id, original_id)| PromotedUpload {
-            asset_id,
-            original_id,
-        })
-    })
+    .map(|row| row.map(|asset_id| PromotedUpload { asset_id }))
     .map_err(PromoteError::Database)
 }
 

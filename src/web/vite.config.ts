@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/auth": "http://127.0.0.1:8080",
+      "/assets": "http://127.0.0.1:8080",
       "/setup": "http://127.0.0.1:8080",
       "/sessions": "http://127.0.0.1:8080"
     }
@@ -13,6 +14,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
+    include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     setupFiles: "./src/test/setup.ts"
   }
 });

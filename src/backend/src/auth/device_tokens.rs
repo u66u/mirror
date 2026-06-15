@@ -151,6 +151,32 @@ pub async fn revoke_device_token(
     Ok(())
 }
 
+/// Revokes one device token owned by the authenticated owner.
+///
+/// Returns false when the ID is missing or belongs to another owner.
+pub async fn revoke_owner_device_token(
+    pool: &PgPool,
+    owner_id: i16,
+    device_token_id: Uuid,
+) -> Result<bool, DeviceTokenError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE device_tokens
+        SET revoked_at = COALESCE(revoked_at, now()),
+            revocation_reason = COALESCE(revocation_reason, 'revoked')
+        WHERE id = $1
+          AND owner_id = $2
+        "#,
+    )
+    .bind(device_token_id)
+    .bind(owner_id)
+    .execute(pool)
+    .await
+    .map_err(DeviceTokenError::Database)?;
+
+    Ok(result.rows_affected() == 1)
+}
+
 fn normalize_name(value: &str) -> Result<String, DeviceTokenError> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.chars().count() > 120 {

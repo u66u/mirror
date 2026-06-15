@@ -6,7 +6,9 @@ and done conditions.
 
 ## Operating Rules
 
-- Work one task from `docs/tasks.md` at a time.
+- Each implementer or agent owns one task from `docs/tasks.md` at a time.
+  Multiple tasks may run in parallel only when write scopes and dependencies
+  are explicitly disjoint.
 - Each task must record risk, touched subsystems, deliverables, definition of
   done, required gates, caveats, and completion evidence.
 - Architecture drift is not allowed silently. If implementation needs a

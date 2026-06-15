@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 mod support;
 use support::{
-    FakeImageProcessor, StorageTestDeps, TestResult, create_verified_jpeg_upload, storage_test_deps,
+    FakeImageProcessor, FakeVideoProcessor, StorageTestDeps, TestResult,
+    create_verified_jpeg_upload, storage_test_deps,
 };
 
 #[tokio::test]
@@ -92,7 +93,14 @@ async fn asset_timeline_rejects_invalid_limit_and_cursor() -> TestResult {
 async fn assets_route_returns_authenticated_owner_timeline() -> TestResult {
     let deps = storage_test_deps().await?;
     let asset_id = create_promoted_asset(&deps, "route.jpg").await?;
-    generate_derivatives(&deps.pool, &deps.storage, &FakeImageProcessor, asset_id).await?;
+    generate_derivatives(
+        &deps.pool,
+        &deps.storage,
+        &FakeImageProcessor,
+        &FakeVideoProcessor,
+        asset_id,
+    )
+    .await?;
     let session = create_session(
         &deps.pool,
         SessionCreateInput {
@@ -139,7 +147,14 @@ async fn assets_route_returns_authenticated_owner_timeline() -> TestResult {
 async fn derivative_route_returns_authenticated_derivative_bytes() -> TestResult {
     let deps = storage_test_deps().await?;
     let asset_id = create_promoted_asset(&deps, "derivative.jpg").await?;
-    generate_derivatives(&deps.pool, &deps.storage, &FakeImageProcessor, asset_id).await?;
+    generate_derivatives(
+        &deps.pool,
+        &deps.storage,
+        &FakeImageProcessor,
+        &FakeVideoProcessor,
+        asset_id,
+    )
+    .await?;
     let public_id: Uuid = sqlx::query_scalar("SELECT public_id FROM assets WHERE id = $1")
         .bind(asset_id)
         .fetch_one(&deps.pool)
@@ -190,6 +205,10 @@ async fn derivative_route_returns_authenticated_derivative_bytes() -> TestResult
 async fn create_promoted_asset(deps: &StorageTestDeps, filename: &str) -> TestResult<Uuid> {
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, filename).await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
+    let internal_asset_id = sqlx::query_scalar("SELECT id FROM assets WHERE public_id = $1")
+        .bind(promoted.asset_id)
+        .fetch_one(&deps.pool)
+        .await?;
 
-    Ok(promoted.asset_id)
+    Ok(internal_asset_id)
 }

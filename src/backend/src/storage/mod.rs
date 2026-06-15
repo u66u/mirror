@@ -7,7 +7,9 @@ mod keys;
 
 use std::path::Path;
 
+use futures_util::TryStreamExt;
 use opendal::{Operator, services::Fs};
+use tokio::io::AsyncWriteExt;
 
 pub use keys::{StorageKey, StorageKeyError};
 
@@ -51,6 +53,52 @@ impl ObjectStorage {
             .map_err(StorageError::OpenDal)
     }
 
+    /// Streams an object into a new file while enforcing a byte limit.
+    ///
+    /// C005: large video originals must not be materialized as one in-memory
+    /// buffer before external media tools inspect them.
+    pub async fn copy_to_path_bounded(
+        &self,
+        key: &StorageKey,
+        destination: &Path,
+        max_bytes: u64,
+    ) -> Result<u64, StorageError> {
+        let reader = self
+            .operator
+            .reader(key.as_str())
+            .await
+            .map_err(StorageError::OpenDal)?;
+        let mut stream = reader
+            .into_stream(..)
+            .await
+            .map_err(StorageError::OpenDal)?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .await
+            .map_err(StorageError::Io)?;
+        let mut written = 0_u64;
+
+        while let Some(buffer) = stream.try_next().await.map_err(StorageError::OpenDal)? {
+            for chunk in buffer {
+                written = written
+                    .checked_add(
+                        u64::try_from(chunk.len()).map_err(|_| StorageError::ObjectTooLarge)?,
+                    )
+                    .ok_or(StorageError::ObjectTooLarge)?;
+                if written > max_bytes {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(destination).await;
+                    return Err(StorageError::ObjectTooLarge);
+                }
+                file.write_all(&chunk).await.map_err(StorageError::Io)?;
+            }
+        }
+        file.flush().await.map_err(StorageError::Io)?;
+        Ok(written)
+    }
+
     /// Returns whether the object exists.
     pub async fn exists(&self, key: &StorageKey) -> Result<bool, StorageError> {
         self.operator
@@ -71,6 +119,22 @@ impl ObjectStorage {
     pub async fn list(&self, prefix: &StorageKey) -> Result<Vec<String>, StorageError> {
         self.operator
             .list(prefix.as_str())
+            .await
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .filter(|entry| !entry.metadata().is_dir())
+                    .map(|entry| entry.path().to_owned())
+                    .collect()
+            })
+            .map_err(StorageError::OpenDal)
+    }
+
+    /// Recursively lists object keys under a generated prefix.
+    pub async fn list_recursive(&self, prefix: &StorageKey) -> Result<Vec<String>, StorageError> {
+        self.operator
+            .list_with(prefix.as_str())
+            .recursive(true)
             .await
             .map(|entries| {
                 entries
@@ -107,6 +171,10 @@ pub enum StorageError {
     InvalidLocalRoot,
     /// OpenDAL returned an operation error.
     OpenDal(opendal::Error),
+    /// Local staging file I/O failed.
+    Io(std::io::Error),
+    /// Object exceeded the caller's staging limit.
+    ObjectTooLarge,
 }
 
 impl std::fmt::Display for StorageError {
@@ -114,6 +182,8 @@ impl std::fmt::Display for StorageError {
         match self {
             Self::InvalidLocalRoot => formatter.write_str("invalid local storage root"),
             Self::OpenDal(_) => formatter.write_str("storage backend error"),
+            Self::Io(_) => formatter.write_str("storage staging I/O error"),
+            Self::ObjectTooLarge => formatter.write_str("storage object exceeds staging limit"),
         }
     }
 }

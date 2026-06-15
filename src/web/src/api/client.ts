@@ -1,4 +1,5 @@
 export type ApiErrorCode =
+  | "authentication_required"
   | "csrf_invalid"
   | "csrf_required"
   | "database_unavailable"
@@ -59,6 +60,58 @@ export async function login(input: LoginInput): Promise<void> {
       device_name: input.deviceName ?? null
     })
   });
+}
+
+export async function logout(): Promise<void> {
+  const csrfToken = document.cookie
+    .split("; ")
+    .find((cookie) => cookie.startsWith("mirror_csrf="))
+    ?.slice("mirror_csrf=".length);
+  const headers = new Headers();
+
+  if (csrfToken !== undefined) {
+    headers.set("x-csrf-token", csrfToken);
+  }
+
+  await request("/auth/logout", {
+    method: "POST",
+    headers
+  });
+}
+
+export type Session = {
+  sessionId: string;
+  deviceName: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  lastSeenAt: string | null;
+  expiresAt: string;
+  isCurrent: boolean;
+};
+
+type SessionDto = {
+  session_id: string;
+  device_name: string | null;
+  user_agent: string | null;
+  created_at: string;
+  last_seen_at: string | null;
+  expires_at: string;
+  is_current: boolean;
+};
+
+export async function listSessions(): Promise<Session[]> {
+  const response = await request("/sessions", { method: "GET" });
+  const body = (await response.json()) as SessionDto[];
+
+  return body.map((session) => ({
+    sessionId: session.session_id,
+    deviceName: session.device_name,
+    userAgent: session.user_agent,
+    createdAt: session.created_at,
+    lastSeenAt: session.last_seen_at,
+    expiresAt: session.expires_at,
+    isCurrent: session.is_current
+  }));
 }
 
 export type AssetDerivative = {

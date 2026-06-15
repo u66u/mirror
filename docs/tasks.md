@@ -44,6 +44,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - `docs/llm-workflow.md`
   - `docs/style-guide.md`
   - `docs/caveats.md`
+  - `docs/handoff.md`
 - Definition of done:
   - Docs define task format, risk levels, gates, module boundaries, workflow,
     and caveat tracking.
@@ -333,7 +334,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 
 ### T105: Web Sessions And Android Device Tokens
 
-- Status: [ ]
+- Status: [x]
 - Milestone: M1
 - Risk: High
 - Touched subsystems: backend, auth, web, android
@@ -354,7 +355,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - Cookie `Secure` behavior depends on trusted proxy/HTTPS handling.
   - Android insecure-LAN HTTP must be explicit, never silent.
 - Completion evidence:
-  - Partial backend slice:
+  - Completed backend/web slice:
     - Opaque token generation and digest lookup helpers.
     - DB-backed web session create/authenticate/revoke.
     - DB-backed Android device token create/authenticate/revoke.
@@ -368,10 +369,28 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `/sessions` lists active sessions and marks the caller's current session.
     - `/device-tokens` creates an Android token after current-session auth,
       CSRF, and password reauthentication.
+    - `/auth/device-login` verifies owner password and returns one raw Android
+      device token.
+    - Owner routes accept either one browser session cookie or one Android
+      Bearer token. Mixed credentials are rejected.
+    - `/device-tokens/{id}` lets a browser revoke an owner token or a device
+      revoke only itself.
     - Minimal web login form calls `/auth/login`.
+  - Completed Android slice:
+    - Kotlin/Compose app with minimal server/password/device-name login.
+    - Ktor `MirrorApi` owns login, Bearer auth, error decoding, and revocation.
+    - Android Keystore AES-GCM encrypts the device credential before private
+      preference storage; app backup/device transfer excludes credential data.
+    - HTTPS is default. HTTP requires explicit opt-in and a private, loopback,
+      or link-local address literal.
+    - Login state is exposed through immutable `StateFlow`.
+    - Gradle wrapper pins Gradle 9.4.1; AGP 9.2.0 uses JDK 17 and SDK 36.
+    - detekt, ktlint, compiler warnings-as-errors, Android Lint, unit tests, and
+      APK builds are part of root `make gate`.
   - Commands:
     - `make gate` -> passed
     - `make test-db` -> passed against local Postgres
+    - `make android-device-test` -> passed on API 36 emulator
   - Files touched:
     - `src/backend/src/auth/device_tokens.rs`
     - `src/backend/src/auth/mod.rs`
@@ -393,6 +412,16 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/web/src/api/client.ts`
     - `src/web/src/ui/App.tsx`
     - `src/web/src/ui/App.test.tsx`
+    - `src/android/settings.gradle.kts`
+    - `src/android/build.gradle.kts`
+    - `src/android/app/build.gradle.kts`
+    - `src/android/app/src/main/AndroidManifest.xml`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/auth/`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/network/`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/ui/`
+    - `src/android/tests/`
+    - `src/android/tests-instrumentation/`
+    - `src/android/config/detekt/detekt.yml`
     - `docs/tasks.md`
   - Tests:
     - Default tests cover token digest behavior and session cookie flags.
@@ -401,8 +430,42 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       session revocation, CSRF-token rejection, device-token authentication,
       device-token revocation, device-token password reauth linkage, and
       session inventory filtering.
-  - Still pending for T105:
-    - Android login client.
+    - Backend HTTP test covers Android password login, Bearer authorization,
+      mixed-credential rejection, self-revocation, and immediate rejection of
+      the revoked token.
+    - Android unit tests cover endpoint policy, credential persistence, and
+      preserving an existing credential when replacement login fails.
+    - Android instrumentation test verifies Keystore-encrypted credential
+      write/read/clear on API 36.
+  - Caveats:
+    - C015 records why dynamic private-LAN HTTP requires process-wide manifest
+      cleartext support plus strict runtime endpoint validation.
+
+### T106: Complete Web Session Controls
+
+- Status: [x]
+- Milestone: M1
+- Risk: High
+- Touched subsystems: web, auth
+- Deliverables:
+  - Real CSRF-protected web logout.
+  - Active web session inventory.
+  - Minimal session management UI.
+- Definition of done:
+  - Lock/logout revokes the current backend session rather than only changing
+    local UI state.
+  - Active sessions load after login and failures remain visible/retryable.
+  - Web tests cover request credentials, CSRF handling, and state transitions.
+- Required gates:
+  - Web typecheck, lint, tests, and build.
+- Caveats/footguns:
+  - CSRF cookie/header behavior must remain aligned with backend auth routes.
+- Completion evidence:
+  - Web API client sends the CSRF cookie value through `x-csrf-token` for
+    logout and loads `/sessions` with credentials.
+  - UI exposes photos/session views, real logout, retryable failures, and
+    authenticated-state preservation when logout fails.
+  - `make gate-web` -> passed: typecheck, lint, six tests, and production build.
 
 ## M2: Upload And Storage Kernel
 
@@ -499,7 +562,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 
 ### T203: Android Folder Scan And Upload Worker
 
-- Status: [ ]
+- Status: [x]
 - Milestone: M2
 - Risk: High
 - Touched subsystems: android, backend uploads
@@ -518,7 +581,49 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - Android partial-media permissions can make backup incomplete.
   - Do not request all-files access.
 - Completion evidence:
-  - Pending.
+  - Android implementation:
+    - MediaStore discovers image folders and persists owner selection in Room.
+    - Camera is selected once by default when present; explicit deselection is
+      preserved.
+    - Android 14 partial photo access is detected and shown as degraded.
+    - No all-files permission is requested.
+    - WorkManager runs immediate and six-hour periodic backup work with
+      `UNMETERED` as the default network constraint.
+    - Room persists media fingerprints, BLAKE3, client upload key, server
+      upload ID, state, errors, and verified asset ID.
+    - Interrupted `uploading` rows return to `pending` on the next worker run.
+    - Fixed 4 MiB parts resume from server-reported committed indexes.
+    - Changed local media invalidates stale hash/session state and cannot be
+      marked verified.
+    - Backend upload creation accepts an owner-scoped client UUID, making a
+      lost create response safe to retry without duplicate sessions.
+    - Backup UI exposes permission state, folder selection, Wi-Fi-only setting,
+      queue counts, failure state, and manual retry.
+  - Current scope:
+    - T203 backs up supported still images. Video MediaStore scanning remains
+      deferred until backend video upload/processing support is complete.
+  - Tests:
+    - JVM test proves process-restart resume skips a committed first part.
+    - JVM test proves changed media cancels stale server progress.
+    - Room instrumentation proves fingerprint changes clear verified progress
+      and allocate a new idempotency key.
+    - MediaStore instrumentation inserts, discovers, scans, and reads a real
+      photo.
+    - WorkManager instrumentation covers retry and terminal auth outcomes.
+    - Opt-in vertical instrumentation uploads a real MediaStore photo through
+      Ktor to the local Actix API and receives a verified asset ID.
+    - Backend DB test proves upload-create retry idempotency and rejects reuse
+      of a client key with different metadata.
+  - Commands:
+    - `make test-db` -> passed
+    - `make android-device-test` -> passed, 5 tests
+    - opt-in Android-to-Actix upload instrumentation -> passed
+    - `make gate` -> passed
+  - Caveats:
+    - C007 remains open for Android permission behavior.
+    - C015 remains open for explicit private-LAN HTTP.
+    - C016 is mitigated by owner-scoped upload-create idempotency keys.
+    - C017 requires explicit Room migrations after schema version 1.
 
 ### T204: Original Promotion And Job Enqueue
 
@@ -621,7 +726,105 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Queue tests cover priority/run-after leasing.
     - Queue tests cover exclusive ownership, heartbeat, and completion.
     - Queue tests cover stale lease reclaim.
-    - Queue tests cover retry and dead-letter failure paths.
+  - Queue tests cover retry and dead-letter failure paths.
+
+### T206: Android Backup Queue Isolation And Batching
+
+- Status: [x]
+- Milestone: M2
+- Risk: High
+- Touched subsystems: android, Room, WorkManager, auth
+- Deliverables:
+  - Enforce selected and currently available folders at queue claim, status,
+    and verification boundaries.
+  - Fence durable media state by remote vault generation.
+  - Bound each WorkManager execution and append continuation work.
+  - Make local disconnect independent from remote revoke availability.
+  - Add explicit Room 1-to-2 migration.
+- Definition of done:
+  - Deselected or unavailable media cannot start or finish an upload.
+  - A stale worker from server A cannot mutate server B state.
+  - One worker run processes at most four media items.
+  - Failed remote revoke still clears local credentials and reports the
+    unresolved remote token.
+  - Existing Room v1 settings migrate without destructive fallback.
+- Required gates:
+  - Android JVM tests.
+  - Android static analysis, lint, and builds.
+  - Opt-in Android instrumentation tests.
+- Caveats/footguns:
+  - C007: permission changes can make folders temporarily unavailable.
+  - C017: every Room entity change requires an explicit migration.
+  - C018: v1 remote scope uses normalized server URL, not a stable instance ID.
+- Completion evidence:
+  - Queue claim/count/verification paths require selected and currently
+    available folders.
+  - Remote generations fence stale workers; URL changes clear incompatible
+    media progress.
+  - Worker runs process at most four items and append continuation work.
+  - Disconnect clears local credentials before best-effort remote revocation.
+  - Room schema 2 includes an explicit 1-to-2 migration and exported schemas.
+  - `detekt ktlintCheck test lint assembleDebug assembleDebugAndroidTest`
+    -> passed.
+  - `connectedDebugAndroidTest` -> passed on API 36.
+
+### T207: Enforce Upload Part Framing
+
+- Status: [~]
+- Milestone: M2
+- Risk: High
+- Touched subsystems: backend, uploads, HTTP, Android contract
+- Deliverables:
+  - Route-local 4 MiB Actix payload limit.
+  - Deterministic part index and length validation.
+  - Stable oversized-part error response.
+- Definition of done:
+  - A full 4 MiB Android part reaches upload storage.
+  - Oversized, out-of-range, and incorrectly sized parts create no durable
+    part state.
+  - A multi-part upload completes through the HTTP route.
+- Required gates:
+  - Backend default and opt-in database tests.
+  - Upload negative tests.
+- Caveats/footguns:
+  - C019: reverse proxies must allow the protocol part size.
+  - Route buffering uses about 4 MiB per concurrent part request.
+- Completion evidence:
+  - Actix route rejects bodies over 4 MiB with
+    `413 upload_part_too_large`.
+  - Part index and deterministic part length are validated before storage or
+    database writes.
+  - Completion requires contiguous framed parts.
+  - Backend default gate passed; opt-in full database gate remains pending.
+
+### T208: Original Storage Integrity Recovery
+
+- Status: [~]
+- Milestone: M2
+- Risk: Critical
+- Touched subsystems: backend, storage, database, operations
+- Deliverables:
+  - Full original object/row integrity scan.
+  - Missing-object and orphan-object report.
+  - Explicit orphan remediation with a DB recheck before deletion.
+- Definition of done:
+  - Scanner reports DB originals missing from storage and storage originals
+    missing from DB.
+  - Scan is read-only.
+  - Deletion requires explicit operator intent and cannot delete an object that
+    became DB-referenced after the scan.
+- Required gates:
+  - Backend default and opt-in database/storage tests.
+  - Data-loss negative test for recheck-before-delete.
+- Caveats/footguns:
+  - C001: no DB transaction can make object deletion atomic.
+- Completion evidence:
+  - Scanner reports orphan storage objects and missing original objects.
+  - Remediation accepts only selected canonical original keys and rechecks
+    Postgres immediately before deletion.
+  - Maintenance CLI is dry-run by default and requires explicit keys for
+    `--apply`.
+  - Backend default gate passed; opt-in full database gate remains pending.
 
 ## M3: Media And Timeline
 
@@ -633,7 +836,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 - Touched subsystems: backend, media, jobs, storage
 - Deliverables:
   - Metadata extraction.
-  - AVIF/WebP thumbnails and previews.
+  - WebP thumbnails and previews.
   - Video posters.
   - Worker timeout/temp-dir controls.
 - Definition of done:
@@ -656,12 +859,28 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       `/assets/{asset_id}/derivatives/{kind}` serves authenticated derivative
       bytes.
     - Still-image processing uses Rust `image` behind an `ImageProcessor`
-      trait; video probing/posters remain pending.
+      trait.
+    - Still-image source size, decoded dimensions, and decoder allocation are
+      bounded before or during processing.
+    - Pinned `nom-exif` parses bounded owner-only camera, capture-time, GPS,
+      and raw entry data. Missing or malformed optional metadata does not fail
+      otherwise valid image processing.
+    - Large video originals stream from OpenDAL into private bounded temp
+      files instead of one in-memory buffer.
+    - Timeout-bounded `ffprobe`/`ffmpeg` handlers extract duration and
+      rotation-correct display dimensions, then generate metadata-free WebP
+      posters near 10% of playback.
+    - Worker heartbeats prevent live lease reclaim. CPU media work runs on the
+      blocking pool; wall timeout records retry and exits the worker process so
+      stuck parser threads cannot accumulate.
     - Derivative storage keys include generator version, kind, format, and
       source original BLAKE3.
+    - V1 emits WebP only. AVIF is intentionally deferred to avoid format
+      negotiation, duplicate derivative storage, and another codec test matrix.
   - Commands:
-    - `make gate` -> passed
-    - `make test-db` -> passed against local Postgres
+    - `make gate-backend` -> passed after video/timeout integration
+    - Previous `make test-db` baseline passed; newest integration remains
+      pending because Docker Desktop is stopped.
   - Files touched:
     - `src/backend/Cargo.toml`
     - `Cargo.lock`
@@ -671,6 +890,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/src/http/error.rs`
     - `src/backend/src/http/mod.rs`
     - `src/backend/src/media.rs`
+    - `src/backend/src/video.rs`
     - `src/backend/src/worker.rs`
     - `src/backend/src/storage/keys.rs`
     - `src/backend/migrations/20260607000400_media_derivatives.up.sql`
@@ -678,11 +898,22 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/tests/media_worker.rs`
     - `src/backend/tests/worker_runtime.rs`
     - `src/backend/tests/storage_keys.rs`
+    - `src/backend/tests/video_tools.rs`
     - `src/backend/tests/support/mod.rs`
     - `docs/tasks.md`
     - `docs/v1-architecture.md`
   - Tests:
     - Pure processor test verifies a PNG can produce a bounded WebP derivative.
+    - Processor test rejects image dimensions above the decoder bound.
+    - Hand-built JPEG fixture verifies camera, capture time, GPS extraction,
+      and that generated WebP derivatives do not preserve owner metadata.
+    - External-tool tests verify real MP4 probing/poster generation, command
+      timeout kill, and rotation-correct display dimensions.
+    - Storage test verifies oversized streamed staging removes its partial
+      file.
+    - Opt-in worker tests cover heartbeat lease retention and timeout retry.
+    - Opt-in DB/storage test covers streamed MP4 metadata and two persisted
+      poster derivatives.
     - DB/storage tests verify metadata and two derivative rows persist.
     - DB/storage tests verify derivative generation is idempotent.
     - Timeline route tests verify derivative metadata and authenticated
@@ -692,9 +923,9 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       failing job.
     - Storage-key test rejects untrusted derivative generator segments.
   - Still pending:
-    - Video poster/probe handler.
-    - EXIF/GPS extraction.
-    - Sandbox/container resource limits for parser attack surface.
+    - Run newest opt-in Postgres suite.
+    - Non-root container and deployment resource limits.
+    - Capability-tested HEIC/HEIF path.
 
 ### T302: Timeline API And Web/Android Timeline
 
@@ -715,24 +946,34 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - Android timeline test
 - Caveats/footguns:
   - Timeline cursor must not leak internal integer IDs as public API.
-  - Completion evidence:
-    - Backend partial:
-      - `assets::list_assets` returns cursor-paginated owner timeline rows in
-        newest-first order.
+- Completion evidence:
+  - Backend partial:
+    - `assets::list_assets` returns cursor-paginated owner timeline rows in
+      newest-first order.
     - `/assets` returns the authenticated owner's page.
     - Timeline items include generated thumbnail/preview metadata when
       derivatives exist.
-      - `/assets/{asset_id}/derivatives/{kind}` serves authenticated derivative
-        bytes.
-      - Cursor is opaque URL-safe base64 over `(created_at, public_id)` and does
-        not expose integer IDs.
-    - Web partial:
-      - Login success enters a usable timeline view.
-      - Timeline renders thumbnail grid items from `/assets` and derivative
-        URLs.
+    - `/assets/{asset_id}/derivatives/{kind}` serves authenticated derivative
+      bytes.
+    - Cursor is opaque URL-safe base64 over `(created_at, public_id)` and does
+      not expose integer IDs.
+  - Web:
+    - Cursor pages append through React Query infinite queries without
+      replacing existing assets.
+    - TanStack Virtual bounds mounted timeline rows while retaining a manual
+      load-more fallback and scroll-triggered fetching.
+    - Dense responsive grid includes video markers and opens an immersive
+      keyboard-navigable preview viewer.
+    - Vite development proxy includes `/assets`.
+    - Web tests live under `src/web/tests`, outside implementation source.
+    - Vite 8 resolves the reported esbuild advisory; `npm audit` reports zero
+      vulnerabilities.
   - Commands:
-    - `make gate` -> passed
-    - `make test-db` -> passed against local Postgres
+    - `make gate-backend` -> passed
+    - `make gate-web` -> passed: typecheck, lint, seven Vitest tests,
+      Playwright, and production build
+    - Previous `make test-db` baseline passed; current integration remains
+      pending while Docker Desktop is stopped.
   - Files touched:
     - `src/backend/src/assets.rs`
     - `src/backend/src/http/assets.rs`
@@ -742,8 +983,12 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/tests/support/mod.rs`
     - `src/web/src/api/client.ts`
     - `src/web/src/ui/App.tsx`
-    - `src/web/src/ui/App.test.tsx`
     - `src/web/src/styles.css`
+    - `src/web/tests/App.test.tsx`
+    - `src/web/tests/timeline.e2e.ts`
+    - `src/web/playwright.config.ts`
+    - `src/web/package.json`
+    - `src/web/package-lock.json`
     - `docs/tasks.md`
   - Tests:
     - Backend tests cover cursor paging without duplicates.
@@ -751,10 +996,11 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - HTTP route tests cover authenticated timeline response and derivative
       byte serving.
     - Web test covers login-to-timeline rendering with thumbnail URL mapping.
+    - Vitest covers cursor-page append and preview open/close behavior.
+    - Playwright verifies 120-item DOM virtualization, second-page loading,
+      preview rendering, and desktop/mobile layouts in system Chromium.
   - Still pending:
-    - React timeline pagination/virtualization.
     - Android dense grid timeline.
-    - Frontend preview/detail view from T301 derivatives.
 
 ## M4: Safety, Sharing, Export, Backup
 

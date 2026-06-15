@@ -11,7 +11,7 @@ use crate::{
     assets::{self, PromotedUpload},
     http::{auth, error::ApiError},
     state::AppState,
-    uploads::{self, CreateUploadInput, UploadSessionView},
+    uploads::{self, CreateUploadInput, UPLOAD_PART_SIZE_BYTES, UploadSessionView},
 };
 
 /// Create upload request body.
@@ -25,6 +25,8 @@ pub struct CreateUploadRequest {
     pub expected_blake3: String,
     /// Declared supported media type.
     pub media_type: String,
+    /// Stable client UUID making request retries idempotent.
+    pub client_upload_key: Option<Uuid>,
 }
 
 /// Complete upload response.
@@ -44,17 +46,17 @@ pub async fn create_upload_route(
     body: web::Json<CreateUploadRequest>,
 ) -> Result<HttpResponse, ApiError> {
     let (pool, _) = deps(&state)?;
-    let current = auth::require_current_session(pool, &req).await?;
-    auth::require_csrf(pool, &req, current.session_id).await?;
+    let current = auth::require_unsafe_owner(pool, &req).await?;
 
     let upload = uploads::create_upload(
         pool,
         CreateUploadInput {
-            owner_id: current.owner_id,
+            owner_id: current.owner_id(),
             original_filename: body.original_filename.clone(),
             expected_size: body.expected_size,
             expected_blake3: body.expected_blake3.clone(),
             media_type: body.media_type.clone(),
+            client_upload_key: body.client_upload_key,
         },
     )
     .await?;
@@ -70,8 +72,8 @@ pub async fn get_upload_route(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     let (pool, _) = deps(&state)?;
-    let current = auth::require_current_session(pool, &req).await?;
-    let upload = uploads::get_upload(pool, current.owner_id, path.into_inner()).await?;
+    let current = auth::require_owner(pool, &req).await?;
+    let upload = uploads::get_upload(pool, current.owner_id(), path.into_inner()).await?;
 
     Ok(HttpResponse::Ok().json(upload))
 }
@@ -82,17 +84,28 @@ pub async fn put_part_route(
     state: web::Data<AppState>,
     req: HttpRequest,
     path: web::Path<(Uuid, i32)>,
-    body: web::Bytes,
+    body: web::Payload,
 ) -> Result<HttpResponse, ApiError> {
     let (pool, storage) = deps(&state)?;
-    let current = auth::require_current_session(pool, &req).await?;
-    auth::require_csrf(pool, &req, current.session_id).await?;
+    let current = auth::require_unsafe_owner(pool, &req).await?;
     let (upload_id, part_index) = path.into_inner();
+    let body = body
+        .to_bytes_limited(UPLOAD_PART_SIZE_BYTES)
+        .await
+        .map_err(|_| {
+            ApiError::PayloadTooLarge(
+                "upload_part_too_large",
+                "upload part exceeds the 4 MiB limit",
+            )
+        })?
+        .map_err(|_| {
+            ApiError::BadRequest("invalid_upload_part", "invalid upload part request body")
+        })?;
 
     uploads::put_part(
         pool,
         storage,
-        current.owner_id,
+        current.owner_id(),
         upload_id,
         part_index,
         body.to_vec(),
@@ -110,12 +123,11 @@ pub async fn complete_upload_route(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     let (pool, storage) = deps(&state)?;
-    let current = auth::require_current_session(pool, &req).await?;
-    auth::require_csrf(pool, &req, current.session_id).await?;
+    let current = auth::require_unsafe_owner(pool, &req).await?;
     let upload_id = path.into_inner();
-    let upload = uploads::complete_upload(pool, storage, current.owner_id, upload_id).await?;
+    let upload = uploads::complete_upload(pool, storage, current.owner_id(), upload_id).await?;
     let promoted =
-        assets::promote_verified_upload(pool, storage, current.owner_id, upload_id).await?;
+        assets::promote_verified_upload(pool, storage, current.owner_id(), upload_id).await?;
 
     Ok(HttpResponse::Ok().json(CompleteUploadResponse { upload, promoted }))
 }
@@ -128,10 +140,9 @@ pub async fn cancel_upload_route(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     let (pool, _) = deps(&state)?;
-    let current = auth::require_current_session(pool, &req).await?;
-    auth::require_csrf(pool, &req, current.session_id).await?;
+    let current = auth::require_unsafe_owner(pool, &req).await?;
 
-    uploads::cancel_upload(pool, current.owner_id, path.into_inner()).await?;
+    uploads::cancel_upload(pool, current.owner_id(), path.into_inner()).await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

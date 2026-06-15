@@ -1,6 +1,10 @@
 /target
 node_modules/
 dist/
+test-results/
 *.tsbuildinfo
 __pycache__/
 *.py[cod]
+.gradle/
+**/build/
+local.properties

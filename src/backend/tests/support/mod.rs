@@ -1,4 +1,9 @@
-use std::{env, fmt};
+use std::{
+    env, fmt,
+    path::Path,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use mirror_backend::{
     assets::{AssetReadError, ListAssetsError, PromoteError},
@@ -14,7 +19,8 @@ use mirror_backend::{
     storage::ObjectStorage,
     storage::{StorageError, StorageKeyError},
     uploads::{CreateUploadInput, UploadError, complete_upload, create_upload, put_part},
-    worker::WorkerError,
+    video::{VideoInfo, VideoProcessor, VideoToolError},
+    worker::{WorkerError, WorkerPolicyError},
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -46,6 +52,16 @@ impl fmt::Display for TestError {
 }
 
 impl std::error::Error for TestError {}
+
+/// Reads one required string field from a JSON response.
+#[allow(dead_code)] // T105: HTTP integration tests use this only for typed response assertions.
+pub fn required_json_string(value: &serde_json::Value, field: &'static str) -> TestResult<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| TestError::new("required JSON string missing", field))
+}
 
 impl From<std::num::TryFromIntError> for TestError {
     fn from(error: std::num::TryFromIntError) -> Self {
@@ -179,6 +195,24 @@ impl From<WorkerError> for TestError {
     }
 }
 
+impl From<WorkerPolicyError> for TestError {
+    fn from(error: WorkerPolicyError) -> Self {
+        Self::new("worker policy failed", error)
+    }
+}
+
+impl From<VideoToolError> for TestError {
+    fn from(error: VideoToolError) -> Self {
+        Self::new("video tool failed", error)
+    }
+}
+
+impl From<tokio::task::JoinError> for TestError {
+    fn from(error: tokio::task::JoinError) -> Self {
+        Self::new("async task failed", error)
+    }
+}
+
 #[allow(dead_code)] // T103/T105/T202/T204: DB-backed integration tests share this opt-in fixture.
 pub async fn connect_test_database() -> TestResult<sqlx::PgPool> {
     let database_url = env::var("MIRROR_TEST_DATABASE_URL").map_err(|source| TestError {
@@ -252,7 +286,17 @@ pub async fn create_verified_jpeg_upload(
     storage: &ObjectStorage,
     filename: &str,
 ) -> TestResult<Uuid> {
-    let bytes = jpeg_bytes();
+    create_verified_upload(pool, storage, filename, "image/jpeg", jpeg_bytes()).await
+}
+
+#[allow(dead_code)] // T301: video integration uses the same verified upload contract.
+pub async fn create_verified_upload(
+    pool: &sqlx::PgPool,
+    storage: &ObjectStorage,
+    filename: &str,
+    media_type: &str,
+    bytes: Vec<u8>,
+) -> TestResult<Uuid> {
     let upload = create_upload(
         pool,
         CreateUploadInput {
@@ -260,7 +304,8 @@ pub async fn create_verified_jpeg_upload(
             original_filename: filename.to_owned(),
             expected_size: i64::try_from(bytes.len())?,
             expected_blake3: blake3::hash(&bytes).to_hex().to_string(),
-            media_type: "image/jpeg".to_owned(),
+            media_type: media_type.to_owned(),
+            client_upload_key: None,
         },
     )
     .await?;
@@ -269,6 +314,65 @@ pub async fn create_verified_jpeg_upload(
     complete_upload(pool, storage, 1, upload.upload_id).await?;
 
     Ok(upload.upload_id)
+}
+
+#[allow(dead_code)] // T301: external-tool and DB media tests share capability detection.
+pub fn ffmpeg_is_available() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+        && Command::new("ffprobe")
+            .arg("-version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+#[allow(dead_code)] // T301: external-tool and DB media tests share one tiny video fixture.
+pub fn create_video_fixture(path: &Path) -> TestResult {
+    let status = Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=64x32:d=0.2",
+            "-c:v",
+            "mpeg4",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+        ])
+        .arg(path)
+        .status()?;
+    if !status.success() {
+        return Err(TestError::new(
+            "video fixture failed",
+            "ffmpeg exited unsuccessfully",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[allow(dead_code)] // T301: video command tests share executable fixture setup.
+pub fn write_executable_script(path: &Path, body: &str) -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, body)?;
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(path, permissions)?;
+    Ok(())
 }
 
 #[allow(dead_code)] // T204/T302: shared row assertion for asset-producing integration tests.
@@ -293,6 +397,7 @@ pub async fn original_count(pool: &sqlx::PgPool) -> TestResult<i64> {
 }
 
 #[allow(dead_code)] // T301: media handler and worker tests share deterministic processor output.
+#[derive(Clone, Copy)]
 pub struct FakeImageProcessor;
 
 impl ImageProcessor for FakeImageProcessor {
@@ -309,6 +414,63 @@ impl ImageProcessor for FakeImageProcessor {
         _media_type: &str,
         kind: DerivativeKind,
     ) -> Result<GeneratedDerivative, MediaToolError> {
+        let (bytes, width, height) = match kind {
+            DerivativeKind::Thumbnail => (b"thumbnail".to_vec(), 512, 384),
+            DerivativeKind::Preview => (b"preview".to_vec(), 1600, 1200),
+        };
+        Ok(GeneratedDerivative {
+            bytes,
+            width,
+            height,
+            format: "webp",
+        })
+    }
+}
+
+#[allow(dead_code)] // T301: image-focused worker tests still require complete media tool wiring.
+#[derive(Clone, Copy)]
+pub struct FakeVideoProcessor;
+
+impl VideoProcessor for FakeVideoProcessor {
+    fn inspect(&self, _input: &std::path::Path) -> Result<VideoInfo, VideoToolError> {
+        Ok(VideoInfo {
+            width: 1920,
+            height: 1080,
+            duration_ms: Some(10_000),
+        })
+    }
+
+    fn generate_poster(
+        &self,
+        _input: &std::path::Path,
+        _max_edge: u32,
+    ) -> Result<Vec<u8>, VideoToolError> {
+        Err(VideoToolError::CommandFailed)
+    }
+}
+
+#[allow(dead_code)] // T301: worker timeout and heartbeat tests need deterministic slow CPU work.
+#[derive(Clone, Copy)]
+pub struct DelayedImageProcessor {
+    pub delay: Duration,
+}
+
+impl ImageProcessor for DelayedImageProcessor {
+    fn inspect(&self, _bytes: &[u8], _media_type: &str) -> Result<ImageInfo, MediaToolError> {
+        std::thread::sleep(self.delay);
+        Ok(ImageInfo {
+            width: 4000,
+            height: 3000,
+        })
+    }
+
+    fn generate(
+        &self,
+        _bytes: &[u8],
+        _media_type: &str,
+        kind: DerivativeKind,
+    ) -> Result<GeneratedDerivative, MediaToolError> {
+        std::thread::sleep(self.delay);
         let (bytes, width, height) = match kind {
             DerivativeKind::Thumbnail => (b"thumbnail".to_vec(), 512, 384),
             DerivativeKind::Preview => (b"preview".to_vec(), 1600, 1200),

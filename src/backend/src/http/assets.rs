@@ -35,11 +35,11 @@ pub async fn list_assets_route(
             "database is unavailable",
         ));
     };
-    let current = auth::require_current_session(pool, &req).await?;
+    let current = auth::require_owner(pool, &req).await?;
     let page = assets::list_assets(
         pool,
         ListAssetsInput {
-            owner_id: current.owner_id,
+            owner_id: current.owner_id(),
             limit: query.limit,
             cursor: query.cursor.clone(),
         },
@@ -68,9 +68,10 @@ pub async fn get_derivative(
             "storage is unavailable",
         ));
     };
-    let current = auth::require_current_session(pool, &req).await?;
+    let current = auth::require_owner(pool, &req).await?;
     let (asset_id, kind) = path.into_inner();
-    let derivative = assets::load_derivative_blob(pool, current.owner_id, asset_id, &kind).await?;
+    let derivative =
+        assets::load_derivative_blob(pool, current.owner_id(), asset_id, &kind).await?;
     let key =
         crate::storage::StorageKey::new(derivative.storage_key).map_err(|_| ApiError::Internal)?;
     let bytes = storage.read(&key).await.map_err(|_| ApiError::Internal)?;

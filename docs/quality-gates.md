@@ -55,6 +55,7 @@ Run for web tasks once `src/web/` exists:
 npm run typecheck
 npm run lint
 npm test
+npm run test:e2e
 ```
 
 Expected configuration:
@@ -65,6 +66,8 @@ Expected configuration:
 - ESLint with type-checked TypeScript rules.
 - Vitest for units/state helpers.
 - Playwright for vertical flows.
+- System Chromium path defaults to `/bin/chromium`; override with
+  `MIRROR_CHROMIUM_PATH` where distributions install it elsewhere.
 
 Web tasks that touch routing/search params must include route-state tests or a
 Playwright scenario.
@@ -74,9 +77,12 @@ Playwright scenario.
 Run for Android tasks once `src/android/` exists:
 
 ```sh
-./gradlew lint
+./gradlew detekt
+./gradlew ktlintCheck
 ./gradlew test
+./gradlew lint
 ./gradlew assembleDebug
+./gradlew assembleDebugAndroidTest
 ```
 
 Expected configuration:
@@ -89,6 +95,18 @@ Expected configuration:
 
 Android tasks that touch backup, permissions, token storage, or local deletion
 require unit or instrumentation coverage for success and failure paths.
+Device-backed tests run explicitly with `make android-device-test`; default
+`make gate` must not require an emulator or connected phone.
+
+Android-to-backend upload integration is opt-in and must use a disposable local
+test owner:
+
+```sh
+./gradlew connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=app.mirror.vault.backup.BackendUploadIntegrationTest \
+  -Pandroid.testInstrumentationRunnerArguments.mirrorServerUrl=http://10.0.2.2:8080 \
+  -Pandroid.testInstrumentationRunnerArguments.mirrorPassword='<test-password>'
+```
 
 ## Infra And Script Gates
 

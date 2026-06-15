@@ -6,7 +6,7 @@
 use actix_web::{
     HttpRequest, HttpResponse,
     cookie::{Cookie, SameSite, time::Duration},
-    get, post, web,
+    delete, get, post, web,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -69,6 +69,26 @@ pub struct CreateDeviceTokenResponse {
     pub token: String,
 }
 
+/// Authenticated owner credential accepted by first-party API routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerCredential {
+    /// Browser session cookie. Unsafe requests also require CSRF validation.
+    Session(AuthenticatedSession),
+    /// Android bearer token. Authorization headers are not ambient credentials,
+    /// so CSRF validation does not apply.
+    Device(auth::AuthenticatedDeviceToken),
+}
+
+impl OwnerCredential {
+    /// Returns single-owner database identity.
+    pub fn owner_id(self) -> i16 {
+        match self {
+            Self::Session(session) => session.owner_id,
+            Self::Device(device) => device.owner_id,
+        }
+    }
+}
+
 /// Creates a web session cookie.
 #[post("/auth/login")]
 pub async fn login(
@@ -97,6 +117,47 @@ pub async fn login(
         .cookie(session_cookie(output.token.expose()))
         .cookie(csrf_cookie(output.csrf_token.expose()))
         .finish())
+}
+
+/// Verifies owner password and returns one Android bearer token.
+#[post("/auth/device-login")]
+pub async fn device_login(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<CreateDeviceTokenRequest>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+
+    if !auth::verify_owner_password(pool, &body.password)
+        .await
+        .map_err(|_| ApiError::Internal)?
+    {
+        return Err(ApiError::Unauthorized(
+            "invalid_credentials",
+            "invalid credentials",
+        ));
+    }
+
+    let output = auth::create_device_token(
+        pool,
+        auth::DeviceTokenCreateInput {
+            owner_id: 1,
+            name: body.name.clone(),
+            created_by_session_id: None,
+            user_agent: user_agent(&req),
+        },
+    )
+    .await?;
+
+    Ok(HttpResponse::Created().json(CreateDeviceTokenResponse {
+        device_token_id: output.device_token_id,
+        token: output.token.expose().to_owned(),
+    }))
 }
 
 /// Revokes the current web session if a session cookie exists.
@@ -208,13 +269,50 @@ pub async fn create_device_token_route(
             user_agent: user_agent(&req),
         },
     )
-    .await
-    .map_err(|_| ApiError::Internal)?;
+    .await?;
 
     Ok(HttpResponse::Created().json(CreateDeviceTokenResponse {
         device_token_id: output.device_token_id,
         token: output.token.expose().to_owned(),
     }))
+}
+
+/// Revokes one owner device token.
+///
+/// Browser sessions require CSRF. Device credentials may revoke only
+/// themselves, preventing a stolen token from disabling other devices.
+#[delete("/device-tokens/{device_token_id}")]
+pub async fn revoke_device_token_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let credential = require_unsafe_owner(pool, &req).await?;
+    let device_token_id = path.into_inner();
+
+    if let OwnerCredential::Device(device) = credential
+        && device.device_token_id != device_token_id
+    {
+        return Err(ApiError::NotFound(
+            "device_token_not_found",
+            "device token not found",
+        ));
+    }
+
+    if auth::revoke_owner_device_token(pool, credential.owner_id(), device_token_id).await? {
+        Ok(HttpResponse::NoContent().finish())
+    } else {
+        Err(ApiError::NotFound(
+            "device_token_not_found",
+            "device token not found",
+        ))
+    }
 }
 
 /// Builds the session cookie sent after login.
@@ -286,6 +384,64 @@ pub(crate) async fn require_current_session(
         ))
 }
 
+/// Authenticates either browser cookie or Android bearer token.
+///
+/// Supplying both credential forms is rejected to avoid ambiguous policy
+/// selection, especially around CSRF requirements.
+pub async fn require_owner(
+    pool: &sqlx::PgPool,
+    req: &HttpRequest,
+) -> Result<OwnerCredential, ApiError> {
+    let session_token = req.cookie(SESSION_COOKIE);
+    let bearer_token = bearer_token(req)?;
+
+    if session_token.is_some() && bearer_token.is_some() {
+        return Err(ApiError::Unauthorized(
+            "ambiguous_credentials",
+            "provide one authentication credential",
+        ));
+    }
+
+    if let Some(token) = bearer_token {
+        return auth::authenticate_device_token(pool, token)
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .map(OwnerCredential::Device)
+            .ok_or(ApiError::Unauthorized(
+                "invalid_device_token",
+                "invalid device token",
+            ));
+    }
+
+    if let Some(cookie) = session_token {
+        return auth::authenticate_session(pool, cookie.value())
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .map(OwnerCredential::Session)
+            .ok_or(ApiError::Unauthorized(
+                "authentication_required",
+                "authentication required",
+            ));
+    }
+
+    Err(ApiError::Unauthorized(
+        "authentication_required",
+        "authentication required",
+    ))
+}
+
+/// Authenticates owner and applies CSRF only to cookie sessions.
+pub async fn require_unsafe_owner(
+    pool: &sqlx::PgPool,
+    req: &HttpRequest,
+) -> Result<OwnerCredential, ApiError> {
+    let credential = require_owner(pool, req).await?;
+    if let OwnerCredential::Session(session) = credential {
+        require_csrf(pool, req, session.session_id).await?;
+    }
+    Ok(credential)
+}
+
 pub(crate) async fn require_csrf(
     pool: &sqlx::PgPool,
     req: &HttpRequest,
@@ -306,6 +462,31 @@ pub(crate) async fn require_csrf(
     } else {
         Err(ApiError::Unauthorized("csrf_invalid", "invalid csrf token"))
     }
+}
+
+fn bearer_token(req: &HttpRequest) -> Result<Option<&str>, ApiError> {
+    let Some(value) = req.headers().get("authorization") else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| {
+        ApiError::Unauthorized("invalid_authorization", "invalid authorization header")
+    })?;
+    let Some((scheme, token)) = value.split_once(' ') else {
+        return Err(ApiError::Unauthorized(
+            "invalid_authorization",
+            "invalid authorization header",
+        ));
+    };
+    if !scheme.eq_ignore_ascii_case("bearer")
+        || token.is_empty()
+        || token.contains(char::is_whitespace)
+    {
+        return Err(ApiError::Unauthorized(
+            "invalid_authorization",
+            "invalid authorization header",
+        ));
+    }
+    Ok(Some(token))
 }
 
 fn user_agent(req: &HttpRequest) -> Option<String> {

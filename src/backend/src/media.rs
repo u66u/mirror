@@ -4,9 +4,10 @@
 //! worker path only, never from request handlers. Video handling will use a
 //! separate timeout-bounded external command wrapper.
 
-use std::io::Cursor;
+use std::{collections::BTreeMap, io::Cursor, path::PathBuf};
 
-use image::{GenericImageView, ImageFormat};
+use image::{GenericImageView, ImageFormat, ImageReader, Limits};
+use nom_exif::{Exif, ExifTag, MediaParser, MediaSource};
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::Json};
 use uuid::Uuid;
@@ -14,9 +15,18 @@ use uuid::Uuid;
 use crate::{
     jobs::{JobKind, LeasedJob},
     storage::{ObjectStorage, StorageKey},
+    video::{VideoProcessor, VideoToolError},
 };
 
-const GENERATOR_VERSION: &str = "media-v1-image-webp-1";
+const METADATA_VERSION: &str = "media-metadata-v2";
+const IMAGE_GENERATOR_VERSION: &str = "media-v1-image-webp-1";
+const VIDEO_GENERATOR_VERSION: &str = "media-v1-video-poster-webp-1";
+const MAX_STILL_SOURCE_BYTES: i64 = 512 * 1024 * 1024;
+const MAX_VIDEO_SOURCE_BYTES: i64 = 64 * 1024 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION: u32 = 32_768;
+const MAX_IMAGE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_OWNER_METADATA_ENTRIES: usize = 256;
+const MAX_OWNER_METADATA_VALUE_CHARS: usize = 1_024;
 
 /// Supported derivative kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +76,7 @@ pub struct GeneratedDerivative {
 }
 
 /// Image processor boundary.
-pub trait ImageProcessor {
+pub trait ImageProcessor: Clone + Send + Sync + 'static {
     /// Inspects dimensions without mutating input bytes.
     fn inspect(&self, bytes: &[u8], media_type: &str) -> Result<ImageInfo, MediaToolError>;
     /// Generates a stripped derivative.
@@ -121,8 +131,18 @@ pub enum MediaError {
     AssetNotFound,
     /// Media type is not handled by the image pipeline.
     UnsupportedMediaType,
+    /// Source exceeds the configured in-process or staged-media bound.
+    SourceTooLarge,
+    /// Stored object length no longer matches immutable database metadata.
+    OriginalSizeMismatch,
     /// Image processor failed.
     Tool(MediaToolError),
+    /// External video processor failed.
+    VideoTool(VideoToolError),
+    /// Blocking media task panicked or was cancelled.
+    ProcessingTaskFailed,
+    /// Private media staging directory could not be created.
+    TemporaryStorage(std::io::Error),
     /// Storage failed.
     Storage(crate::storage::StorageError),
     /// Database failed.
@@ -131,15 +151,19 @@ pub enum MediaError {
 
 impl std::fmt::Display for MediaError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidJobPayload => "invalid media job payload",
-            Self::AssetNotFound => "asset not found",
-            Self::UnsupportedMediaType => "unsupported media type",
-            Self::Tool(_) => "media tool failed",
-            Self::Storage(_) => "media storage error",
-            Self::Database(_) => "media database error",
-        };
-        formatter.write_str(message)
+        match self {
+            Self::Tool(error) => write!(formatter, "media tool failed: {error}"),
+            Self::VideoTool(error) => write!(formatter, "video tool failed: {error}"),
+            Self::InvalidJobPayload => formatter.write_str("invalid media job payload"),
+            Self::AssetNotFound => formatter.write_str("asset not found"),
+            Self::UnsupportedMediaType => formatter.write_str("unsupported media type"),
+            Self::SourceTooLarge => formatter.write_str("media source exceeds processing limit"),
+            Self::OriginalSizeMismatch => formatter.write_str("original object size mismatch"),
+            Self::ProcessingTaskFailed => formatter.write_str("media processing task failed"),
+            Self::TemporaryStorage(_) => formatter.write_str("media temporary storage failed"),
+            Self::Storage(_) => formatter.write_str("media storage error"),
+            Self::Database(_) => formatter.write_str("media database error"),
+        }
     }
 }
 
@@ -170,45 +194,46 @@ impl std::error::Error for MediaToolError {}
 ///
 /// The worker binary owns queue completion/failure so tests can exercise the
 /// handler independently from leasing.
-pub async fn run_media_job(
+pub async fn run_media_job<I, V>(
     pool: &PgPool,
     storage: &ObjectStorage,
-    processor: &impl ImageProcessor,
+    image_processor: &I,
+    video_processor: &V,
     job: &LeasedJob,
-) -> Result<(), MediaError> {
+) -> Result<(), MediaError>
+where
+    I: ImageProcessor,
+    V: VideoProcessor,
+{
     let asset_id = asset_id_from_payload(&job.payload)?;
     match job.kind {
-        JobKind::ExtractMetadata => extract_metadata(pool, storage, processor, asset_id).await,
+        JobKind::ExtractMetadata => {
+            extract_metadata(pool, storage, image_processor, video_processor, asset_id).await
+        }
         JobKind::GenerateDerivatives => {
-            generate_derivatives(pool, storage, processor, asset_id).await
+            generate_derivatives(pool, storage, image_processor, video_processor, asset_id).await
         }
     }
 }
 
 /// Extracts basic metadata for an asset original.
-pub async fn extract_metadata(
+pub async fn extract_metadata<I, V>(
     pool: &PgPool,
     storage: &ObjectStorage,
-    processor: &impl ImageProcessor,
+    image_processor: &I,
+    video_processor: &V,
     asset_id: Uuid,
-) -> Result<(), MediaError> {
+) -> Result<(), MediaError>
+where
+    I: ImageProcessor,
+    V: VideoProcessor,
+{
     let original = load_asset_original(pool, asset_id).await?;
-    let bytes = storage
-        .read(
-            &StorageKey::new(&original.storage_key)
-                .map_err(|_| MediaError::UnsupportedMediaType)?,
-        )
-        .await
-        .map_err(MediaError::Storage)?;
-    ensure_supported_image(&original.media_type)?;
-    let info = processor
-        .inspect(&bytes, &original.media_type)
-        .map_err(MediaError::Tool)?;
-    let raw = json!({
-        "width": info.width,
-        "height": info.height,
-        "extractor": GENERATOR_VERSION,
-    });
+    let media_kind = classify_media_type(&original.media_type)?;
+    let (width, height, raw) = match media_kind {
+        MediaKind::Image => extract_image_metadata(storage, image_processor, &original).await?,
+        MediaKind::Video => extract_video_metadata(storage, video_processor, &original).await?,
+    };
 
     sqlx::query(
         r#"
@@ -224,8 +249,8 @@ pub async fn extract_metadata(
         "#,
     )
     .bind(asset_id)
-    .bind(i32::try_from(info.width).map_err(|_| MediaError::UnsupportedMediaType)?)
-    .bind(i32::try_from(info.height).map_err(|_| MediaError::UnsupportedMediaType)?)
+    .bind(i32::try_from(width).map_err(|_| MediaError::UnsupportedMediaType)?)
+    .bind(i32::try_from(height).map_err(|_| MediaError::UnsupportedMediaType)?)
     .bind(Json(raw))
     .execute(pool)
     .await
@@ -234,34 +259,177 @@ pub async fn extract_metadata(
     Ok(())
 }
 
+async fn extract_image_metadata(
+    storage: &ObjectStorage,
+    processor: &impl ImageProcessor,
+    original: &AssetOriginal,
+) -> Result<(u32, u32, Value), MediaError> {
+    ensure_bounded_still_source(original)?;
+    let bytes = storage
+        .read(&original.storage_key()?)
+        .await
+        .map_err(MediaError::Storage)?;
+    ensure_loaded_size(original, bytes.len())?;
+    let processor = processor.clone();
+    let media_type = original.media_type.clone();
+    let (info, owner_metadata) = tokio::task::spawn_blocking(move || {
+        let info = processor.inspect(&bytes, &media_type)?;
+        Ok::<_, MediaToolError>((info, extract_owner_metadata(bytes)))
+    })
+    .await
+    .map_err(|_| MediaError::ProcessingTaskFailed)?
+    .map_err(MediaError::Tool)?;
+    let raw = json!({
+        "width": info.width,
+        "height": info.height,
+        "extractor": METADATA_VERSION,
+        "media_kind": "image",
+        "owner_metadata": owner_metadata,
+    });
+    Ok((info.width, info.height, raw))
+}
+
+async fn extract_video_metadata(
+    storage: &ObjectStorage,
+    processor: &impl VideoProcessor,
+    original: &AssetOriginal,
+) -> Result<(u32, u32, Value), MediaError> {
+    let (temp_dir, input) = stage_video_original(storage, original).await?;
+    let processor = processor.clone();
+    let info = tokio::task::spawn_blocking(move || {
+        let _temp_dir = temp_dir;
+        processor.inspect(&input)
+    })
+    .await
+    .map_err(|_| MediaError::ProcessingTaskFailed)?
+    .map_err(MediaError::VideoTool)?;
+    let raw = json!({
+        "width": info.width,
+        "height": info.height,
+        "duration_ms": info.duration_ms,
+        "extractor": METADATA_VERSION,
+        "media_kind": "video",
+        "owner_metadata": { "status": "unsupported" },
+    });
+    Ok((info.width, info.height, raw))
+}
+
+/// Extracts bounded owner-only EXIF metadata without making optional metadata
+/// failures fatal to otherwise valid media processing.
+///
+/// C005: input is attacker-controlled, so persisted entry count and value size
+/// are bounded. C011: callers serving shares must omit this entire value.
+#[must_use]
+pub fn extract_owner_metadata(bytes: Vec<u8>) -> Value {
+    let source = match MediaSource::from_memory(bytes) {
+        Ok(source) => source,
+        Err(error) => return metadata_parse_failure(&error),
+    };
+    let mut parser = MediaParser::new();
+    let parsed = match parser.parse_exif(source) {
+        Ok(parsed) => parsed,
+        Err(error) => return metadata_parse_failure(&error),
+    };
+    let exif: Exif = parsed.into();
+    let mut entries = BTreeMap::<String, BTreeMap<String, String>>::new();
+    let mut stored_entry_count = 0_usize;
+    let mut omitted_entry_count = 0_usize;
+    let mut truncated_value_count = 0_usize;
+
+    for entry in exif.iter() {
+        if stored_entry_count >= MAX_OWNER_METADATA_ENTRIES {
+            omitted_entry_count += 1;
+            continue;
+        }
+
+        let value = entry.value.to_string();
+        let mut chars = value.chars();
+        let bounded = chars
+            .by_ref()
+            .take(MAX_OWNER_METADATA_VALUE_CHARS)
+            .collect::<String>();
+        if chars.next().is_some() {
+            truncated_value_count += 1;
+        }
+        entries
+            .entry(format!("ifd{}", entry.ifd.as_usize()))
+            .or_default()
+            .insert(entry.tag.to_string(), bounded);
+        stored_entry_count += 1;
+    }
+
+    let gps = exif.gps_info().map(|gps| {
+        json!({
+            "latitude": gps.latitude_decimal(),
+            "longitude": gps.longitude_decimal(),
+            "altitude_meters": gps.altitude_meters(),
+            "iso6709": gps.to_iso6709(),
+        })
+    });
+
+    json!({
+        "status": "parsed",
+        "camera": {
+            "make": exif.get(ExifTag::Make).and_then(|value| value.as_str()),
+            "model": exif.get(ExifTag::Model).and_then(|value| value.as_str()),
+        },
+        "captured_at": exif
+            .get(ExifTag::DateTimeOriginal)
+            .map(ToString::to_string),
+        "gps": gps,
+        "entries": entries,
+        "entry_error_count": exif.errors().len(),
+        "omitted_entry_count": omitted_entry_count,
+        "truncated_value_count": truncated_value_count,
+        "has_embedded_track": exif.has_embedded_track(),
+    })
+}
+
+fn metadata_parse_failure(error: &nom_exif::Error) -> Value {
+    let status = match error {
+        nom_exif::Error::ExifNotFound => "absent",
+        nom_exif::Error::UnsupportedFormat => "unsupported",
+        nom_exif::Error::Malformed { .. } | nom_exif::Error::UnexpectedEof { .. } => "malformed",
+        _ => "unavailable",
+    };
+    json!({ "status": status })
+}
+
 /// Generates thumbnail and preview derivatives for an image asset.
 ///
 /// Derivative object writes can outlive a failed DB transaction, but derivatives
 /// are reproducible from originals and may be garbage-collected safely.
-pub async fn generate_derivatives(
+pub async fn generate_derivatives<I, V>(
     pool: &PgPool,
     storage: &ObjectStorage,
-    processor: &impl ImageProcessor,
+    image_processor: &I,
+    video_processor: &V,
     asset_id: Uuid,
-) -> Result<(), MediaError> {
+) -> Result<(), MediaError>
+where
+    I: ImageProcessor,
+    V: VideoProcessor,
+{
     let original = load_asset_original(pool, asset_id).await?;
-    let original_key =
-        StorageKey::new(&original.storage_key).map_err(|_| MediaError::UnsupportedMediaType)?;
-    let bytes = storage
-        .read(&original_key)
-        .await
-        .map_err(MediaError::Storage)?;
-    ensure_supported_image(&original.media_type)?;
+    let media_kind = classify_media_type(&original.media_type)?;
+    let (generated_derivatives, generator_version) = match media_kind {
+        MediaKind::Image => (
+            generate_image_derivatives(storage, image_processor, &original).await?,
+            IMAGE_GENERATOR_VERSION,
+        ),
+        MediaKind::Video => (
+            generate_video_derivatives(storage, image_processor, video_processor, &original)
+                .await?,
+            VIDEO_GENERATOR_VERSION,
+        ),
+    };
 
-    for kind in [DerivativeKind::Thumbnail, DerivativeKind::Preview] {
-        let generated = processor
-            .generate(&bytes, &original.media_type, kind)
-            .map_err(MediaError::Tool)?;
+    for (kind, generated) in generated_derivatives {
         let key = StorageKey::derivative(
             &original.blake3_hash,
             kind.as_str(),
             generated.format,
-            GENERATOR_VERSION,
+            generator_version,
         )
         .map_err(|_| MediaError::UnsupportedMediaType)?;
 
@@ -300,7 +468,7 @@ pub async fn generate_derivatives(
         .bind(asset_id)
         .bind(kind.as_str())
         .bind(generated.format)
-        .bind(GENERATOR_VERSION)
+        .bind(generator_version)
         .bind(&original.blake3_hash)
         .bind(key.as_str())
         .bind(i32::try_from(generated.width).map_err(|_| MediaError::UnsupportedMediaType)?)
@@ -314,17 +482,88 @@ pub async fn generate_derivatives(
     Ok(())
 }
 
+async fn generate_image_derivatives(
+    storage: &ObjectStorage,
+    processor: &impl ImageProcessor,
+    original: &AssetOriginal,
+) -> Result<Vec<(DerivativeKind, GeneratedDerivative)>, MediaError> {
+    ensure_bounded_still_source(original)?;
+    let bytes = storage
+        .read(&original.storage_key()?)
+        .await
+        .map_err(MediaError::Storage)?;
+    ensure_loaded_size(original, bytes.len())?;
+    let processor = processor.clone();
+    let media_type = original.media_type.clone();
+    tokio::task::spawn_blocking(move || generate_image_sizes(&processor, &bytes, &media_type))
+        .await
+        .map_err(|_| MediaError::ProcessingTaskFailed)?
+        .map_err(MediaError::Tool)
+}
+
+async fn generate_video_derivatives(
+    storage: &ObjectStorage,
+    image_processor: &impl ImageProcessor,
+    video_processor: &impl VideoProcessor,
+    original: &AssetOriginal,
+) -> Result<Vec<(DerivativeKind, GeneratedDerivative)>, MediaError> {
+    let (temp_dir, input) = stage_video_original(storage, original).await?;
+    let video_processor = video_processor.clone();
+    let poster = tokio::task::spawn_blocking(move || {
+        let _temp_dir = temp_dir;
+        video_processor.generate_poster(&input, DerivativeKind::Preview.max_edge())
+    })
+    .await
+    .map_err(|_| MediaError::ProcessingTaskFailed)?
+    .map_err(MediaError::VideoTool)?;
+    let image_processor = image_processor.clone();
+    tokio::task::spawn_blocking(move || {
+        generate_image_sizes(&image_processor, &poster, "image/webp")
+    })
+    .await
+    .map_err(|_| MediaError::ProcessingTaskFailed)?
+    .map_err(MediaError::Tool)
+}
+
+fn generate_image_sizes(
+    processor: &impl ImageProcessor,
+    bytes: &[u8],
+    media_type: &str,
+) -> Result<Vec<(DerivativeKind, GeneratedDerivative)>, MediaToolError> {
+    [DerivativeKind::Thumbnail, DerivativeKind::Preview]
+        .into_iter()
+        .map(|kind| {
+            processor
+                .generate(bytes, media_type, kind)
+                .map(|generated| (kind, generated))
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 struct AssetOriginal {
     blake3_hash: String,
     storage_key: String,
     media_type: String,
+    size_bytes: i64,
+}
+
+impl AssetOriginal {
+    fn storage_key(&self) -> Result<StorageKey, MediaError> {
+        StorageKey::new(&self.storage_key).map_err(|_| MediaError::UnsupportedMediaType)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaKind {
+    Image,
+    Video,
 }
 
 async fn load_asset_original(pool: &PgPool, asset_id: Uuid) -> Result<AssetOriginal, MediaError> {
-    sqlx::query_as::<_, (String, String, String)>(
+    sqlx::query_as::<_, (String, String, String, i64)>(
         r#"
-        SELECT o.blake3_hash, o.storage_key, o.media_type
+        SELECT o.blake3_hash, o.storage_key, o.media_type, o.size_bytes
         FROM assets a
         JOIN originals o ON o.id = a.original_id
         WHERE a.id = $1
@@ -334,11 +573,14 @@ async fn load_asset_original(pool: &PgPool, asset_id: Uuid) -> Result<AssetOrigi
     .fetch_optional(pool)
     .await
     .map_err(MediaError::Database)?
-    .map(|(blake3_hash, storage_key, media_type)| AssetOriginal {
-        blake3_hash,
-        storage_key,
-        media_type,
-    })
+    .map(
+        |(blake3_hash, storage_key, media_type, size_bytes)| AssetOriginal {
+            blake3_hash,
+            storage_key,
+            media_type,
+            size_bytes,
+        },
+    )
     .ok_or(MediaError::AssetNotFound)
 }
 
@@ -350,11 +592,53 @@ fn asset_id_from_payload(payload: &Value) -> Result<Uuid, MediaError> {
         .ok_or(MediaError::InvalidJobPayload)
 }
 
-fn ensure_supported_image(media_type: &str) -> Result<(), MediaError> {
+fn classify_media_type(media_type: &str) -> Result<MediaKind, MediaError> {
     match media_type {
-        "image/jpeg" | "image/png" | "image/gif" | "image/webp" => Ok(()),
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" => Ok(MediaKind::Image),
+        "video/mp4" | "video/quicktime" | "video/webm" | "video/x-matroska" => Ok(MediaKind::Video),
         _ => Err(MediaError::UnsupportedMediaType),
     }
+}
+
+fn ensure_bounded_still_source(original: &AssetOriginal) -> Result<(), MediaError> {
+    if original.size_bytes > MAX_STILL_SOURCE_BYTES {
+        return Err(MediaError::SourceTooLarge);
+    }
+    Ok(())
+}
+
+async fn stage_video_original(
+    storage: &ObjectStorage,
+    original: &AssetOriginal,
+) -> Result<(tempfile::TempDir, PathBuf), MediaError> {
+    if original.size_bytes > MAX_VIDEO_SOURCE_BYTES {
+        return Err(MediaError::SourceTooLarge);
+    }
+    let temp_dir = tempfile::Builder::new()
+        .prefix("mirror-media-")
+        .tempdir()
+        .map_err(MediaError::TemporaryStorage)?;
+    let input = temp_dir.path().join("original");
+    let copied = storage
+        .copy_to_path_bounded(
+            &original.storage_key()?,
+            &input,
+            MAX_VIDEO_SOURCE_BYTES as u64,
+        )
+        .await
+        .map_err(MediaError::Storage)?;
+    if copied != u64::try_from(original.size_bytes).map_err(|_| MediaError::OriginalSizeMismatch)? {
+        return Err(MediaError::OriginalSizeMismatch);
+    }
+    Ok((temp_dir, input))
+}
+
+fn ensure_loaded_size(original: &AssetOriginal, loaded: usize) -> Result<(), MediaError> {
+    let loaded = i64::try_from(loaded).map_err(|_| MediaError::OriginalSizeMismatch)?;
+    if loaded != original.size_bytes {
+        return Err(MediaError::OriginalSizeMismatch);
+    }
+    Ok(())
 }
 
 fn decode_image(bytes: &[u8], media_type: &str) -> Result<image::DynamicImage, MediaToolError> {
@@ -365,5 +649,12 @@ fn decode_image(bytes: &[u8], media_type: &str) -> Result<image::DynamicImage, M
         "image/webp" => ImageFormat::WebP,
         _ => return Err(MediaToolError::UnsupportedMediaType),
     };
-    image::load_from_memory_with_format(bytes, format).map_err(MediaToolError::Image)
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_IMAGE_ALLOC_BYTES);
+
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    reader.limits(limits);
+    reader.decode().map_err(MediaToolError::Image)
 }

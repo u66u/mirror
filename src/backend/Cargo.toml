@@ -10,23 +10,23 @@ actix-web = "4.9.0"
 argon2 = "0.5.3"
 base64 = "0.22.1"
 blake3 = "1.5.5"
+futures-util = "0.3.31"
 getrandom = "0.2.15"
 image = { version = "0.25.9", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+nom-exif = "=3.6.0"
 opendal = { version = "0.55.0", default-features = false, features = ["services-fs"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.8"
 sqlx = { version = "0.8.3", features = ["runtime-tokio-rustls", "postgres", "uuid", "json", "migrate", "time"] }
 subtle = "2.6.1"
+tempfile = "3.14.0"
 time = { version = "0.3.37", features = ["serde"] }
 tracing = "0.1.41"
 tracing-actix-web = "0.7.15"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+tokio = { version = "1.43.0", features = ["fs", "io-util", "macros", "rt-multi-thread", "time"] }
 uuid = { version = "1.12.0", features = ["serde", "v7"] }
-
-[dev-dependencies]
-tempfile = "3.14.0"
-tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

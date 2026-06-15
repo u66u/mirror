@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 pub use device_tokens::{
     AuthenticatedDeviceToken, DeviceTokenCreateInput, DeviceTokenCreateOutput, DeviceTokenError,
-    authenticate_device_token, create_device_token, revoke_device_token,
+    authenticate_device_token, create_device_token, revoke_device_token, revoke_owner_device_token,
 };
 pub use password::{PasswordError, hash_password, verify_password};
 pub use sessions::{

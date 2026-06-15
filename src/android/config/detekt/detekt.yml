@@ -1,0 +1,10 @@
+naming:
+  FunctionNaming:
+    ignoreAnnotated:
+      - 'androidx.compose.runtime.Composable'
+
+style:
+  # T105: Colors, dimensions, protocol status codes, crypto sizes, and IP
+  # ranges are clearer as local literals or named constants than wrappers.
+  MagicNumber:
+    active: false

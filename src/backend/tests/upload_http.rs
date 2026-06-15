@@ -1,15 +1,119 @@
 use actix_web::{App, cookie::Cookie, http::StatusCode, test, web};
 use mirror_backend::{
-    auth::{SessionCreateInput, SetupState, create_session},
+    auth::{
+        DeviceTokenCreateInput, SessionCreateInput, SetupState, create_device_token, create_session,
+    },
     config::Config,
     http,
     state::AppState,
-    uploads::{CreateUploadInput, create_upload, put_part},
+    storage::StorageKey,
+    uploads::{CreateUploadInput, UPLOAD_PART_SIZE_BYTES, create_upload, put_part},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 mod support;
 use support::{TestResult, asset_count, job_count, jpeg_bytes, storage_test_deps};
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn upload_part_route_accepts_four_mib_and_rejects_larger_without_artifacts() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let device = create_device_token(
+        &deps.pool,
+        DeviceTokenCreateInput {
+            owner_id: 1,
+            name: "upload boundary test".to_owned(),
+            created_by_session_id: None,
+            user_agent: Some("upload-http-test".to_owned()),
+        },
+    )
+    .await?;
+    let authorization = format!("Bearer {}", device.token.expose());
+
+    let mut exact_bytes = vec![0_u8; UPLOAD_PART_SIZE_BYTES];
+    exact_bytes[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+    let exact_upload = create_upload(
+        &deps.pool,
+        CreateUploadInput {
+            owner_id: 1,
+            original_filename: "exact-part.jpg".to_owned(),
+            expected_size: i64::try_from(exact_bytes.len())?,
+            expected_blake3: blake3::hash(&exact_bytes).to_hex().to_string(),
+            media_type: "image/jpeg".to_owned(),
+            client_upload_key: None,
+        },
+    )
+    .await?;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(deps.pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(deps.storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+
+    let exact_request = test::TestRequest::put()
+        .uri(&format!("/uploads/{}/parts/0", exact_upload.upload_id))
+        .insert_header(("authorization", authorization.as_str()))
+        .set_payload(exact_bytes)
+        .to_request();
+    let exact_response = test::call_service(&app, exact_request).await;
+    assert_eq!(exact_response.status(), StatusCode::NO_CONTENT);
+
+    let exact_size: i64 =
+        sqlx::query_scalar("SELECT size_bytes FROM upload_parts WHERE upload_id = $1")
+            .bind(exact_upload.upload_id)
+            .fetch_one(&deps.pool)
+            .await?;
+    assert_eq!(exact_size, i64::try_from(UPLOAD_PART_SIZE_BYTES)?);
+    let exact_key = StorageKey::staging_upload(exact_upload.upload_id, "part-00000000")?;
+    assert!(deps.storage.exists(&exact_key).await?);
+
+    let oversized_bytes = vec![0_u8; UPLOAD_PART_SIZE_BYTES + 1];
+    let oversized_upload = create_upload(
+        &deps.pool,
+        CreateUploadInput {
+            owner_id: 1,
+            original_filename: "oversized-part.jpg".to_owned(),
+            expected_size: i64::try_from(oversized_bytes.len())?,
+            expected_blake3: blake3::hash(&oversized_bytes).to_hex().to_string(),
+            media_type: "image/jpeg".to_owned(),
+            client_upload_key: None,
+        },
+    )
+    .await?;
+    let oversized_request = test::TestRequest::put()
+        .uri(&format!("/uploads/{}/parts/0", oversized_upload.upload_id))
+        .insert_header(("authorization", authorization))
+        .set_payload(oversized_bytes)
+        .to_request();
+    let oversized_response = test::call_service(&app, oversized_request).await;
+    assert_eq!(oversized_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let oversized_body: Value = test::read_body_json(oversized_response).await;
+    assert_eq!(
+        oversized_body,
+        json!({
+            "error": "upload_part_too_large",
+            "message": "upload part exceeds the 4 MiB limit"
+        })
+    );
+
+    let oversized_part_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM upload_parts WHERE upload_id = $1")
+            .bind(oversized_upload.upload_id)
+            .fetch_one(&deps.pool)
+            .await?;
+    assert_eq!(oversized_part_count, 0);
+    let oversized_key = StorageKey::staging_upload(oversized_upload.upload_id, "part-00000000")?;
+    assert!(!deps.storage.exists(&oversized_key).await?);
+
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
@@ -33,6 +137,7 @@ async fn complete_upload_route_promotes_asset_and_enqueues_jobs() -> TestResult 
             expected_size: i64::try_from(bytes.len())?,
             expected_blake3: blake3::hash(&bytes).to_hex().to_string(),
             media_type: "image/jpeg".to_owned(),
+            client_upload_key: None,
         },
     )
     .await?;

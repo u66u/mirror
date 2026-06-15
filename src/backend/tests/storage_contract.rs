@@ -34,3 +34,21 @@ async fn local_storage_contract_put_get_list_delete_and_promote() -> TestResult 
 
     Ok(())
 }
+
+#[tokio::test]
+async fn bounded_storage_copy_rejects_oversize_without_partial_file() -> TestResult {
+    let temp_dir = TempDir::new()?;
+    let storage = ObjectStorage::local(temp_dir.path().join("objects"))?;
+    let key = StorageKey::staging_upload(Uuid::now_v7(), "part-0001")?;
+    let destination = temp_dir.path().join("staged-media");
+    storage.write(&key, b"0123456789".to_vec()).await?;
+
+    let result = storage.copy_to_path_bounded(&key, &destination, 9).await;
+
+    assert!(matches!(
+        result,
+        Err(mirror_backend::storage::StorageError::ObjectTooLarge)
+    ));
+    assert!(!destination.exists());
+    Ok(())
+}

@@ -326,6 +326,9 @@ Media tooling:
 
 - Use Rust `image` for v1 still-image thumbnails/previews. Keep the processor
   behind a trait so libvips can replace it later if profiling shows need.
+- Emit WebP derivatives only in v1. Do not add AVIF negotiation, duplicate
+  derivative storage, or a second codec matrix until measured size savings
+  justify that complexity.
 - Use `ffmpeg`/`ffprobe` for video inspection, posters, and optional playback
   proxies.
 - Prefer Rust metadata parsing such as `nom-exif` for owner metadata. Keep an
@@ -377,6 +380,9 @@ Upload protocol:
 
 - Use a first-party resumable chunk protocol.
 - `POST /uploads` creates an upload session with expected file metadata.
+- Clients persist a per-file `client_upload_key` before creation. The backend
+  scopes it to the owner, returns the existing matching session on retry, and
+  rejects reuse with different metadata.
 - `PUT /uploads/{id}/parts/{part_index}` writes staged parts.
 - `GET /uploads/{id}` returns committed parts and current status for resume.
 - `POST /uploads/{id}/complete` verifies size/hash, promotes the original, and
@@ -553,9 +559,24 @@ Folder backup:
 
 - Default to Camera.
 - Let owner add folders such as Screenshots, Downloads, or messaging app media.
+- The T203 slice scans still images only. Add video scanning only after MP4/MOV
+  upload validation and processing are complete.
 - Wi-Fi-only default.
 - Charging-only and cellular options may be settings, not required defaults.
 - Uploads are verified by the server before marked backed up.
+- Room persists media fingerprint, BLAKE3, client upload key, server upload ID,
+  committed state, and verified asset ID. A changed fingerprint starts a new
+  upload identity.
+- Queue claims, counts, and final verification must join current folder
+  selection and availability. Deselection cancels scheduled work and the
+  coordinator rechecks eligibility between upload parts.
+- Durable backup rows are fenced by a remote generation derived from the
+  normalized server URL. Switching URLs clears media progress; stale workers
+  cannot write into the new generation. C018 records the same-URL replacement
+  limitation.
+- WorkManager resets interrupted local `uploading` rows to `pending`, queries
+  server committed parts, and sends deterministic 4 MiB parts. One execution
+  processes at most four media items, then appends continuation work.
 - Request broad photo/video access because backup is core. If Android grants
   partial media access, treat backup as degraded/partial and make that visible.
 - Do not request all-files access in v1.
@@ -618,6 +639,12 @@ Authentication:
   only CSRF control.
 - Revocable Android device tokens.
 - Store only hashed device tokens in Postgres.
+- Android login exchanges owner password plus device name for one raw token
+  returned once. Android stores it using a non-exportable Keystore key.
+- Android API requests use `Authorization: Bearer`; CSRF applies only to
+  browser cookie sessions.
+- A device token may revoke itself. Browser session management may revoke any
+  owner device token after CSRF validation.
 
 Rate limiting:
 

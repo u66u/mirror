@@ -10,6 +10,10 @@ use uuid::Uuid;
 
 use crate::storage::{ObjectStorage, StorageKey};
 
+/// Fixed byte length for every non-final upload part.
+pub const UPLOAD_PART_SIZE_BYTES: usize = 4 * 1024 * 1024;
+const UPLOAD_PART_SIZE_I64: i64 = 4 * 1024 * 1024;
+
 /// Upload session status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +49,8 @@ pub struct CreateUploadInput {
     pub expected_blake3: String,
     /// Declared supported media type.
     pub media_type: String,
+    /// Stable client key making upload creation safe to retry.
+    pub client_upload_key: Option<Uuid>,
 }
 
 /// Upload session view.
@@ -69,6 +75,10 @@ pub struct UploadSessionView {
 pub enum UploadError {
     /// Input violates upload policy.
     InvalidInput,
+    /// Part index is outside the range derived from expected upload size.
+    PartOutOfRange,
+    /// Part byte length does not match its deterministic frame.
+    PartLengthMismatch,
     /// Upload session was not found for owner.
     NotFound,
     /// Upload is not open for mutation.
@@ -85,6 +95,8 @@ impl std::fmt::Display for UploadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             Self::InvalidInput => "invalid upload input",
+            Self::PartOutOfRange => "upload part index is out of range",
+            Self::PartLengthMismatch => "upload part has the wrong length",
             Self::NotFound => "upload not found",
             Self::NotOpen => "upload is not open",
             Self::VerificationFailed => "upload verification failed",
@@ -103,9 +115,8 @@ pub async fn create_upload(
     input: CreateUploadInput,
 ) -> Result<UploadSessionView, UploadError> {
     validate_create_input(&input)?;
-    let upload_id = Uuid::now_v7();
-
-    sqlx::query(
+    let proposed_upload_id = Uuid::now_v7();
+    let inserted_upload_id = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO upload_sessions (
             id,
@@ -113,29 +124,59 @@ pub async fn create_upload(
             original_filename,
             expected_size,
             expected_blake3,
-            media_type
+            media_type,
+            client_upload_key
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (owner_id, client_upload_key)
+        WHERE client_upload_key IS NOT NULL
+        DO NOTHING
+        RETURNING id
         "#,
     )
-    .bind(upload_id)
+    .bind(proposed_upload_id)
     .bind(input.owner_id)
-    .bind(input.original_filename)
+    .bind(&input.original_filename)
     .bind(input.expected_size)
-    .bind(input.expected_blake3.clone())
-    .bind(input.media_type.clone())
-    .execute(pool)
+    .bind(&input.expected_blake3)
+    .bind(&input.media_type)
+    .bind(input.client_upload_key)
+    .fetch_optional(pool)
     .await
     .map_err(UploadError::Database)?;
 
-    Ok(UploadSessionView {
-        upload_id,
-        status: UploadStatus::Open,
-        expected_size: input.expected_size,
-        expected_blake3: input.expected_blake3,
-        media_type: input.media_type,
-        committed_parts: Vec::new(),
-    })
+    let upload_id = if let Some(upload_id) = inserted_upload_id {
+        upload_id
+    } else {
+        let Some(client_upload_key) = input.client_upload_key else {
+            return Err(UploadError::InvalidInput);
+        };
+        let existing = sqlx::query_as::<_, (Uuid, String, i64, String, String)>(
+            r#"
+            SELECT id, original_filename, expected_size, expected_blake3, media_type
+            FROM upload_sessions
+            WHERE owner_id = $1
+              AND client_upload_key = $2
+            "#,
+        )
+        .bind(input.owner_id)
+        .bind(client_upload_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(UploadError::Database)?
+        .ok_or(UploadError::InvalidInput)?;
+
+        if existing.1 != input.original_filename
+            || existing.2 != input.expected_size
+            || existing.3 != input.expected_blake3
+            || existing.4 != input.media_type
+        {
+            return Err(UploadError::InvalidInput);
+        }
+        existing.0
+    };
+
+    get_upload(pool, input.owner_id, upload_id).await
 }
 
 /// Returns upload status and committed part indexes for resume.
@@ -165,18 +206,20 @@ pub async fn put_part(
     part_index: i32,
     bytes: Vec<u8>,
 ) -> Result<(), UploadError> {
-    if part_index < 0 || bytes.is_empty() {
-        return Err(UploadError::InvalidInput);
-    }
     let session = load_upload(pool, owner_id, upload_id).await?;
     if session.status != UploadStatus::Open {
         return Err(UploadError::NotOpen);
+    }
+    let expected_size =
+        expected_part_size(session.expected_size, part_index).ok_or(UploadError::PartOutOfRange)?;
+    let size = i64::try_from(bytes.len()).map_err(|_| UploadError::PartLengthMismatch)?;
+    if size != expected_size {
+        return Err(UploadError::PartLengthMismatch);
     }
 
     let key = StorageKey::staging_upload(upload_id, &format!("part-{part_index:08}"))
         .map_err(|_| UploadError::InvalidInput)?;
     let hash = blake3::hash(&bytes).to_hex().to_string();
-    let size = i64::try_from(bytes.len()).map_err(|_| UploadError::InvalidInput)?;
 
     storage
         .write(&key, bytes)
@@ -223,6 +266,23 @@ pub async fn complete_upload(
     }
 
     let parts = part_rows(pool, upload_id).await?;
+    let expected_part_count =
+        expected_part_count(session.expected_size).ok_or(UploadError::VerificationFailed)?;
+    if i64::try_from(parts.len()).map_err(|_| UploadError::VerificationFailed)?
+        != expected_part_count
+    {
+        return Err(UploadError::VerificationFailed);
+    }
+    for (expected_part_index, part) in parts.iter().enumerate() {
+        let expected_part_index =
+            i32::try_from(expected_part_index).map_err(|_| UploadError::VerificationFailed)?;
+        let expected_size = expected_part_size(session.expected_size, expected_part_index)
+            .ok_or(UploadError::VerificationFailed)?;
+        if part.part_index != expected_part_index || part.size_bytes != expected_size {
+            return Err(UploadError::VerificationFailed);
+        }
+    }
+
     let mut hasher = Hasher::new();
     let mut total_size: i64 = 0;
     let mut first_bytes = Vec::new();
@@ -313,6 +373,7 @@ struct UploadRow {
 
 #[derive(Debug)]
 struct PartRow {
+    part_index: i32,
     size_bytes: i64,
     storage_key: String,
     blake3_hash: String,
@@ -362,9 +423,9 @@ async fn committed_parts(pool: &PgPool, upload_id: Uuid) -> Result<Vec<i32>, Upl
 }
 
 async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, UploadError> {
-    let rows = sqlx::query_as::<_, (i64, String, String)>(
+    let rows = sqlx::query_as::<_, (i32, i64, String, String)>(
         r#"
-        SELECT size_bytes, storage_key, blake3_hash
+        SELECT part_index, size_bytes, storage_key, blake3_hash
         FROM upload_parts
         WHERE upload_id = $1
         ORDER BY part_index
@@ -377,11 +438,14 @@ async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, Uploa
 
     Ok(rows
         .into_iter()
-        .map(|(size_bytes, storage_key, blake3_hash)| PartRow {
-            size_bytes,
-            storage_key,
-            blake3_hash,
-        })
+        .map(
+            |(part_index, size_bytes, storage_key, blake3_hash)| PartRow {
+                part_index,
+                size_bytes,
+                storage_key,
+                blake3_hash,
+            },
+        )
         .collect())
 }
 
@@ -389,12 +453,36 @@ fn validate_create_input(input: &CreateUploadInput) -> Result<(), UploadError> {
     if input.original_filename.trim().is_empty()
         || input.original_filename.chars().count() > 255
         || input.expected_size <= 0
+        || expected_part_count(input.expected_size)
+            .is_none_or(|count| count > i64::from(i32::MAX) + 1)
         || !is_blake3_hex(&input.expected_blake3)
         || !is_supported_media_type(&input.media_type)
     {
         return Err(UploadError::InvalidInput);
     }
     Ok(())
+}
+
+fn expected_part_count(expected_size: i64) -> Option<i64> {
+    (expected_size > 0).then(|| ((expected_size - 1) / UPLOAD_PART_SIZE_I64) + 1)
+}
+
+fn expected_part_size(expected_size: i64, part_index: i32) -> Option<i64> {
+    let part_count = expected_part_count(expected_size)?;
+    let part_index = i64::from(part_index);
+    if part_index < 0 || part_index >= part_count {
+        return None;
+    }
+    if part_index + 1 < part_count {
+        return Some(UPLOAD_PART_SIZE_I64);
+    }
+
+    let remainder = expected_size % UPLOAD_PART_SIZE_I64;
+    Some(if remainder == 0 {
+        UPLOAD_PART_SIZE_I64
+    } else {
+        remainder
+    })
 }
 
 fn parse_status(status: &str) -> Result<UploadStatus, UploadError> {

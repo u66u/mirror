@@ -23,8 +23,13 @@ async fn promotion_deduplicates_originals_but_keeps_distinct_assets() -> TestRes
     let second = promote_verified_upload(&deps.pool, &deps.storage, 1, second_upload).await?;
 
     assert_eq!(first, first_again);
-    assert_eq!(first.original_id, second.original_id);
     assert_ne!(first.asset_id, second.asset_id);
+    let returned_id_is_public =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM assets WHERE public_id = $1)")
+            .bind(first.asset_id)
+            .fetch_one(&deps.pool)
+            .await?;
+    assert!(returned_id_is_public);
     assert_eq!(original_count(&deps.pool).await?, 1);
     assert_eq!(asset_count(&deps.pool).await?, 2);
     assert_eq!(job_count(&deps.pool).await?, 4);
@@ -45,6 +50,7 @@ async fn unverified_upload_cannot_create_assets_or_jobs() -> TestResult {
             expected_size: i64::try_from(bytes.len())?,
             expected_blake3: blake3::hash(&bytes).to_hex().to_string(),
             media_type: "image/jpeg".to_owned(),
+            client_upload_key: None,
         },
     )
     .await?;

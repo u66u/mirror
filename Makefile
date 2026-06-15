@@ -1,4 +1,9 @@
-.PHONY: fmt fmt-check check clippy test check-duplicate-fns db-up db-down test-db gate-backend web-typecheck web-lint web-test web-build gate-web gate
+.PHONY: fmt fmt-check check clippy test check-duplicate-fns db-up db-down test-db gate-backend web-typecheck web-lint web-test web-e2e web-build gate-web android-format android-static android-test android-lint android-build android-device-test gate-android gate
+
+ANDROID_JAVA_HOME ?= /usr/lib/jvm/java-17-openjdk
+ANDROID_SDK_ROOT ?= $(HOME)/Android/Sdk
+ANDROID_GRADLE_USER_HOME ?= $(CURDIR)/.gradle
+ANDROID_GRADLE = JAVA_HOME=$(ANDROID_JAVA_HOME) ANDROID_SDK_ROOT=$(ANDROID_SDK_ROOT) GRADLE_USER_HOME=$(ANDROID_GRADLE_USER_HOME) ./src/android/gradlew -p src/android
 
 fmt:
 	cargo fmt --all
@@ -39,9 +44,32 @@ web-lint:
 web-test:
 	npm --prefix src/web test
 
+web-e2e:
+	npm --prefix src/web run test:e2e
+
 web-build:
 	npm --prefix src/web run build
 
-gate-web: web-typecheck web-lint web-test web-build
+gate-web: web-typecheck web-lint web-test web-e2e web-build
 
-gate: gate-backend gate-web
+android-format:
+	$(ANDROID_GRADLE) ktlintFormat
+
+android-static:
+	$(ANDROID_GRADLE) detekt ktlintCheck
+
+android-test:
+	$(ANDROID_GRADLE) test
+
+android-lint:
+	$(ANDROID_GRADLE) lint
+
+android-build:
+	$(ANDROID_GRADLE) assembleDebug assembleDebugAndroidTest
+
+android-device-test:
+	$(ANDROID_GRADLE) connectedDebugAndroidTest
+
+gate-android: android-static android-test android-lint android-build
+
+gate: gate-backend gate-web gate-android

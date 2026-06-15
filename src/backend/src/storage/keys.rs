@@ -10,6 +10,11 @@ use uuid::Uuid;
 pub struct StorageKey(String);
 
 impl StorageKey {
+    /// Builds the prefix containing all immutable BLAKE3 originals.
+    pub fn originals_blake3_prefix() -> Self {
+        Self("originals/blake3/".to_owned())
+    }
+
     /// Builds a staging key for an upload object.
     pub fn staging_upload(upload_id: Uuid, object_name: &str) -> Result<Self, StorageKeyError> {
         Self::new(format!("staging/uploads/{upload_id}/{object_name}"))
@@ -62,6 +67,16 @@ impl StorageKey {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Returns whether this is a canonical content-addressed original key.
+    #[must_use]
+    pub fn is_original_blake3_object(&self) -> bool {
+        self.0
+            .rsplit('/')
+            .next()
+            .and_then(|hash| Self::original_blake3(hash).ok())
+            .is_some_and(|canonical| canonical == *self)
     }
 }
 

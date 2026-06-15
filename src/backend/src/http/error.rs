@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{
     assets::{AssetReadError, ListAssetsError, PromoteError},
-    auth::{OwnerLoginError, OwnerSetupError},
+    auth::{DeviceTokenError, OwnerLoginError, OwnerSetupError},
     uploads::UploadError,
 };
 
@@ -26,6 +26,8 @@ pub struct ErrorBody {
 pub enum ApiError {
     /// Request violates local validation.
     BadRequest(&'static str, &'static str),
+    /// Request body exceeds a route-local size limit.
+    PayloadTooLarge(&'static str, &'static str),
     /// Authentication or setup token failed.
     Unauthorized(&'static str, &'static str),
     /// Requested state transition conflicts with persisted state.
@@ -42,6 +44,7 @@ impl std::fmt::Display for ApiError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             Self::BadRequest(_, message)
+            | Self::PayloadTooLarge(_, message)
             | Self::Unauthorized(_, message)
             | Self::Conflict(_, message)
             | Self::NotFound(_, message)
@@ -56,6 +59,7 @@ impl ResponseError for ApiError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::BadRequest(_, _) => StatusCode::BAD_REQUEST,
+            Self::PayloadTooLarge(_, _) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unauthorized(_, _) => StatusCode::UNAUTHORIZED,
             Self::Conflict(_, _) => StatusCode::CONFLICT,
             Self::NotFound(_, _) => StatusCode::NOT_FOUND,
@@ -67,6 +71,7 @@ impl ResponseError for ApiError {
     fn error_response(&self) -> HttpResponse {
         let (error, message) = match self {
             Self::BadRequest(error, message)
+            | Self::PayloadTooLarge(error, message)
             | Self::Unauthorized(error, message)
             | Self::Conflict(error, message)
             | Self::NotFound(error, message)
@@ -112,10 +117,29 @@ impl From<OwnerLoginError> for ApiError {
     }
 }
 
+impl From<DeviceTokenError> for ApiError {
+    fn from(error: DeviceTokenError) -> Self {
+        match error {
+            DeviceTokenError::InvalidName => {
+                Self::BadRequest("invalid_device_name", "invalid device name")
+            }
+            DeviceTokenError::TokenGeneration | DeviceTokenError::Database(_) => Self::Internal,
+        }
+    }
+}
+
 impl From<UploadError> for ApiError {
     fn from(error: UploadError) -> Self {
         match error {
             UploadError::InvalidInput => Self::BadRequest("invalid_upload", "invalid upload"),
+            UploadError::PartOutOfRange => Self::BadRequest(
+                "upload_part_out_of_range",
+                "upload part index is out of range",
+            ),
+            UploadError::PartLengthMismatch => Self::BadRequest(
+                "upload_part_wrong_length",
+                "upload part has the wrong length",
+            ),
             UploadError::NotFound => Self::BadRequest("upload_not_found", "upload not found"),
             UploadError::NotOpen => Self::Conflict("upload_not_open", "upload is not open"),
             UploadError::VerificationFailed => {
