@@ -175,7 +175,7 @@ pub struct ResticBackupOutput {
 #[derive(Debug, Error)]
 pub enum BackupError {
     /// Storage operation failed.
-    #[error("backup storage error")]
+    #[error("backup storage error: {0}")]
     Storage(#[from] StorageError),
     /// Storage listed a key that violates key invariants.
     #[error("backup storage key is invalid")]
@@ -187,17 +187,19 @@ pub enum BackupError {
     #[error("backup snapshot ID is invalid")]
     InvalidSnapshotId,
     /// PostgreSQL URL cannot be converted to libpq child-process env vars.
+    #[error("backup database URL is invalid")]
     InvalidDatabaseUrl,
     /// Database failed.
-    #[error("backup database error")]
+    #[error("backup database error: {0}")]
     Database(#[from] sqlx::Error),
     /// Restic process could not start.
-    #[error("backup command error")]
+    #[error("backup command error: {0}")]
     Command(std::io::Error),
     /// pg_dump returned a non-zero status.
     #[error("postgres dump failed")]
     PgDumpFailed,
     /// pg_restore returned a non-zero status.
+    #[error("postgres restore failed")]
     PgRestoreFailed,
     /// Restic returned a non-zero status.
     #[error("backup command failed")]

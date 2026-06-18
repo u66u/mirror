@@ -13,7 +13,7 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, types::Json};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
