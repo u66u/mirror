@@ -8,8 +8,9 @@ use std::time::Duration;
 use time::OffsetDateTime;
 
 use crate::{
-    jobs::{self, JobError},
+    jobs::{self, JobError, JobKind},
     media::{self, ImageProcessor},
+    ml::{self, ImageTextEmbedder},
     storage::ObjectStorage,
     video::VideoProcessor,
 };
@@ -109,6 +110,10 @@ impl std::error::Error for WorkerPolicyError {}
 pub enum WorkerError {
     /// Queue operation failed.
     Jobs(JobError),
+    /// Media handler failed.
+    Media(media::MediaError),
+    /// ML handler failed.
+    Ml(ml::MlError),
     /// This worker no longer owns the leased job.
     LeaseLost,
     /// Timing policy cannot be applied.
@@ -119,6 +124,8 @@ impl std::fmt::Display for WorkerError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Jobs(_) => formatter.write_str("worker queue error"),
+            Self::Media(_) => formatter.write_str("worker media error"),
+            Self::Ml(_) => formatter.write_str("worker ml error"),
             Self::LeaseLost => formatter.write_str("worker job lease lost"),
             Self::Policy(_) => formatter.write_str("invalid worker timing policy"),
         }
@@ -127,33 +134,62 @@ impl std::fmt::Display for WorkerError {
 
 impl std::error::Error for WorkerError {}
 
+/// Handler dependencies for one worker process.
+pub struct WorkerHandlers<'a, I, V, E> {
+    /// Object storage used by media and ML jobs.
+    pub storage: &'a ObjectStorage,
+    /// Still-image media processor.
+    pub image_processor: &'a I,
+    /// Video media processor.
+    pub video_processor: &'a V,
+    /// Semantic image/text embedder.
+    pub embedder: &'a E,
+    /// Job kinds this worker is allowed to lease.
+    pub job_kinds: &'a [JobKind],
+}
+
 /// Runs at most one ready job.
 ///
 /// Handler failures are recorded in the job row and do not return `Err`; only
 /// queue transition failures do.
-pub async fn run_once<I, V>(
+pub async fn run_once<I, V, E>(
     pool: &sqlx::PgPool,
-    storage: &ObjectStorage,
-    image_processor: &I,
-    video_processor: &V,
+    handlers: WorkerHandlers<'_, I, V, E>,
     worker_id: &str,
     policy: WorkerPolicy,
 ) -> Result<WorkerStep, WorkerError>
 where
     I: ImageProcessor,
     V: VideoProcessor,
+    E: ImageTextEmbedder,
 {
     let lease_timeout = time::Duration::try_from(policy.lease_timeout)
         .map_err(|_| WorkerError::Policy(WorkerPolicyError::LeaseTimeoutOutOfRange))?;
     let lease_expired_before = OffsetDateTime::now_utc() - lease_timeout;
-    let Some(job) = jobs::lease_next(pool, worker_id, lease_expired_before)
-        .await
-        .map_err(WorkerError::Jobs)?
+    let Some(job) =
+        jobs::lease_next_for_kinds(pool, worker_id, lease_expired_before, handlers.job_kinds)
+            .await
+            .map_err(WorkerError::Jobs)?
     else {
         return Ok(WorkerStep::Idle);
     };
 
-    let handler = media::run_media_job(pool, storage, image_processor, video_processor, &job);
+    let handler = async {
+        match job.kind {
+            JobKind::ExtractMetadata | JobKind::GenerateDerivatives => media::run_media_job(
+                pool,
+                handlers.storage,
+                handlers.image_processor,
+                handlers.video_processor,
+                &job,
+            )
+            .await
+            .map_err(WorkerError::Media),
+            JobKind::EmbedAsset => ml::run_ml_job(pool, handlers.storage, handlers.embedder, &job)
+                .await
+                .map_err(WorkerError::Ml),
+        }
+    };
     tokio::pin!(handler);
     let deadline = tokio::time::sleep(policy.job_timeout);
     tokio::pin!(deadline);

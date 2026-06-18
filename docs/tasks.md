@@ -1158,17 +1158,29 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Added durable storage backup manifest selection that includes only
       content-addressed originals and generated derivatives, excluding staging,
       temp, logs, and scratch by construction.
+    - Added `pg_dump -Fc` command planning with the database URL supplied
+      through `PGDATABASE` instead of argv.
     - Added restic backup command planning for explicit durable paths plus a DB
       dump path, with repository/password supplied through environment variables
       rather than argv.
     - Added `maintenance --backup-plan PG_DUMP_PATH` dry-run output for the
-      restic program, args, and required secret environment variables.
+      pg_dump/restic programs, args, and required secret environment variables.
     - Added `maintenance --run-backup PG_DUMP_PATH --repository-hint HINT` to
-      create a `backup_runs` row, execute restic, persist the parsed snapshot
-      ID on success, and persist failure status on command failure.
+      create a `backup_runs` row, run pg_dump, execute restic, persist the
+      parsed snapshot ID on success, and persist failure status on pg_dump or
+      restic command failure.
+    - Added restic restore and `pg_restore` command planning for restore drills,
+      keeping repository/password and destination DB URL in environment
+      variables instead of argv.
+    - Added `maintenance --restore-plan SNAPSHOT_ID RESTORE_TARGET
+      PG_DUMP_PATH` dry-run output for the restic restore and pg_restore
+      programs, args, and required secret environment variables.
     - Added `maintenance --restore-check BACKUP_RUN_ID` to scan the currently
       configured restored Postgres/storage pair, record restore-check status,
       and fail the process when originals are missing or orphaned.
+    - Backup success/failure and restore-check success/failure status
+      transitions insert system audit events in the same transaction as the
+      `backup_runs` update.
   - Commands:
     - `make gate-backend` -> passed.
     - `make test-db` -> passed.
@@ -1188,18 +1200,26 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       content type/length headers and trashed originals return `404`.
     - Export archive integration test verifies the streamed tar contains the
       JSON manifest and active original bytes while excluding trashed assets.
-    - Backup manifest test verifies durable originals/derivatives are selected
-      and staged upload objects are excluded.
+    - Backup manifest test verifies durable originals/derivatives/model-pack
+      files are selected and staged upload objects are excluded.
+    - Postgres dump plan tests verify custom-format dump args, secret-free
+      argv/debug output, and parent-relative path rejection.
     - Restic plan tests verify durable paths are explicit, broad storage-root
       backup is not used, secret values are not represented in argv, and parent
       relative paths are rejected.
+    - Restore plan tests verify snapshot ID validation, secret-free restic and
+      pg_restore argv/debug output, and clean restore args.
     - Maintenance CLI test verifies backup-plan output works without database
-      access and reports restic inputs/env requirements.
-    - Maintenance CLI DB test uses a fake restic executable to verify backup
-      execution records a succeeded run, parsed snapshot ID, redacted
-      repository hint, and secret-free manifest.
+      access and reports pg_dump/restic inputs/env requirements.
+    - Maintenance CLI test verifies restore-plan output works without database
+      access and reports restic/pg_restore inputs/env requirements.
+    - Maintenance CLI DB test uses fake pg_dump/restic executables to verify
+      backup execution creates the dump, records a succeeded run, parsed
+      snapshot ID, redacted repository hint, and secret-free manifest/output.
     - Maintenance CLI restore-check test verifies a missing restored original
       object marks the backup run `restore_check_failed` with mismatch counts.
+    - Backup run DB test verifies backup and restore-check status transitions
+      create secret-free audit events.
   - Still pending:
     - Full restore drill against a freshly restored Postgres database and empty
       storage root populated from restic.
@@ -1306,7 +1326,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 
 ### T501: Model Packs And ML Worker
 
-- Status: [ ]
+- Status: [~]
 - Milestone: M5
 - Risk: High
 - Touched subsystems: backend, ml-worker, models, jobs, storage
@@ -1317,6 +1337,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 - Definition of done:
   - Pinned checksummed model pack can be installed.
   - Invalid checksum/license/self-test blocks activation.
+  - Model-pack schema records runtime, task kind, revision, embedding
+    dimension, distance metric, license, file checksums, and self-test status.
+  - Backend feature code depends on task-level embedding outputs, not ONNX
+    sessions or runtime-specific handles.
 - Required gates:
   - model-pack validation tests
   - worker job tests
@@ -1324,11 +1348,103 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - Model downloads are supply-chain sensitive.
   - Embeddings from different revisions cannot be mixed.
 - Completion evidence:
-  - Pending.
+  - Planned decisions:
+    - V1 starts with ONNX Runtime model packs, but `runtime` remains explicit
+      so a future runtime can be added only for a concrete model need.
+    - Model inference boundaries are task-level (`embed_image`, `embed_text`,
+      later `detect_faces`/`embed_face`), not generic model-executor
+      abstractions.
+  - Backend partial:
+    - Added `model_packs` and `model_pack_files` tables for task kind,
+      runtime, model key/revision, license, embedding dimension, distance
+      metric, full manifest JSON, file checksums/sizes, self-test status, and
+      active/install state.
+    - Added a partial unique index enforcing at most one active model pack per
+      task kind.
+    - Added `models` module with pure manifest validation plus install,
+      self-test status recording, and activation functions.
+    - Manifest validation rejects missing license metadata, unsupported runtime
+      or distance metric, unsafe relative paths, duplicate file paths, invalid
+      SHA-256 digests, non-positive file sizes, invalid embedding dimensions,
+      and missing golden self-tests.
+    - Activation is blocked until self-tests pass; activating a new pack
+      deactivates the previous active pack for the same task kind.
+    - Added `model_reindex_runs` table for durable model-pack reindex
+      progress: queued/running/succeeded/failed/canceled status, selected asset
+      count, queued asset count, processed/failed counters, and error message.
+    - Added `embed_asset` job kind for ML embedding work.
+    - Added worker job-kind leasing so a media-only worker does not claim ML
+      jobs when no ML runtime is configured.
+    - Added `start_model_reindex` to require a self-tested model pack, select
+      active non-trashed assets, create a reindex run, and enqueue one
+      idempotent `embed_asset` job per selected asset.
+    - Added `model_reindex_assets` for per-asset queued/done/failed state and
+      idempotent terminal result recording.
+    - Added `record_reindex_asset_result` to update processed/failed counters,
+      transition a run to running/succeeded/failed, preserve terminal asset
+      errors, and ignore duplicate terminal reports.
+    - Added `model-packs/{model_pack_id}/...` storage keys for installed model
+      files with path traversal/backslash/absolute-path rejection.
+    - Added `install_model_pack_files` to copy files from an operator-provided
+      local directory into durable storage only after manifest path, size, and
+      SHA-256 verification.
+    - Durable backup selection now includes installed model-pack files alongside
+      originals and derivatives.
+    - Added task-level embedding output validation for runtime outputs:
+      expected dimension, finite floats, and non-zero cosine vectors.
+    - Added `ml` module with task-level `ImageTextEmbedder` boundary and
+      `embed_asset` job handling: load active image original, run embedder,
+      validate vector, upsert semantic index row, and mark reindex progress
+      succeeded.
+  - Commands:
+    - `make gate-backend` -> passed.
+    - `make test-db` -> passed.
+  - Tests:
+    - Pure model-pack validation test covers missing license, duplicate file
+      path, parent-relative path, invalid checksum, and missing self-tests.
+    - DB model-pack test verifies install starts pending, failed self-test
+      blocks activation, passed self-test allows activation, and only one pack
+      per kind remains active.
+    - DB reindex test verifies self-test gating, trashed asset exclusion, run
+      counters, and `embed_asset` job payload/idempotency creation.
+    - DB reindex progress test verifies successful and failed terminal asset
+      results update run counters/status without double-counting duplicate
+      reports.
+    - Worker runtime DB test verifies an `embed_asset` job writes a semantic
+      embedding and marks the reindex run succeeded.
+    - Model-pack file install test verifies checksum/size enforcement and
+      durable `model-packs/` storage namespace writes.
+    - Embedding output validation test rejects wrong dimensions, NaN, and
+      zero-norm cosine vectors.
+    - Storage-key test verifies model-pack file keys accept only nested
+      relative pack paths.
+    - Backup manifest test verifies installed model-pack files are included in
+      durable backup selection.
+  - Files touched:
+    - `src/backend/migrations/20260618000100_model_packs.up.sql`
+    - `src/backend/migrations/20260618000100_model_packs.down.sql`
+    - `src/backend/migrations/20260618000200_model_reindex_runs.up.sql`
+    - `src/backend/migrations/20260618000200_model_reindex_runs.down.sql`
+    - `src/backend/migrations/20260618000300_model_reindex_assets.up.sql`
+    - `src/backend/migrations/20260618000300_model_reindex_assets.down.sql`
+    - `src/backend/src/models.rs`
+    - `src/backend/src/ml.rs`
+    - `src/backend/src/jobs.rs`
+    - `src/backend/src/worker.rs`
+    - `src/backend/src/bin/worker.rs`
+    - `src/backend/src/lib.rs`
+    - `src/backend/tests/model_packs.rs`
+    - `src/backend/tests/worker_runtime.rs`
+    - `src/backend/tests/support/mod.rs`
+  - Still pending:
+    - Real ONNX runtime embedder.
+    - Text-query embedding path.
+    - Golden self-test execution against a runtime.
+    - Real model-pack install UI/API.
 
 ### T502: Semantic Search And People Albums
 
-- Status: [ ]
+- Status: [~]
 - Milestone: M5
 - Risk: High
 - Touched subsystems: backend, ml-worker, search, people, web, android
@@ -1341,6 +1457,8 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - Semantic fixture search ranks expected assets.
   - People name/merge/split/hide flows pass fixture tests.
   - Model revision changes require reindex and do not mix vectors.
+  - Semantic search uses a Mirror-specific index boundary over asset
+    embeddings, not a generic vector database abstraction.
 - Required gates:
   - ML golden tests
   - backend search/people tests
@@ -1348,4 +1466,72 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 - Caveats/footguns:
   - Face recognition has privacy and correctness risk; keep it user-enabled.
 - Completion evidence:
-  - Pending.
+  - Planned decisions:
+    - Semantic search uses a vision-language model to create image/text
+      embeddings; pgvector stores/searches numeric vectors only.
+    - V1 vector backend is Postgres/pgvector for simpler joins, backups, and
+      owner/trash/privacy filtering. A separate vector DB is deferred until
+      measured scale/latency requires it.
+  - Backend partial:
+    - Compose now uses `pgvector/pgvector:pg16` for the development Postgres
+      service.
+    - Added `asset_embeddings` migration with `CREATE EXTENSION IF NOT EXISTS
+      vector`, asset/model-pack scoped vector storage, dimension metadata, and
+      cascade cleanup.
+    - Added `semantic_index` module with Mirror-specific
+      `upsert_asset_embedding`, `delete_asset_embeddings`, and
+      `semantic_search` functions.
+    - Semantic search validates model-pack task kind and embedding dimension,
+      uses the model-pack distance metric (`cosine`, `dot`, or `l2`), filters
+      out trashed assets, and returns public asset IDs ordered by a normalized
+      score where higher is better.
+    - Dot-product search converts pgvector's negative inner-product rank into a
+      positive similarity score before returning hits.
+    - Replaced manual vector literal construction with `pgvector::Vector`
+      binding for sqlx queries.
+    - ML `embed_asset` uses already-loaded model metadata when upserting the
+      vector, avoiding a second model-pack metadata query per asset.
+    - Added text-query semantic search boundary that embeds the owner query with
+      the active self-tested semantic model pack and searches the existing
+      asset embedding index.
+    - ML worker test path now proves image embeddings produced by the task-level
+      embedder are persisted into pgvector and visible through semantic search.
+    - Documented ANN decision: exact search for v1, HNSW before IVFFlat when
+      scale requires ANN, operator-class matching by metric, and filtered-ANN
+      recall tests before enabling ANN.
+    - Documented future ANN footguns: plain `vector` storage may require
+      expression/partial indexes per model dimension, and bulk reindex should
+      avoid per-row metadata fetches or row-by-row HNSW maintenance if measured
+      slow.
+  - Commands:
+    - `docker compose -f infra/compose.yaml config` -> passed.
+    - `make gate-backend` -> passed.
+    - `make test-db` -> passed.
+  - Tests:
+    - Semantic index DB test verifies pgvector ranking returns active,
+      non-trashed owner assets in one model space.
+    - Semantic index DB test verifies wrong-dimension embeddings are rejected
+      and asset embedding deletion removes search hits.
+    - Semantic index DB test verifies dot-product results return positive
+      similarity scores instead of pgvector negative inner-product ranks.
+    - Worker runtime DB test verifies `embed_asset` creates a pgvector-backed
+      search hit for the promoted asset and completes the reindex run.
+    - Worker runtime DB test verifies text search uses the active model pack to
+      embed a query and returns the matching promoted asset.
+  - Files touched:
+    - `infra/compose.yaml`
+    - `src/backend/migrations/20260618000400_asset_embeddings.up.sql`
+    - `src/backend/migrations/20260618000400_asset_embeddings.down.sql`
+    - `src/backend/src/semantic_index.rs`
+    - `src/backend/src/ml.rs`
+    - `src/backend/src/worker.rs`
+    - `src/backend/src/lib.rs`
+    - `src/backend/tests/semantic_index.rs`
+    - `src/backend/tests/worker_runtime.rs`
+    - `src/backend/tests/support/mod.rs`
+    - `docs/references/pgvector-ann.md`
+  - Still pending:
+    - Real model runtime that produces image/text embeddings.
+    - HTTP search API.
+    - Web/Android search UI.
+    - Face detection/embedding, people clustering, and people review flows.

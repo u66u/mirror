@@ -1,7 +1,8 @@
 use mirror_backend::{
     backups::{
         BackupError, CreateBackupRunInput, backup_manifest_summary, create_backup_run,
-        durable_storage_manifest, mark_backup_succeeded, mark_restore_check, restic_backup_plan,
+        durable_storage_manifest, mark_backup_succeeded, mark_restore_check, postgres_dump_plan,
+        postgres_restore_plan, restic_backup_plan, restic_restore_plan,
     },
     storage::{ObjectStorage, StorageKey},
 };
@@ -24,10 +25,12 @@ async fn durable_storage_manifest_includes_only_durable_namespaces() -> TestResu
         "webp",
         "media-v1-image-webp-1",
     )?;
+    let model_file = StorageKey::model_pack_file(Uuid::now_v7(), "models/image_encoder.onnx")?;
     let staged = StorageKey::staging_upload(Uuid::now_v7(), "part-00000000")?;
 
     storage.write(&original, b"original".to_vec()).await?;
     storage.write(&derivative, b"derivative".to_vec()).await?;
+    storage.write(&model_file, b"model".to_vec()).await?;
     storage.write(&staged, b"staged".to_vec()).await?;
 
     let manifest = durable_storage_manifest(&storage).await?;
@@ -41,7 +44,73 @@ async fn durable_storage_manifest_includes_only_durable_namespaces() -> TestResu
         manifest.manifest_version,
         "mirror-durable-storage-backup-v1"
     );
-    assert_eq!(keys, vec![derivative.as_str(), original.as_str()]);
+    assert_eq!(
+        keys,
+        vec![derivative.as_str(), model_file.as_str(), original.as_str()]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn postgres_dump_plan_uses_custom_format_without_secret_argv() -> TestResult {
+    let plan = postgres_dump_plan(std::path::Path::new("/vault/backup/postgres.dump"))?;
+
+    assert_eq!(plan.program, "pg_dump");
+    assert_eq!(plan.args[0], "--format=custom");
+    assert!(plan.args.contains(&"--file".to_owned()));
+    assert!(
+        plan.args
+            .contains(&"/vault/backup/postgres.dump".to_owned())
+    );
+    assert_eq!(plan.required_env, vec!["PGDATABASE"]);
+    assert!(!format!("{plan:?}").contains("postgres://secret"));
+
+    Ok(())
+}
+
+#[test]
+fn postgres_dump_plan_rejects_parent_relative_paths() {
+    let result = postgres_dump_plan(std::path::Path::new("/vault/../postgres.dump"));
+
+    assert!(matches!(result, Err(BackupError::InvalidPath)));
+}
+
+#[test]
+fn restic_restore_plan_uses_snapshot_target_and_secret_env() -> TestResult {
+    let plan = restic_restore_plan("snapshot-123", std::path::Path::new("/restore/target"))?;
+
+    assert_eq!(plan.program, "restic");
+    assert_eq!(
+        plan.args.iter().map(String::as_str).collect::<Vec<_>>(),
+        vec!["restore", "snapshot-123", "--target", "/restore/target"]
+    );
+    assert_eq!(
+        plan.required_env,
+        vec!["RESTIC_REPOSITORY", "RESTIC_PASSWORD_FILE"]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn restic_restore_plan_rejects_shell_like_snapshot_ids() {
+    let result = restic_restore_plan("snapshot-123;rm", std::path::Path::new("/restore/target"));
+
+    assert!(matches!(result, Err(BackupError::InvalidSnapshotId)));
+}
+
+#[test]
+fn postgres_restore_plan_uses_env_database_and_clean_restore_args() -> TestResult {
+    let plan = postgres_restore_plan(std::path::Path::new("/restore/postgres.dump"))?;
+
+    assert_eq!(plan.program, "pg_restore");
+    assert!(plan.args.contains(&"--clean".to_owned()));
+    assert!(plan.args.contains(&"--if-exists".to_owned()));
+    assert!(plan.args.contains(&"--no-owner".to_owned()));
+    assert!(plan.args.contains(&"/restore/postgres.dump".to_owned()));
+    assert_eq!(plan.required_env, vec!["PGDATABASE"]);
+    assert!(!format!("{plan:?}").contains("postgres://secret"));
 
     Ok(())
 }
@@ -117,6 +186,33 @@ async fn backup_run_records_snapshot_and_restore_check_without_secrets() -> Test
     assert_eq!(row.1["durable_object_count"], 2);
     assert!(row.2.is_none());
     assert!(!row.1.to_string().contains("RESTIC_PASSWORD"));
+
+    let audit_rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        r#"
+        SELECT action, outcome, metadata
+        FROM audit_events
+        WHERE target_kind = 'backup_run'
+            AND target_id = $1
+        ORDER BY id
+        "#,
+    )
+    .bind(run.backup_run_id.to_string())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        audit_rows
+            .iter()
+            .map(|row| (row.0.as_str(), row.1.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("backup.run", "success"),
+            ("backup.restore_check", "success")
+        ]
+    );
+    assert!(audit_rows.iter().all(|row| {
+        !row.2.to_string().contains("RESTIC_PASSWORD")
+            && !row.2.to_string().contains("local-restic-repo")
+    }));
 
     Ok(())
 }

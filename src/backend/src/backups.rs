@@ -46,6 +46,39 @@ pub struct ResticBackupPlan {
     pub required_env: Vec<&'static str>,
 }
 
+/// PostgreSQL dump plan with the database URL kept outside argv.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresDumpPlan {
+    /// Program name.
+    pub program: &'static str,
+    /// Command arguments.
+    pub args: Vec<String>,
+    /// Environment variable names required at execution time.
+    pub required_env: Vec<&'static str>,
+}
+
+/// Restic restore plan with repository/password kept outside argv.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResticRestorePlan {
+    /// Program name.
+    pub program: &'static str,
+    /// Command arguments.
+    pub args: Vec<String>,
+    /// Environment variable names required at execution time.
+    pub required_env: Vec<&'static str>,
+}
+
+/// PostgreSQL restore plan with the database URL kept outside argv.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresRestorePlan {
+    /// Program name.
+    pub program: &'static str,
+    /// Command arguments.
+    pub args: Vec<String>,
+    /// Environment variable names required at execution time.
+    pub required_env: Vec<&'static str>,
+}
+
 /// Persisted backup status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackupRunStatus {
@@ -112,10 +145,14 @@ pub enum BackupError {
     InvalidStorageKey(String),
     /// Backup path is empty or unsafe.
     InvalidPath,
+    /// Restic snapshot ID is empty or unsafe.
+    InvalidSnapshotId,
     /// Database failed.
     Database(sqlx::Error),
     /// Restic process could not start.
     Command(std::io::Error),
+    /// pg_dump returned a non-zero status.
+    PgDumpFailed,
     /// Restic returned a non-zero status.
     ResticFailed,
 }
@@ -126,8 +163,10 @@ impl std::fmt::Display for BackupError {
             Self::Storage(_) => "backup storage error",
             Self::InvalidStorageKey(_) => "backup storage key is invalid",
             Self::InvalidPath => "backup path is invalid",
+            Self::InvalidSnapshotId => "backup snapshot ID is invalid",
             Self::Database(_) => "backup database error",
             Self::Command(_) => "backup command error",
+            Self::PgDumpFailed => "postgres dump failed",
             Self::ResticFailed => "backup command failed",
         };
         formatter.write_str(message)
@@ -257,6 +296,77 @@ pub fn restic_backup_plan(
     })
 }
 
+/// Builds a restic restore command plan for an existing snapshot.
+pub fn restic_restore_plan(
+    snapshot_id: &str,
+    restore_target: &Path,
+) -> Result<ResticRestorePlan, BackupError> {
+    let snapshot_id = clean_snapshot_id(snapshot_id)?;
+    let restore_target = clean_path(restore_target)?;
+    Ok(ResticRestorePlan {
+        program: "restic",
+        args: vec![
+            "restore".to_owned(),
+            snapshot_id.to_owned(),
+            "--target".to_owned(),
+            restore_target.display().to_string(),
+        ],
+        required_env: vec!["RESTIC_REPOSITORY", "RESTIC_PASSWORD_FILE"],
+    })
+}
+
+/// Builds a `pg_restore` command plan for a custom-format dump.
+///
+/// The destination database URL is supplied through `PGDATABASE` at execution
+/// time so it is not exposed through process argv.
+pub fn postgres_restore_plan(dump_path: &Path) -> Result<PostgresRestorePlan, BackupError> {
+    let dump_path = clean_path(dump_path)?;
+    Ok(PostgresRestorePlan {
+        program: "pg_restore",
+        args: vec![
+            "--clean".to_owned(),
+            "--if-exists".to_owned(),
+            "--no-owner".to_owned(),
+            dump_path.display().to_string(),
+        ],
+        required_env: vec!["PGDATABASE"],
+    })
+}
+
+/// Builds a `pg_dump -Fc` command plan.
+///
+/// The database URL is supplied through `PGDATABASE` at execution time so it is
+/// not exposed through process argv.
+pub fn postgres_dump_plan(dump_path: &Path) -> Result<PostgresDumpPlan, BackupError> {
+    let dump_path = clean_path(dump_path)?;
+    Ok(PostgresDumpPlan {
+        program: "pg_dump",
+        args: vec![
+            "--format=custom".to_owned(),
+            "--file".to_owned(),
+            dump_path.display().to_string(),
+        ],
+        required_env: vec!["PGDATABASE"],
+    })
+}
+
+/// Runs `pg_dump` with the supplied plan.
+pub fn run_postgres_dump_plan(
+    plan: &PostgresDumpPlan,
+    database_url: &str,
+) -> Result<(), BackupError> {
+    let output = Command::new(plan.program)
+        .args(&plan.args)
+        .env("PGDATABASE", database_url)
+        .output()
+        .map_err(BackupError::Command)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BackupError::PgDumpFailed)
+    }
+}
+
 /// Runs restic with the supplied plan and returns the snapshot ID.
 ///
 /// The process inherits environment so operators can provide
@@ -285,6 +395,7 @@ pub async fn durable_storage_manifest(
     let mut keys = Vec::new();
     keys.extend(list_valid(storage, &StorageKey::originals_blake3_prefix()).await?);
     keys.extend(list_valid(storage, &StorageKey::derivatives_prefix()).await?);
+    keys.extend(list_valid(storage, &StorageKey::model_packs_prefix()).await?);
     keys.sort();
     keys.dedup();
 
@@ -317,6 +428,7 @@ async fn update_backup_run(
     snapshot_id: Option<&str>,
     error_message: Option<&str>,
 ) -> Result<BackupRun, BackupError> {
+    let mut tx = pool.begin().await?;
     let row = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
         r#"
         UPDATE backup_runs
@@ -338,14 +450,65 @@ async fn update_backup_run(
     .bind(status.as_str())
     .bind(snapshot_id)
     .bind(error_message)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO audit_events (
+            actor_kind,
+            action,
+            outcome,
+            target_kind,
+            target_id,
+            metadata
+        )
+        VALUES (
+            'system',
+            $1,
+            $2,
+            'backup_run',
+            $3,
+            $4
+        )
+        "#,
+    )
+    .bind(backup_audit_action(status))
+    .bind(backup_audit_outcome(status))
+    .bind(backup_run_id.to_string())
+    .bind(Json(json!({
+        "status": status.as_str(),
+        "snapshot_recorded": snapshot_id.is_some(),
+        "error_recorded": error_message.is_some(),
+    })))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
     Ok(BackupRun {
         backup_run_id: row.0,
         status: row.1,
         snapshot_id: row.2,
     })
+}
+
+fn backup_audit_action(status: BackupRunStatus) -> &'static str {
+    match status {
+        BackupRunStatus::Planned | BackupRunStatus::Running => "backup.run",
+        BackupRunStatus::Succeeded | BackupRunStatus::Failed => "backup.run",
+        BackupRunStatus::RestoreCheckSucceeded | BackupRunStatus::RestoreCheckFailed => {
+            "backup.restore_check"
+        }
+    }
+}
+
+fn backup_audit_outcome(status: BackupRunStatus) -> &'static str {
+    match status {
+        BackupRunStatus::Failed | BackupRunStatus::RestoreCheckFailed => "failure",
+        BackupRunStatus::Planned
+        | BackupRunStatus::Running
+        | BackupRunStatus::Succeeded
+        | BackupRunStatus::RestoreCheckSucceeded => "success",
+    }
 }
 
 /// Small manifest summary used by the backup runner.
@@ -370,6 +533,19 @@ fn clean_path(path: &Path) -> Result<PathBuf, BackupError> {
         return Err(BackupError::InvalidPath);
     }
     Ok(path.to_path_buf())
+}
+
+fn clean_snapshot_id(snapshot_id: &str) -> Result<&str, BackupError> {
+    let valid = !snapshot_id.is_empty()
+        && snapshot_id.len() <= 200
+        && snapshot_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if valid {
+        Ok(snapshot_id)
+    } else {
+        Err(BackupError::InvalidSnapshotId)
+    }
 }
 
 async fn list_valid(

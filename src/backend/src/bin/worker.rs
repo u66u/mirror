@@ -5,12 +5,14 @@ use std::{io, time::Duration as StdDuration};
 use mirror_backend::{
     config::Config,
     db,
+    jobs::JobKind,
     media::RustImageProcessor,
+    ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError},
     runtime::io_other,
     storage::ObjectStorage,
     telemetry,
     video::FfmpegVideoProcessor,
-    worker::{self, WorkerPolicy},
+    worker::{self, WorkerHandlers, WorkerPolicy},
 };
 use tracing::{error, info};
 
@@ -30,15 +32,20 @@ async fn main() -> io::Result<()> {
     let storage = ObjectStorage::local(&config.storage_root).map_err(io_other)?;
     let image_processor = RustImageProcessor;
     let video_processor = FfmpegVideoProcessor::production();
+    let embedder = DisabledEmbedder;
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
 
     info!(%worker_id, "starting mirror worker");
     loop {
         match worker::run_once(
             &pool,
-            &storage,
-            &image_processor,
-            &video_processor,
+            WorkerHandlers {
+                storage: &storage,
+                image_processor: &image_processor,
+                video_processor: &video_processor,
+                embedder: &embedder,
+                job_kinds: &[JobKind::ExtractMetadata, JobKind::GenerateDerivatives],
+            },
             &worker_id,
             WorkerPolicy::production(),
         )
@@ -65,5 +72,17 @@ async fn main() -> io::Result<()> {
                 actix_web::rt::time::sleep(StdDuration::from_secs(5)).await;
             }
         }
+    }
+}
+
+struct DisabledEmbedder;
+
+impl ImageTextEmbedder for DisabledEmbedder {
+    fn embed_image(&self, _request: EmbedImageRequest<'_>) -> Result<Vec<f32>, MlError> {
+        Err(MlError::RuntimeUnavailable)
+    }
+
+    fn embed_text(&self, _request: EmbedTextRequest<'_>) -> Result<Vec<f32>, MlError> {
+        Err(MlError::RuntimeUnavailable)
     }
 }

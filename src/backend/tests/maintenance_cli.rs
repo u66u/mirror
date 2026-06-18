@@ -51,12 +51,41 @@ fn maintenance_backup_plan_prints_restic_inputs_without_database() -> TestResult
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("dump_program\tpg_dump"));
+    assert!(stdout.contains("--format=custom"));
+    assert!(stdout.contains("PGDATABASE"));
     assert!(stdout.contains("backup_program\trestic"));
     assert!(stdout.contains("/vault/storage/originals"));
     assert!(stdout.contains("/vault/storage/derivatives"));
     assert!(stdout.contains("/vault/backup/postgres.dump"));
     assert!(stdout.contains("RESTIC_REPOSITORY"));
     assert!(stdout.contains("RESTIC_PASSWORD_FILE"));
+    assert!(!stdout.contains("MIRROR_DATABASE_URL"));
+
+    Ok(())
+}
+
+#[test]
+fn maintenance_restore_plan_prints_restore_inputs_without_database() -> TestResult {
+    let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .arg("--restore-plan")
+        .arg("snapshot-123")
+        .arg("/restore/target")
+        .arg("/restore/target/vault/backup/postgres.dump")
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("restore_program\trestic"));
+    assert!(stdout.contains("restore_args\trestore\tsnapshot-123"));
+    assert!(stdout.contains("/restore/target"));
+    assert!(stdout.contains("RESTIC_REPOSITORY"));
+    assert!(stdout.contains("RESTIC_PASSWORD_FILE"));
+    assert!(stdout.contains("db_restore_program\tpg_restore"));
+    assert!(stdout.contains("--clean"));
+    assert!(stdout.contains("--if-exists"));
+    assert!(stdout.contains("--no-owner"));
+    assert!(stdout.contains("PGDATABASE"));
     assert!(!stdout.contains("MIRROR_DATABASE_URL"));
 
     Ok(())
@@ -75,10 +104,28 @@ async fn maintenance_run_backup_records_restic_snapshot_without_secrets() -> Tes
         &bin_dir.join("restic"),
         "#!/bin/sh\nprintf '%s\n' 'snapshot snapshot-test-id saved'\n",
     )?;
+    write_executable_script(
+        &bin_dir.join("pg_dump"),
+        r#"#!/bin/sh
+set -eu
+test -n "${PGDATABASE:-}"
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --file)
+      shift
+      out="$1"
+      ;;
+  esac
+  shift
+done
+test -n "$out"
+printf '%s\n' 'dump' > "$out"
+"#,
+    )?;
     let password_file = temp_dir.path().join("restic-password");
     std::fs::write(&password_file, "test-password")?;
     let dump_path = temp_dir.path().join("postgres.dump");
-    std::fs::write(&dump_path, "dump")?;
     let path = format!(
         "{}:{}",
         bin_dir.display(),
@@ -86,7 +133,7 @@ async fn maintenance_run_backup_records_restic_snapshot_without_secrets() -> Tes
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))
-        .env("MIRROR_DATABASE_URL", test_database_url)
+        .env("MIRROR_DATABASE_URL", &test_database_url)
         .env("MIRROR_STORAGE_ROOT", temp_dir.path().join("storage"))
         .env("RESTIC_REPOSITORY", "local-test-repo")
         .env("RESTIC_PASSWORD_FILE", &password_file)
@@ -101,6 +148,8 @@ async fn maintenance_run_backup_records_restic_snapshot_without_secrets() -> Tes
     assert!(stdout.contains("succeeded"));
     assert!(stdout.contains("snapshot-test-id"));
     assert!(!stdout.contains("test-password"));
+    assert!(!stdout.contains(&test_database_url));
+    assert_eq!(std::fs::read_to_string(&dump_path)?, "dump\n");
 
     let row: (String, Option<String>, serde_json::Value) = sqlx::query_as(
         r#"

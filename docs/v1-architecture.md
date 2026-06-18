@@ -232,7 +232,8 @@ Core tables:
 - `sync_events`
 - `rate_limit_buckets`
 - `model_packs`
-- `model_installations`
+- `model_pack_files`
+- `model_reindex_runs`
 - `asset_embeddings`
 - `face_occurrences`
 - `face_embeddings`
@@ -409,14 +410,17 @@ Shared ML infrastructure:
 - Model catalog visible from web and Android.
 - Reindex progress visible in clients.
 - Runtime-agnostic curated model packs.
-- Approved runtimes begin with ONNX Runtime and Candle/safetensors.
+- Supported v1 runtime begins with ONNX Runtime. The model-pack schema still
+  records `runtime` so Candle, OpenVINO, TensorRT, or a Python worker can be
+  added later for a concrete model, but backend/domain code must depend on
+  task outputs rather than ONNX sessions.
 - Advanced user-supplied models are allowed only if they provide a compatible
   manifest and pass self-tests.
 
 Model pack manifests declare:
 
 - Kind: `semantic_image_text` or `face_identity`.
-- Runtime.
+- Runtime, initially `onnx`.
 - Model key and pinned revision.
 - File list and checksums.
 - License.
@@ -429,11 +433,35 @@ Model pack manifests declare:
 Semantic search:
 
 - Default model family: SigLIP2 Base.
+- The semantic model embeds image assets and text queries into the same numeric
+  vector space. Postgres/pgvector stores and searches those vectors; it does
+  not run ML or understand photos.
 - Index one embedding per photo asset.
 - Index one poster-frame embedding per video in v1.
 - Text queries embed on demand.
 - Ranking uses vector similarity plus normal SQL filters such as date, album,
   media type, favorite, and trash state.
+- Search API returns a normalized score where higher is better. Do not expose
+  pgvector raw `<#>` values directly because inner product returns a negative
+  value for ordering.
+- V1 uses exact pgvector ordering. Do not add ANN indexes until we have recall
+  fixtures for filtered search.
+- When collection size requires ANN, prefer HNSW first because pgvector's docs
+  describe better speed-recall tradeoffs than IVFFlat. Use IVFFlat only when
+  HNSW build time or memory is a measured problem.
+- ANN indexes must match the model pack's distance metric: `vector_cosine_ops`
+  for `<=>`, `vector_l2_ops` for `<->`, and `vector_ip_ops` for `<#>`.
+- ANN indexes should be partial per active model pack/revision and dimension
+  when needed. Enable/tune pgvector iterative scans because filters are applied
+  after ANN scans and can otherwise reduce recall.
+- Because `asset_embeddings.embedding` is plain `vector`, future ANN indexes
+  may need expression casts such as `embedding::vector(768)` plus partial
+  `model_pack_id` predicates. Bulk reindex should reuse loaded model metadata
+  and avoid row-by-row HNSW maintenance if rebuild/batch indexing is faster.
+- The search boundary is Mirror-specific, not a generic vector database
+  abstraction: `upsert_asset_embedding`, `delete_asset_embeddings`, and
+  `semantic_search` over active assets for one model pack. Do not expose
+  collection/index/payload APIs unless a second backend proves the need.
 
 People albums:
 
@@ -449,7 +477,8 @@ People albums:
 Model changes:
 
 - Embeddings from different models are incompatible.
-- Store embeddings by `model_key` and `model_revision`.
+- Store embeddings by concrete model-pack ID/revision; never mix embeddings
+  from different model revisions in one search.
 - Keep the old active index while a new one builds.
 - Switching people models requires a people-index rebuild and owner review.
 

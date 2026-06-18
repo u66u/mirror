@@ -129,6 +129,8 @@ impl ImageProcessor for RustImageProcessor {
 pub enum MediaError {
     /// Job payload did not contain a valid internal asset UUID.
     InvalidJobPayload,
+    /// Job kind belongs to another worker.
+    UnsupportedJobKind,
     /// Asset row was not found.
     AssetNotFound,
     /// Media type is not handled by the image pipeline.
@@ -157,6 +159,7 @@ impl std::fmt::Display for MediaError {
             Self::Tool(error) => write!(formatter, "media tool failed: {error}"),
             Self::VideoTool(error) => write!(formatter, "video tool failed: {error}"),
             Self::InvalidJobPayload => formatter.write_str("invalid media job payload"),
+            Self::UnsupportedJobKind => formatter.write_str("unsupported media job kind"),
             Self::AssetNotFound => formatter.write_str("asset not found"),
             Self::UnsupportedMediaType => formatter.write_str("unsupported media type"),
             Self::SourceTooLarge => formatter.write_str("media source exceeds processing limit"),
@@ -215,6 +218,7 @@ where
         JobKind::GenerateDerivatives => {
             generate_derivatives(pool, storage, image_processor, video_processor, asset_id).await
         }
+        JobKind::EmbedAsset => Err(MediaError::UnsupportedJobKind),
     }
 }
 

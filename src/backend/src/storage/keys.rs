@@ -20,6 +20,11 @@ impl StorageKey {
         Self("derivatives/".to_owned())
     }
 
+    /// Builds the prefix containing installed model-pack files.
+    pub fn model_packs_prefix() -> Self {
+        Self("model-packs/".to_owned())
+    }
+
     /// Builds a staging key for an upload object.
     pub fn staging_upload(upload_id: Uuid, object_name: &str) -> Result<Self, StorageKeyError> {
         Self::new(format!("staging/uploads/{upload_id}/{object_name}"))
@@ -59,6 +64,15 @@ impl StorageKey {
             hash_hex,
             format
         ))
+    }
+
+    /// Builds a storage key for a validated model-pack file.
+    pub fn model_pack_file(
+        model_pack_id: Uuid,
+        relative_path: &str,
+    ) -> Result<Self, StorageKeyError> {
+        validate_model_pack_path(relative_path)?;
+        Self::new(format!("model-packs/{model_pack_id}/{relative_path}"))
     }
 
     /// Validates a relative backend key.
@@ -141,4 +155,19 @@ fn validate_segment(segment: &str) -> Result<(), StorageKeyError> {
         return Err(StorageKeyError::UnsafePath);
     }
     Ok(())
+}
+
+fn validate_model_pack_path(path: &str) -> Result<(), StorageKeyError> {
+    if path.is_empty()
+        || path.len() > 300
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        Err(StorageKeyError::UnsafePath)
+    } else {
+        Ok(())
+    }
 }

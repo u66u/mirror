@@ -16,6 +16,8 @@ pub enum JobKind {
     ExtractMetadata,
     /// Generate reproducible thumbnail/preview derivatives.
     GenerateDerivatives,
+    /// Compute an asset embedding for one validated model pack.
+    EmbedAsset,
 }
 
 impl JobKind {
@@ -24,6 +26,7 @@ impl JobKind {
         match self {
             Self::ExtractMetadata => "extract_metadata",
             Self::GenerateDerivatives => "generate_derivatives",
+            Self::EmbedAsset => "embed_asset",
         }
     }
 
@@ -31,6 +34,7 @@ impl JobKind {
         match value {
             "extract_metadata" => Ok(Self::ExtractMetadata),
             "generate_derivatives" => Ok(Self::GenerateDerivatives),
+            "embed_asset" => Ok(Self::EmbedAsset),
             _ => Err(JobError::InvalidKind(value.to_owned())),
         }
     }
@@ -136,6 +140,30 @@ pub async fn lease_next(
     worker_id: &str,
     lease_expired_before: OffsetDateTime,
 ) -> Result<Option<LeasedJob>, JobError> {
+    lease_next_for_kinds(
+        pool,
+        worker_id,
+        lease_expired_before,
+        &[
+            JobKind::ExtractMetadata,
+            JobKind::GenerateDerivatives,
+            JobKind::EmbedAsset,
+        ],
+    )
+    .await
+}
+
+/// Leases one ready or expired job whose kind this worker can run.
+pub async fn lease_next_for_kinds(
+    pool: &PgPool,
+    worker_id: &str,
+    lease_expired_before: OffsetDateTime,
+    kinds: &[JobKind],
+) -> Result<Option<LeasedJob>, JobError> {
+    if kinds.is_empty() {
+        return Ok(None);
+    }
+    let kind_names: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
     let row = sqlx::query_as::<_, (Uuid, String, Json<Value>, i32, i32)>(
         r#"
         UPDATE jobs
@@ -149,14 +177,15 @@ pub async fn lease_next(
         WHERE id = (
             SELECT id
             FROM jobs
-            WHERE (
+            WHERE ((
                     status = 'queued'
                     AND run_after <= now()
                 )
                 OR (
                     status = 'leased'
                     AND COALESCE(heartbeat_at, leased_at, created_at) < $2
-                )
+                ))
+              AND kind = ANY($3)
             ORDER BY priority DESC, run_after ASC, created_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -166,6 +195,7 @@ pub async fn lease_next(
     )
     .bind(worker_id)
     .bind(lease_expired_before)
+    .bind(kind_names)
     .fetch_optional(pool)
     .await
     .map_err(JobError::Database)?;

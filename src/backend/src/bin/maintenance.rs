@@ -5,7 +5,8 @@ use std::{collections::BTreeSet, env, io};
 use mirror_backend::{
     backups::{
         CreateBackupRunInput, backup_manifest_summary, create_backup_run, durable_storage_manifest,
-        mark_backup_failed, mark_backup_succeeded, mark_restore_check, restic_backup_plan,
+        mark_backup_failed, mark_backup_succeeded, mark_restore_check, postgres_dump_plan,
+        postgres_restore_plan, restic_backup_plan, restic_restore_plan, run_postgres_dump_plan,
         run_restic_backup_plan,
     },
     config::Config,
@@ -17,13 +18,15 @@ use mirror_backend::{
 use uuid::Uuid;
 
 const USAGE: &str = "\
-Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--run-backup PG_DUMP_PATH] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID]
+Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--restore-plan SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--run-backup PG_DUMP_PATH] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID]
 
 Scans originals by default without modifying storage.
 --delete-orphan KEY  Select a currently reported orphan for remediation.
 --apply              Delete selected orphans after fresh database checks.
---backup-plan PATH   Print restic command plan for durable backup inputs.
---run-backup PATH    Run restic backup and persist backup_runs metadata.
+--backup-plan PATH   Print pg_dump/restic command plans for durable backup inputs.
+--restore-plan ID TARGET PATH
+                     Print restic/pg_restore command plans for a restore drill.
+--run-backup PATH    Run pg_dump then restic backup and persist backup_runs metadata.
 --repository-hint H  Redacted repository label stored with --run-backup.
 --restore-check ID   Scan restored DB/storage and update backup_runs status.
 ";
@@ -33,6 +36,7 @@ struct Options {
     apply: bool,
     selected_keys: Vec<StorageKey>,
     backup_plan_dump_path: Option<std::path::PathBuf>,
+    restore_plan: Option<RestorePlanOptions>,
     run_backup_dump_path: Option<std::path::PathBuf>,
     repository_hint: Option<String>,
     restore_check_backup_run_id: Option<Uuid>,
@@ -48,10 +52,29 @@ async fn main() -> io::Result<()> {
     };
     let config = Config::from_env();
     if let Some(dump_path) = options.backup_plan_dump_path.as_ref() {
+        let dump = postgres_dump_plan(dump_path).map_err(io_other)?;
         let plan = restic_backup_plan(&config.storage_root, dump_path).map_err(io_other)?;
+        println!("dump_program\t{}", dump.program);
+        println!("dump_args\t{}", dump.args.join("\t"));
+        println!("dump_required_env\t{}", dump.required_env.join("\t"));
         println!("backup_program\t{}", plan.program);
         println!("backup_args\t{}", plan.args.join("\t"));
         println!("backup_required_env\t{}", plan.required_env.join("\t"));
+        return Ok(());
+    }
+    if let Some(restore) = options.restore_plan.as_ref() {
+        let restic =
+            restic_restore_plan(&restore.snapshot_id, &restore.restore_target).map_err(io_other)?;
+        let postgres = postgres_restore_plan(&restore.dump_path).map_err(io_other)?;
+        println!("restore_program\t{}", restic.program);
+        println!("restore_args\t{}", restic.args.join("\t"));
+        println!("restore_required_env\t{}", restic.required_env.join("\t"));
+        println!("db_restore_program\t{}", postgres.program);
+        println!("db_restore_args\t{}", postgres.args.join("\t"));
+        println!(
+            "db_restore_required_env\t{}",
+            postgres.required_env.join("\t")
+        );
         return Ok(());
     }
 
@@ -67,7 +90,15 @@ async fn main() -> io::Result<()> {
     let storage = ObjectStorage::local(&config.storage_root).map_err(io_other)?;
 
     if let Some(dump_path) = options.run_backup_dump_path.as_ref() {
-        run_backup(&pool, &storage, &config, dump_path, options.repository_hint).await?;
+        run_backup(
+            &pool,
+            &storage,
+            &config,
+            database_url,
+            dump_path,
+            options.repository_hint,
+        )
+        .await?;
         return Ok(());
     }
     if let Some(backup_run_id) = options.restore_check_backup_run_id {
@@ -135,6 +166,7 @@ fn parse_args() -> Result<Option<Options>, CliError> {
     let mut apply = false;
     let mut selected_keys = Vec::new();
     let mut backup_plan_dump_path = None;
+    let mut restore_plan = None;
     let mut run_backup_dump_path = None;
     let mut repository_hint = None;
     let mut restore_check_backup_run_id = None;
@@ -155,6 +187,16 @@ fn parse_args() -> Result<Option<Options>, CliError> {
             "--backup-plan" => {
                 let raw_path = args.next().ok_or(CliError::MissingBackupDumpPath)?;
                 backup_plan_dump_path = Some(std::path::PathBuf::from(raw_path));
+            }
+            "--restore-plan" => {
+                let snapshot_id = args.next().ok_or(CliError::MissingRestorePlanArgument)?;
+                let restore_target = args.next().ok_or(CliError::MissingRestorePlanArgument)?;
+                let dump_path = args.next().ok_or(CliError::MissingRestorePlanArgument)?;
+                restore_plan = Some(RestorePlanOptions {
+                    snapshot_id,
+                    restore_target: std::path::PathBuf::from(restore_target),
+                    dump_path: std::path::PathBuf::from(dump_path),
+                });
             }
             "--run-backup" => {
                 let raw_path = args.next().ok_or(CliError::MissingBackupDumpPath)?;
@@ -183,10 +225,18 @@ fn parse_args() -> Result<Option<Options>, CliError> {
         apply,
         selected_keys,
         backup_plan_dump_path,
+        restore_plan,
         run_backup_dump_path,
         repository_hint,
         restore_check_backup_run_id,
     }))
+}
+
+#[derive(Debug)]
+struct RestorePlanOptions {
+    snapshot_id: String,
+    restore_target: std::path::PathBuf,
+    dump_path: std::path::PathBuf,
 }
 
 #[derive(Debug)]
@@ -196,6 +246,7 @@ enum CliError {
     InvalidStorageKey(String),
     MissingOrphanKey,
     MissingBackupDumpPath,
+    MissingRestorePlanArgument,
     MissingRepositoryHint,
     MissingRestoreCheckId,
     InvalidRestoreCheckId(String),
@@ -214,6 +265,8 @@ impl std::fmt::Display for CliError {
             Self::InvalidStorageKey(key) => write!(formatter, "invalid storage key: {key}"),
             Self::MissingOrphanKey => formatter.write_str("--delete-orphan requires KEY"),
             Self::MissingBackupDumpPath => formatter.write_str("--backup-plan requires PATH"),
+            Self::MissingRestorePlanArgument => formatter
+                .write_str("--restore-plan requires SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH"),
             Self::MissingRepositoryHint => formatter.write_str("--repository-hint requires HINT"),
             Self::MissingRestoreCheckId => formatter.write_str("--restore-check requires ID"),
             Self::InvalidRestoreCheckId(id) => write!(formatter, "invalid backup run ID: {id}"),
@@ -228,9 +281,12 @@ async fn run_backup(
     pool: &sqlx::PgPool,
     storage: &ObjectStorage,
     config: &Config,
+    database_url: &str,
     dump_path: &std::path::Path,
     repository_hint: Option<String>,
 ) -> io::Result<()> {
+    let dump_plan = postgres_dump_plan(dump_path).map_err(io_other)?;
+    let backup_plan = restic_backup_plan(&config.storage_root, dump_path).map_err(io_other)?;
     let manifest = durable_storage_manifest(storage).await.map_err(io_other)?;
     let run = create_backup_run(
         pool,
@@ -241,9 +297,13 @@ async fn run_backup(
     )
     .await
     .map_err(io_other)?;
-    let plan = restic_backup_plan(&config.storage_root, dump_path).map_err(io_other)?;
 
-    match run_restic_backup_plan(&plan) {
+    if let Err(error) = run_postgres_dump_plan(&dump_plan, database_url) {
+        let _ = mark_backup_failed(pool, run.backup_run_id, &error.to_string()).await;
+        return Err(io_other(error));
+    }
+
+    match run_restic_backup_plan(&backup_plan) {
         Ok(output) => {
             let updated = mark_backup_succeeded(pool, run.backup_run_id, &output.snapshot_id)
                 .await

@@ -69,3 +69,28 @@ fn derivative_keys_reject_untrusted_generator_segments() -> TestResult {
 
     Ok(())
 }
+
+#[test]
+fn model_pack_file_keys_allow_nested_relative_pack_paths_only() -> TestResult {
+    let id = Uuid::now_v7();
+    let key = StorageKey::model_pack_file(id, "models/image_encoder.onnx")?;
+
+    assert_eq!(
+        key.as_str(),
+        format!("model-packs/{id}/models/image_encoder.onnx")
+    );
+    assert!(matches!(
+        StorageKey::model_pack_file(id, "../encoder.onnx"),
+        Err(StorageKeyError::UnsafePath)
+    ));
+    assert!(matches!(
+        StorageKey::model_pack_file(id, "/models/image_encoder.onnx"),
+        Err(StorageKeyError::UnsafePath)
+    ));
+    assert!(matches!(
+        StorageKey::model_pack_file(id, "models\\image_encoder.onnx"),
+        Err(StorageKeyError::UnsafePath)
+    ));
+
+    Ok(())
+}

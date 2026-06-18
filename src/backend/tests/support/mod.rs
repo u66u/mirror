@@ -19,6 +19,9 @@ use mirror_backend::{
     media::{
         DerivativeKind, GeneratedDerivative, ImageInfo, ImageProcessor, MediaError, MediaToolError,
     },
+    ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError},
+    models::{ModelPackError, ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest},
+    semantic_index::SemanticIndexError,
     shares::ShareError,
     storage::ObjectStorage,
     storage::{StorageError, StorageKeyError},
@@ -205,6 +208,24 @@ impl From<MediaError> for TestError {
     }
 }
 
+impl From<ModelPackError> for TestError {
+    fn from(error: ModelPackError) -> Self {
+        Self::new("model pack failed", error)
+    }
+}
+
+impl From<MlError> for TestError {
+    fn from(error: MlError) -> Self {
+        Self::new("ml failed", error)
+    }
+}
+
+impl From<SemanticIndexError> for TestError {
+    fn from(error: SemanticIndexError) -> Self {
+        Self::new("semantic index failed", error)
+    }
+}
+
 impl From<MediaToolError> for TestError {
     fn from(error: MediaToolError) -> Self {
         Self::new("media tool failed", error)
@@ -220,6 +241,41 @@ impl From<WorkerError> for TestError {
 impl From<WorkerPolicyError> for TestError {
     fn from(error: WorkerPolicyError) -> Self {
         Self::new("worker policy failed", error)
+    }
+}
+
+#[allow(dead_code)] // T501/T502: shared semantic model-pack fixture across model/ML/search tests.
+pub fn valid_model_pack_manifest() -> ModelPackManifest {
+    ModelPackManifest {
+        kind: "semantic_image_text".to_owned(),
+        runtime: "onnx".to_owned(),
+        model_key: "siglip2-base-patch16-224".to_owned(),
+        model_revision: "2026-06-18.1".to_owned(),
+        license: "Apache-2.0".to_owned(),
+        embedding_dimension: 768,
+        distance_metric: "cosine".to_owned(),
+        files: vec![
+            ModelPackFileManifest {
+                path: "models/image_encoder.onnx".to_owned(),
+                sha256: "a".repeat(64),
+                size_bytes: 10,
+            },
+            ModelPackFileManifest {
+                path: "models/text_encoder.onnx".to_owned(),
+                sha256: "b".repeat(64),
+                size_bytes: 11,
+            },
+            ModelPackFileManifest {
+                path: "tokenizer/tokenizer.json".to_owned(),
+                sha256: "c".repeat(64),
+                size_bytes: 12,
+            },
+        ],
+        self_tests: vec![ModelPackSelfTestManifest {
+            name: "text_image_fixture_similarity".to_owned(),
+            input_path: "self-tests/cat.jpg".to_owned(),
+            expected_output_sha256: "d".repeat(64),
+        }],
     }
 }
 
@@ -276,9 +332,11 @@ pub async fn storage_test_deps() -> TestResult<StorageTestDeps> {
 
 #[allow(dead_code)] // T105/T202/T204: called through `fresh_owner_pool` in DB-backed test crates.
 pub async fn reset_owner(pool: &sqlx::PgPool) -> TestResult {
-    sqlx::query("TRUNCATE jobs, originals, owner_accounts, rate_limit_buckets CASCADE")
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "TRUNCATE jobs, originals, owner_accounts, rate_limit_buckets, model_packs CASCADE",
+    )
+    .execute(pool)
+    .await?;
 
     let (setup, setup_token) = SetupState::pending()?;
     mirror_backend::auth::create_owner(
@@ -528,5 +586,27 @@ impl ImageProcessor for DelayedImageProcessor {
             height,
             format: "webp",
         })
+    }
+}
+
+#[allow(dead_code)] // T501: worker ML tests need deterministic embedding output.
+#[derive(Clone, Copy)]
+pub struct FakeImageTextEmbedder;
+
+impl ImageTextEmbedder for FakeImageTextEmbedder {
+    fn embed_image(&self, request: EmbedImageRequest<'_>) -> Result<Vec<f32>, MlError> {
+        if !request.media_type.starts_with("image/") || request.bytes.is_empty() {
+            return Err(MlError::UnsupportedMediaType);
+        }
+        Ok(vec![1.0; request.manifest.embedding_dimension as usize])
+    }
+
+    fn embed_text(&self, request: EmbedTextRequest<'_>) -> Result<Vec<f32>, MlError> {
+        if request.text.is_empty() {
+            return Err(MlError::InvalidTextQuery);
+        }
+        let mut values = vec![0.0; request.manifest.embedding_dimension as usize];
+        values[0] = 1.0;
+        Ok(values)
     }
 }

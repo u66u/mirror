@@ -62,8 +62,10 @@ Status values:
   persisted EXIF entry count, and EXIF value length. Videos stream into bounded
   private temp files. External commands are killed on deadline; worker
   heartbeat and wall timeout force process restart after stuck in-process work.
-  Container identity and deployment-level CPU/memory/disk limits remain
-  pending.
+  Compose runs API/worker as a non-root user with read-only root filesystems,
+  private tmpfs mounts, dropped capabilities, no-new-privileges, CPU/memory
+  limits, and pids limits. Live image build/smoke remains pending until Docker
+  Desktop networking can pull the pinned Rust base image.
 
 ## C006: HEIC/HEIF Host Dependency
 
@@ -142,8 +144,8 @@ Status values:
 - Risk: High
 - Related tasks: T501, T502
 - Caveat: Embeddings from different model revisions are incompatible.
-- Mitigation: Store embeddings by model key/revision and keep old active index
-  until reindex completes.
+- Mitigation: Store embeddings by concrete model-pack ID/revision and keep the
+  old active index until reindex completes.
 
 ## C014: Manual API Clients Can Drift
 
@@ -154,7 +156,19 @@ Status values:
   OpenAPI and backend behavior.
 - Mitigation: Contract tests against OpenAPI examples and vertical flow tests.
 
-## C015: Dynamic Android Cleartext Scope
+## C015: Filtered ANN Recall
+
+- Status: Open
+- Risk: High
+- Related tasks: T502
+- Caveat: pgvector approximate indexes apply filters after ANN scan. Owner,
+  trash, and model-pack filters can reduce recall or return too few rows unless
+  scan breadth/iterative scans/index shape are tuned.
+- Mitigation: Keep v1 semantic search exact. Before enabling ANN, add recall
+  fixtures with selective filters, prefer partial HNSW per active model pack and
+  dimension, match operator class to distance metric, and tune iterative scans.
+
+## C016: Dynamic Android Cleartext Scope
 
 - Status: Open
 - Risk: High
@@ -167,7 +181,7 @@ Status values:
   public addresses are rejected. All app networking must remain behind
   `MirrorApi`; HTTPS remains the default.
 
-## C016: Upload Creation Response Loss
+## C017: Upload Creation Response Loss
 
 - Status: Mitigated
 - Risk: High
@@ -178,7 +192,7 @@ Status values:
   Postgres enforces owner-scoped uniqueness, returns the existing session for
   matching retries, and rejects key reuse with different metadata.
 
-## C017: Android Room Schema Evolution
+## C018: Android Room Schema Evolution
 
 - Status: Mitigated
 - Risk: High
@@ -190,7 +204,7 @@ Status values:
   explicit migrations, and test upgrade paths. Never enable destructive
   migration fallback for production.
 
-## C018: Android Remote Vault Identity
+## C019: Android Remote Vault Identity
 
 - Status: Open
 - Risk: High
@@ -202,7 +216,7 @@ Status values:
   newly selected URL. Add a stable backend instance ID before supporting
   same-URL vault replacement or multi-account Android state.
 
-## C019: Reverse Proxy Upload Body Limit
+## C020: Reverse Proxy Upload Body Limit
 
 - Status: Open
 - Risk: Medium

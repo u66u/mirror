@@ -4,7 +4,12 @@ use mirror_backend::{
     assets::promote_verified_upload,
     jobs::{self, JobKind, JobSpec, enqueue_in_tx},
     media::RustImageProcessor,
-    worker::{WorkerPolicy, WorkerPolicyError, WorkerStep, run_once},
+    ml::semantic_text_search,
+    models::{
+        activate_model_pack, install_model_pack, record_model_pack_self_test, start_model_reindex,
+    },
+    semantic_index::semantic_search,
+    worker::{WorkerHandlers, WorkerPolicy, WorkerPolicyError, WorkerStep, run_once},
 };
 use serde_json::json;
 use time::OffsetDateTime;
@@ -12,8 +17,8 @@ use uuid::Uuid;
 
 mod support;
 use support::{
-    DelayedImageProcessor, FakeImageProcessor, FakeVideoProcessor, TestResult,
-    create_verified_jpeg_upload, storage_test_deps,
+    DelayedImageProcessor, FakeImageProcessor, FakeImageTextEmbedder, FakeVideoProcessor,
+    TestResult, create_verified_jpeg_upload, storage_test_deps, valid_model_pack_manifest,
 };
 
 #[tokio::test]
@@ -25,18 +30,26 @@ async fn worker_runs_queued_media_jobs_to_completion() -> TestResult {
 
     let first = run_once(
         &deps.pool,
-        &deps.storage,
-        &FakeImageProcessor,
-        &FakeVideoProcessor,
+        WorkerHandlers {
+            storage: &deps.storage,
+            image_processor: &FakeImageProcessor,
+            video_processor: &FakeVideoProcessor,
+            embedder: &FakeImageTextEmbedder,
+            job_kinds: &MEDIA_JOB_KINDS,
+        },
         "worker-a",
         WorkerPolicy::production(),
     )
     .await?;
     let second = run_once(
         &deps.pool,
-        &deps.storage,
-        &FakeImageProcessor,
-        &FakeVideoProcessor,
+        WorkerHandlers {
+            storage: &deps.storage,
+            image_processor: &FakeImageProcessor,
+            video_processor: &FakeVideoProcessor,
+            embedder: &FakeImageTextEmbedder,
+            job_kinds: &MEDIA_JOB_KINDS,
+        },
         "worker-a",
         WorkerPolicy::production(),
     )
@@ -72,9 +85,13 @@ async fn worker_records_handler_failure_as_dead_job_at_max_attempts() -> TestRes
 
     let step = run_once(
         &deps.pool,
-        &deps.storage,
-        &RustImageProcessor,
-        &FakeVideoProcessor,
+        WorkerHandlers {
+            storage: &deps.storage,
+            image_processor: &RustImageProcessor,
+            video_processor: &FakeVideoProcessor,
+            embedder: &FakeImageTextEmbedder,
+            job_kinds: &MEDIA_JOB_KINDS,
+        },
         "worker-a",
         WorkerPolicy::production(),
     )
@@ -103,11 +120,15 @@ async fn worker_times_out_slow_media_and_records_retry() -> TestResult {
 
     let step = run_once(
         &deps.pool,
-        &deps.storage,
-        &DelayedImageProcessor {
-            delay: Duration::from_millis(100),
+        WorkerHandlers {
+            storage: &deps.storage,
+            image_processor: &DelayedImageProcessor {
+                delay: Duration::from_millis(100),
+            },
+            video_processor: &FakeVideoProcessor,
+            embedder: &FakeImageTextEmbedder,
+            job_kinds: &MEDIA_JOB_KINDS,
         },
-        &FakeVideoProcessor,
         "worker-timeout",
         policy,
     )
@@ -142,11 +163,15 @@ async fn worker_heartbeat_prevents_slow_job_reclaim() -> TestResult {
     let running = tokio::spawn(async move {
         run_once(
             &pool,
-            &storage,
-            &DelayedImageProcessor {
-                delay: Duration::from_millis(150),
+            WorkerHandlers {
+                storage: &storage,
+                image_processor: &DelayedImageProcessor {
+                    delay: Duration::from_millis(150),
+                },
+                video_processor: &FakeVideoProcessor,
+                embedder: &FakeImageTextEmbedder,
+                job_kinds: &MEDIA_JOB_KINDS,
             },
-            &FakeVideoProcessor,
             "worker-heartbeat",
             policy,
         )
@@ -160,6 +185,85 @@ async fn worker_heartbeat_prevents_slow_job_reclaim() -> TestResult {
 
     assert!(reclaimed.is_none());
     assert_eq!(step, WorkerStep::Completed);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn worker_runs_embed_asset_job_to_semantic_index() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "embed.jpg").await?;
+    let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
+    sqlx::query("DELETE FROM jobs").execute(&deps.pool).await?;
+
+    let manifest = valid_model_pack_manifest();
+    let pack = install_model_pack(&deps.pool, manifest.clone()).await?;
+    record_model_pack_self_test(&deps.pool, pack.model_pack_id, true, None).await?;
+    activate_model_pack(&deps.pool, pack.model_pack_id).await?;
+    let run = start_model_reindex(&deps.pool, pack.model_pack_id).await?;
+
+    let step = run_once(
+        &deps.pool,
+        WorkerHandlers {
+            storage: &deps.storage,
+            image_processor: &FakeImageProcessor,
+            video_processor: &FakeVideoProcessor,
+            embedder: &FakeImageTextEmbedder,
+            job_kinds: &ALL_JOB_KINDS,
+        },
+        "worker-embed",
+        WorkerPolicy::production(),
+    )
+    .await?;
+    let hits = semantic_search(
+        &deps.pool,
+        1,
+        pack.model_pack_id,
+        &mirror_backend::models::validate_embedding_output(&manifest, vec![1.0; 768])?,
+        10,
+    )
+    .await?;
+    let status: String = sqlx::query_scalar("SELECT status FROM model_reindex_runs WHERE id = $1")
+        .bind(run.reindex_run_id)
+        .fetch_one(&deps.pool)
+        .await?;
+
+    assert_eq!(step, WorkerStep::Completed);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].asset_id, promoted.asset_id);
+    assert_eq!(status, "succeeded");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn semantic_text_search_embeds_query_with_active_model_pack() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let manifest = valid_model_pack_manifest();
+    let pack = install_model_pack(&deps.pool, manifest.clone()).await?;
+    record_model_pack_self_test(&deps.pool, pack.model_pack_id, true, None).await?;
+    activate_model_pack(&deps.pool, pack.model_pack_id).await?;
+    let upload_id =
+        create_verified_jpeg_upload(&deps.pool, &deps.storage, "text-search.jpg").await?;
+    let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
+    let internal_id: Uuid = sqlx::query_scalar("SELECT id FROM assets WHERE public_id = $1")
+        .bind(promoted.asset_id)
+        .fetch_one(&deps.pool)
+        .await?;
+
+    mirror_backend::semantic_index::upsert_asset_embedding(
+        &deps.pool,
+        internal_id,
+        pack.model_pack_id,
+        &mirror_backend::models::validate_embedding_output(&manifest, vec![1.0; 768])?,
+    )
+    .await?;
+
+    let hits = semantic_text_search(&deps.pool, &FakeImageTextEmbedder, 1, "cat", 10).await?;
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].asset_id, promoted.asset_id);
+    assert!(hits[0].score.is_finite());
     Ok(())
 }
 
@@ -194,3 +298,10 @@ async fn derivative_count(pool: &sqlx::PgPool) -> TestResult<i64> {
         .fetch_one(pool)
         .await?)
 }
+
+const MEDIA_JOB_KINDS: [JobKind; 2] = [JobKind::ExtractMetadata, JobKind::GenerateDerivatives];
+const ALL_JOB_KINDS: [JobKind; 3] = [
+    JobKind::ExtractMetadata,
+    JobKind::GenerateDerivatives,
+    JobKind::EmbedAsset,
+];
