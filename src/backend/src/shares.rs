@@ -6,6 +6,7 @@
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+use thiserror::Error;
 
 use crate::{
     auth::{OpaqueToken, TokenHash},
@@ -83,31 +84,21 @@ pub struct ShareDerivativeBlob {
 }
 
 /// Share operation failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ShareError {
     /// Input violates share policy.
+    #[error("invalid share input")]
     InvalidInput,
     /// Asset/share does not exist or is not active.
+    #[error("share not found")]
     NotFound,
     /// Token generation failed.
+    #[error("share token generation failed")]
     TokenGeneration,
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("share database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for ShareError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidInput => "invalid share input",
-            Self::NotFound => "share not found",
-            Self::TokenGeneration => "share token generation failed",
-            Self::Database(_) => "share database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for ShareError {}
 
 /// Creates one active private share for an owner asset.
 pub async fn create_share(

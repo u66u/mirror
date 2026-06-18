@@ -5,6 +5,7 @@
 //! reindex progress.
 
 use std::{num::NonZeroUsize, sync::Arc};
+use thiserror::Error;
 
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction, types::Json};
@@ -148,32 +149,44 @@ pub trait ImageTextEmbedder {
 }
 
 /// ML job failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum MlError {
     /// Job kind belongs to another worker path.
+    #[error("unsupported ml job kind")]
     UnsupportedJobKind,
     /// Job payload is missing required UUID fields.
+    #[error("invalid ml job payload")]
     InvalidJobPayload,
     /// Text query is empty or too large.
+    #[error("invalid ml text query")]
     InvalidTextQuery,
     /// Asset, reindex row, or model pack no longer exists.
+    #[error("ml asset, reindex row, or model pack not found")]
     NotFound,
     /// V1 worker only embeds explicitly supported still-image formats.
+    #[error("unsupported ml media type")]
     UnsupportedMediaType,
     /// Worker started without a configured embedding runtime, or runtime task panicked.
+    #[error("ml runtime unavailable")]
     RuntimeUnavailable,
     /// Encoded original exceeds the embedding runtime boundary.
+    #[error("ml image exceeds embedding byte limit")]
     ImageTooLarge,
     /// Original storage key is invalid.
-    InvalidStorageKey(StorageKeyError),
+    #[error("invalid ml storage key")]
+    InvalidStorageKey(#[from] StorageKeyError),
     /// Object storage failed.
-    Storage(StorageError),
+    #[error("ml storage error")]
+    Storage(#[from] StorageError),
     /// Model-pack state or runtime output is invalid.
-    Model(ModelPackError),
+    #[error("ml model error")]
+    Model(#[from] ModelPackError),
     /// Semantic index update failed.
-    SemanticIndex(SemanticIndexError),
+    #[error("ml semantic index error")]
+    SemanticIndex(#[from] SemanticIndexError),
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("ml database error")]
+    Database(#[from] sqlx::Error),
 }
 
 impl MlError {
@@ -193,62 +206,6 @@ impl MlError {
                 | Self::Model(ModelPackError::Storage(_))
                 | Self::Model(ModelPackError::Io(_))
         )
-    }
-}
-
-impl std::fmt::Display for MlError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::UnsupportedJobKind => "unsupported ml job kind",
-            Self::InvalidJobPayload => "invalid ml job payload",
-            Self::InvalidTextQuery => "invalid ml text query",
-            Self::NotFound => "ml asset, reindex row, or model pack not found",
-            Self::UnsupportedMediaType => "unsupported ml media type",
-            Self::RuntimeUnavailable => "ml runtime unavailable",
-            Self::ImageTooLarge => "ml image exceeds embedding byte limit",
-            Self::InvalidStorageKey(_) => "invalid ml storage key",
-            Self::Storage(_) => "ml storage error",
-            Self::Model(_) => "ml model error",
-            Self::SemanticIndex(_) => "ml semantic index error",
-            Self::Database(_) => "ml database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for MlError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Storage(error) => Some(error),
-            Self::Model(error) => Some(error),
-            Self::SemanticIndex(error) => Some(error),
-            Self::Database(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<ModelPackError> for MlError {
-    fn from(error: ModelPackError) -> Self {
-        Self::Model(error)
-    }
-}
-
-impl From<SemanticIndexError> for MlError {
-    fn from(error: SemanticIndexError) -> Self {
-        Self::SemanticIndex(error)
-    }
-}
-
-impl From<StorageError> for MlError {
-    fn from(error: StorageError) -> Self {
-        Self::Storage(error)
-    }
-}
-
-impl From<StorageKeyError> for MlError {
-    fn from(error: StorageKeyError) -> Self {
-        Self::InvalidStorageKey(error)
     }
 }
 

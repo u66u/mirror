@@ -12,30 +12,21 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use getrandom::getrandom;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use thiserror::Error;
 
 /// Setup-token construction or verification error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum SetupTokenError {
     /// OS random source failed.
+    #[error("setup token generation failed")]
     RandomFailed,
     /// Setup is disabled.
+    #[error("setup disabled")]
     Disabled,
     /// Supplied token is wrong or already consumed.
+    #[error("invalid setup token")]
     Invalid,
 }
-
-impl std::fmt::Display for SetupTokenError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::RandomFailed => "setup token generation failed",
-            Self::Disabled => "setup disabled",
-            Self::Invalid => "invalid setup token",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for SetupTokenError {}
 
 /// First-run setup state shared by API workers.
 #[derive(Clone)]

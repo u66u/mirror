@@ -5,6 +5,7 @@
 
 use sqlx::PgPool;
 use uuid::Uuid;
+use thiserror::Error;
 
 use crate::auth::{OpaqueToken, TokenHash};
 
@@ -40,27 +41,18 @@ pub struct AuthenticatedDeviceToken {
 }
 
 /// Device-token operation failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum DeviceTokenError {
     /// Token generation failed.
+    #[error("device token generation failed")]
     TokenGeneration,
     /// Device name violates policy.
+    #[error("invalid device token name")]
     InvalidName,
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("device token database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for DeviceTokenError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TokenGeneration => formatter.write_str("device token generation failed"),
-            Self::InvalidName => formatter.write_str("invalid device token name"),
-            Self::Database(_) => formatter.write_str("device token database error"),
-        }
-    }
-}
-
-impl std::error::Error for DeviceTokenError {}
 
 /// Creates a revocable Android device token.
 pub async fn create_device_token(

@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction, types::Json};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+use thiserror::Error;
 
 /// Job kinds currently emitted by backend feature modules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,31 +104,14 @@ pub struct JobFailureOutcome {
 }
 
 /// Job operation failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum JobError {
     /// Job kind was not recognized by this binary.
+    #[error("invalid job kind")]
     InvalidKind(String),
     /// Database failed.
-    Database(sqlx::Error),
-}
-
-impl std::fmt::Display for JobError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidKind(_) => "invalid job kind",
-            Self::Database(_) => "job database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for JobError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            _ => None,
-        }
-    }
+    #[error("job database error")]
+    Database(#[from] sqlx::Error),
 }
 
 /// Enqueues a job in the caller's transaction.

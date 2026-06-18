@@ -7,6 +7,7 @@ use blake3::Hasher;
 use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
+use thiserror::Error;
 
 use crate::storage::{ObjectStorage, StorageKey};
 
@@ -71,43 +72,33 @@ pub struct UploadSessionView {
 }
 
 /// Upload operation failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum UploadError {
     /// Input violates upload policy.
+    #[error("invalid upload input")]
     InvalidInput,
     /// Part index is outside the range derived from expected upload size.
+    #[error("upload part index is out of range")]
     PartOutOfRange,
     /// Part byte length does not match its deterministic frame.
+    #[error("upload part has the wrong length")]
     PartLengthMismatch,
     /// Upload session was not found for owner.
+    #[error("upload not found")]
     NotFound,
     /// Upload is not open for mutation.
+    #[error("upload is not open")]
     NotOpen,
     /// Completed bytes do not match expected size/hash/media signature.
+    #[error("upload verification failed")]
     VerificationFailed,
     /// Storage backend failed.
-    Storage(crate::storage::StorageError),
+    #[error("upload storage error: {0}")]
+    Storage(#[from] crate::storage::StorageError),
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("upload database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for UploadError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidInput => "invalid upload input",
-            Self::PartOutOfRange => "upload part index is out of range",
-            Self::PartLengthMismatch => "upload part has the wrong length",
-            Self::NotFound => "upload not found",
-            Self::NotOpen => "upload is not open",
-            Self::VerificationFailed => "upload verification failed",
-            Self::Storage(_) => "upload storage error",
-            Self::Database(_) => "upload database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for UploadError {}
 
 /// Creates a resumable upload session.
 pub async fn create_upload(

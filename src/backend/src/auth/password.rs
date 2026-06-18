@@ -6,27 +6,18 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
+use thiserror::Error;
 
 /// Password hashing or policy failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum PasswordError {
     /// Password violates local policy.
+    #[error("invalid password")]
     InvalidPassword,
     /// Hashing failed.
+    #[error("password hashing failed")]
     HashFailed,
 }
-
-impl std::fmt::Display for PasswordError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidPassword => "invalid password",
-            Self::HashFailed => "password hashing failed",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for PasswordError {}
 
 /// Hashes a user password with Argon2id.
 pub fn hash_password(password: &str) -> Result<String, PasswordError> {

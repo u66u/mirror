@@ -7,6 +7,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use thiserror::Error;
 
 use crate::assets::{AssetDerivativeView, AssetTimelineItem};
 
@@ -34,24 +35,15 @@ pub struct AssetSearchPage {
 }
 
 /// Search failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum SearchError {
     /// Query or limit violates local search bounds.
+    #[error("invalid search input")]
     InvalidInput,
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("search database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for SearchError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidInput => formatter.write_str("invalid search input"),
-            Self::Database(_) => formatter.write_str("search database error"),
-        }
-    }
-}
-
-impl std::error::Error for SearchError {}
 
 /// Searches active owner assets by original filename.
 pub async fn search_assets(

@@ -7,6 +7,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use getrandom::getrandom;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use thiserror::Error;
 
 /// Random URL-safe opaque token returned to clients once.
 #[derive(Clone, PartialEq, Eq)]
@@ -70,16 +71,9 @@ impl std::fmt::Debug for TokenHash {
 }
 
 /// Token generation error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum TokenError {
     /// OS random source failed.
+    #[error("token generation failed")]
     RandomFailed,
 }
-
-impl std::fmt::Display for TokenError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("token generation failed")
-    }
-}
-
-impl std::error::Error for TokenError {}

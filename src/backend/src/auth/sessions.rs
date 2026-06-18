@@ -6,6 +6,7 @@
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use thiserror::Error;
 
 use crate::auth::{OpaqueToken, TokenHash};
 
@@ -60,24 +61,15 @@ pub struct SessionInfo {
 }
 
 /// Session operation failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum SessionError {
     /// Token generation failed.
+    #[error("session token generation failed")]
     TokenGeneration,
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("session database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for SessionError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TokenGeneration => formatter.write_str("session token generation failed"),
-            Self::Database(_) => formatter.write_str("session database error"),
-        }
-    }
-}
-
-impl std::error::Error for SessionError {}
 
 /// Creates a 30-day web session and stores only its token hash.
 pub async fn create_session(

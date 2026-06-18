@@ -5,6 +5,7 @@
 //! separate timeout-bounded external command wrapper.
 
 use std::{collections::BTreeMap, io::Cursor, path::PathBuf};
+use thiserror::Error;
 
 use image::{GenericImageView, ImageFormat, ImageReader, Limits};
 use nom_exif::{Exif, ExifTag, MediaParser, MediaSource};
@@ -125,75 +126,56 @@ impl ImageProcessor for RustImageProcessor {
 }
 
 /// Media job failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum MediaError {
     /// Job payload did not contain a valid internal asset UUID.
+    #[error("invalid media job payload")]
     InvalidJobPayload,
     /// Job kind belongs to another worker.
+    #[error("unsupported media job kind")]
     UnsupportedJobKind,
     /// Asset row was not found.
+    #[error("asset not found")]
     AssetNotFound,
     /// Media type is not handled by the image pipeline.
+    #[error("unsupported media type")]
     UnsupportedMediaType,
     /// Source exceeds the configured in-process or staged-media bound.
+    #[error("media source exceeds processing limit")]
     SourceTooLarge,
     /// Stored object length no longer matches immutable database metadata.
+    #[error("original object size mismatch")]
     OriginalSizeMismatch,
     /// Image processor failed.
-    Tool(MediaToolError),
+    #[error("media tool failed: {0}")]
+    Tool(#[from] MediaToolError),
     /// External video processor failed.
-    VideoTool(VideoToolError),
+    #[error("video tool failed: {0}")]
+    VideoTool(#[from] VideoToolError),
     /// Blocking media task panicked or was cancelled.
+    #[error("media processing task failed")]
     ProcessingTaskFailed,
     /// Private media staging directory could not be created.
+    #[error("media temporary storage failed")]
     TemporaryStorage(std::io::Error),
     /// Storage failed.
-    Storage(crate::storage::StorageError),
+    #[error("media storage error: {0}")]
+    Storage(#[from] crate::storage::StorageError),
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("media database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for MediaError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tool(error) => write!(formatter, "media tool failed: {error}"),
-            Self::VideoTool(error) => write!(formatter, "video tool failed: {error}"),
-            Self::InvalidJobPayload => formatter.write_str("invalid media job payload"),
-            Self::UnsupportedJobKind => formatter.write_str("unsupported media job kind"),
-            Self::AssetNotFound => formatter.write_str("asset not found"),
-            Self::UnsupportedMediaType => formatter.write_str("unsupported media type"),
-            Self::SourceTooLarge => formatter.write_str("media source exceeds processing limit"),
-            Self::OriginalSizeMismatch => formatter.write_str("original object size mismatch"),
-            Self::ProcessingTaskFailed => formatter.write_str("media processing task failed"),
-            Self::TemporaryStorage(_) => formatter.write_str("media temporary storage failed"),
-            Self::Storage(_) => formatter.write_str("media storage error"),
-            Self::Database(_) => formatter.write_str("media database error"),
-        }
-    }
-}
-
-impl std::error::Error for MediaError {}
 
 /// External media tool failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum MediaToolError {
     /// Media type is not image input supported by this processor.
+    #[error("unsupported media type")]
     UnsupportedMediaType,
     /// Image decoder/encoder failed.
-    Image(image::ImageError),
+    #[error("image processing failed")]
+    Image(#[from] image::ImageError),
 }
-
-impl std::fmt::Display for MediaToolError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::UnsupportedMediaType => "unsupported media type",
-            Self::Image(_) => "image processing failed",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for MediaToolError {}
 
 /// Runs a leased media job without changing queue state.
 ///

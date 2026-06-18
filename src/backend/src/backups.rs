@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+use thiserror::Error;
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -137,54 +138,32 @@ pub struct ResticBackupOutput {
 }
 
 /// Backup manifest failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum BackupError {
     /// Storage operation failed.
-    Storage(StorageError),
+    #[error("backup storage error")]
+    Storage(#[from] StorageError),
     /// Storage listed a key that violates key invariants.
+    #[error("backup storage key is invalid")]
     InvalidStorageKey(String),
     /// Backup path is empty or unsafe.
+    #[error("backup path is invalid")]
     InvalidPath,
     /// Restic snapshot ID is empty or unsafe.
+    #[error("backup snapshot ID is invalid")]
     InvalidSnapshotId,
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("backup database error")]
+    Database(#[from] sqlx::Error),
     /// Restic process could not start.
+    #[error("backup command error")]
     Command(std::io::Error),
     /// pg_dump returned a non-zero status.
+    #[error("postgres dump failed")]
     PgDumpFailed,
     /// Restic returned a non-zero status.
+    #[error("backup command failed")]
     ResticFailed,
-}
-
-impl std::fmt::Display for BackupError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::Storage(_) => "backup storage error",
-            Self::InvalidStorageKey(_) => "backup storage key is invalid",
-            Self::InvalidPath => "backup path is invalid",
-            Self::InvalidSnapshotId => "backup snapshot ID is invalid",
-            Self::Database(_) => "backup database error",
-            Self::Command(_) => "backup command error",
-            Self::PgDumpFailed => "postgres dump failed",
-            Self::ResticFailed => "backup command failed",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for BackupError {}
-
-impl From<StorageError> for BackupError {
-    fn from(error: StorageError) -> Self {
-        Self::Storage(error)
-    }
-}
-
-impl From<sqlx::Error> for BackupError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
 }
 
 /// Records a planned restic backup.

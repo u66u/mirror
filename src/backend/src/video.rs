@@ -10,6 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use thiserror::Error;
 
 use serde::Deserialize;
 
@@ -277,55 +278,45 @@ fn read_bounded(mut file: impl Read, max_bytes: u64) -> Result<Vec<u8>, VideoToo
 }
 
 /// External video processing failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum VideoToolError {
     /// Executable or generated-file I/O failed.
-    Io(std::io::Error),
+    #[error("video tool I/O failed")]
+    Io(#[from] std::io::Error),
     /// Configured video executable was not found.
+    #[error("video tool executable unavailable")]
     ToolUnavailable,
     /// Child exceeded configured deadline and was killed.
+    #[error("video tool timed out")]
     TimedOut,
     /// Child exited unsuccessfully.
+    #[error("video tool command failed")]
     CommandFailed,
     /// Probe stdout pipe was unexpectedly unavailable.
+    #[error("video tool stdout unavailable")]
     MissingStdout,
     /// Probe output exceeded its fixed bound.
+    #[error("video tool output exceeds limit")]
     OutputTooLarge,
     /// Probe JSON did not match expected structure.
-    InvalidProbeJson(serde_json::Error),
+    #[error("video probe returned invalid JSON")]
+    InvalidProbeJson(#[from] serde_json::Error),
     /// No video stream was present.
+    #[error("media has no video stream")]
     MissingVideoStream,
     /// Video dimensions were absent or zero.
+    #[error("video dimensions are invalid")]
     InvalidVideoDimensions,
     /// Duration was negative, non-finite, or out of range.
+    #[error("video duration is invalid")]
     InvalidDuration,
     /// Poster edge must be positive.
+    #[error("video poster edge is invalid")]
     InvalidPosterEdge,
     /// Generated poster was empty or exceeded its fixed bound.
+    #[error("video poster size is invalid")]
     PosterSizeOutOfRange,
     /// Command timeout must be positive.
+    #[error("video command timeout is invalid")]
     InvalidTimeout,
 }
-
-impl std::fmt::Display for VideoToolError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::Io(_) => "video tool I/O failed",
-            Self::ToolUnavailable => "video tool executable unavailable",
-            Self::TimedOut => "video tool timed out",
-            Self::CommandFailed => "video tool command failed",
-            Self::MissingStdout => "video tool stdout unavailable",
-            Self::OutputTooLarge => "video tool output exceeds limit",
-            Self::InvalidProbeJson(_) => "video probe returned invalid JSON",
-            Self::MissingVideoStream => "media has no video stream",
-            Self::InvalidVideoDimensions => "video dimensions are invalid",
-            Self::InvalidDuration => "video duration is invalid",
-            Self::InvalidPosterEdge => "video poster edge is invalid",
-            Self::PosterSizeOutOfRange => "video poster size is invalid",
-            Self::InvalidTimeout => "video command timeout is invalid",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for VideoToolError {}

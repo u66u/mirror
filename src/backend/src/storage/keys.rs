@@ -4,6 +4,7 @@
 //! smuggle absolute paths, parent traversal, or backend-specific separators.
 
 use uuid::Uuid;
+use thiserror::Error;
 
 /// Valid object key relative to the storage root.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -100,28 +101,18 @@ impl StorageKey {
 }
 
 /// Storage key validation failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum StorageKeyError {
     /// Key is empty.
+    #[error("empty storage key")]
     Empty,
     /// Key attempts absolute pathing or parent traversal.
+    #[error("unsafe storage key")]
     UnsafePath,
     /// BLAKE3 hex digest is malformed.
+    #[error("invalid blake3 hash")]
     InvalidHash,
 }
-
-impl std::fmt::Display for StorageKeyError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::Empty => "empty storage key",
-            Self::UnsafePath => "unsafe storage key",
-            Self::InvalidHash => "invalid blake3 hash",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for StorageKeyError {}
 
 fn validate_key(key: &str) -> Result<(), StorageKeyError> {
     if key.is_empty() {

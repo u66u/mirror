@@ -7,6 +7,7 @@
 use pgvector::Vector;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
+use thiserror::Error;
 
 use crate::models::{DistanceMetric, ModelPackKind, ValidatedEmbedding};
 
@@ -20,46 +21,23 @@ pub struct SemanticSearchHit {
 }
 
 /// Semantic index failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum SemanticIndexError {
     /// Model pack does not exist or is not a semantic image/text pack.
+    #[error("semantic model pack is invalid")]
     InvalidModelPack,
     /// Embedding length does not match the model pack dimension.
+    #[error("semantic embedding dimension mismatch")]
     DimensionMismatch,
     /// Query limit is outside the accepted range.
+    #[error("semantic search limit is invalid")]
     InvalidLimit,
     /// Asset is unavailable for indexing.
+    #[error("semantic asset is unavailable")]
     AssetUnavailable,
     /// Database failed.
-    Database(sqlx::Error),
-}
-
-impl std::fmt::Display for SemanticIndexError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidModelPack => "semantic model pack is invalid",
-            Self::DimensionMismatch => "semantic embedding dimension mismatch",
-            Self::InvalidLimit => "semantic search limit is invalid",
-            Self::AssetUnavailable => "semantic asset is unavailable",
-            Self::Database(_) => "semantic index database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for SemanticIndexError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<sqlx::Error> for SemanticIndexError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
+    #[error("semantic index database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 /// Inserts or replaces an asset embedding for one model pack.

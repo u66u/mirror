@@ -8,6 +8,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use thiserror::Error;
 
 use crate::storage::StorageKey;
 
@@ -69,28 +70,18 @@ pub struct ExportOriginal {
 }
 
 /// Export manifest failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ExportError {
     /// Asset was not found for owner or is not active.
+    #[error("export original not found")]
     NotFound,
     /// Database contained an invalid storage key.
+    #[error("export original storage key is invalid")]
     InvalidStorageKey,
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("export database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for ExportError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::NotFound => "export original not found",
-            Self::InvalidStorageKey => "export original storage key is invalid",
-            Self::Database(_) => "export database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for ExportError {}
 
 /// Builds an active-original manifest for one owner.
 pub async fn original_manifest(

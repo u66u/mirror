@@ -5,23 +5,17 @@
 
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
+use thiserror::Error;
 
 use crate::config::RateLimitSecret;
 
 /// Rate-limit persistence failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum RateLimitError {
     /// Database operation failed.
-    Database(sqlx::Error),
+    #[error("rate limit database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for RateLimitError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("rate limit database error")
-    }
-}
-
-impl std::error::Error for RateLimitError {}
 
 /// Returns whether a sensitive action is currently blocked for this key.
 pub async fn is_blocked(

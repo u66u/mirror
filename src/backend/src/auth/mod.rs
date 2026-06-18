@@ -11,6 +11,7 @@ mod tokens;
 
 use sqlx::PgPool;
 use uuid::Uuid;
+use thiserror::Error;
 
 pub use device_tokens::{
     AuthenticatedDeviceToken, DeviceTokenCreateInput, DeviceTokenCreateOutput, DeviceTokenError,
@@ -43,20 +44,26 @@ pub struct OwnerSetupOutput {
 }
 
 /// Owner setup failure without leaking secrets.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum OwnerSetupError {
     /// Setup is disabled because owner already exists or DB is unavailable.
+    #[error("owner setup unavailable")]
     SetupUnavailable,
     /// Setup token missing, malformed, wrong, or already consumed.
+    #[error("invalid setup token")]
     InvalidSetupToken,
     /// Display name is outside allowed bounds.
+    #[error("invalid display name")]
     InvalidDisplayName,
     /// Password does not satisfy local policy.
+    #[error("invalid password")]
     InvalidPassword,
     /// Owner row already exists.
+    #[error("owner already exists")]
     OwnerAlreadyExists,
     /// Database error. Do not expose details to clients.
-    Database(sqlx::Error),
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 /// Owner login input after HTTP parsing.
@@ -71,44 +78,18 @@ pub struct OwnerLoginInput {
 }
 
 /// Owner login failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum OwnerLoginError {
     /// Owner does not exist or password is wrong.
+    #[error("invalid credentials")]
     InvalidCredentials,
     /// Session creation failed.
-    Session(SessionError),
+    #[error("session creation failed: {0}")]
+    Session(#[from] SessionError),
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for OwnerLoginError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidCredentials => "invalid credentials",
-            Self::Session(_) => "session creation failed",
-            Self::Database(_) => "database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for OwnerLoginError {}
-
-impl std::fmt::Display for OwnerSetupError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::SetupUnavailable => "owner setup unavailable",
-            Self::InvalidSetupToken => "invalid setup token",
-            Self::InvalidDisplayName => "invalid display name",
-            Self::InvalidPassword => "invalid password",
-            Self::OwnerAlreadyExists => "owner already exists",
-            Self::Database(_) => "database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for OwnerSetupError {}
 
 impl From<PasswordError> for OwnerSetupError {
     fn from(error: PasswordError) -> Self {

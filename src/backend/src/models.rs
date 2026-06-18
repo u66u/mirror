@@ -8,6 +8,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
 };
+use thiserror::Error;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -187,81 +188,41 @@ impl ValidatedEmbedding {
 }
 
 /// Model-pack operation failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ModelPackError {
     /// Manifest violates Mirror model-pack invariants.
+    #[error("invalid model-pack manifest")]
     InvalidManifest(&'static str),
     /// Model pack does not exist.
+    #[error("model pack not found")]
     NotFound,
     /// Runtime output violates model-pack embedding invariants.
+    #[error("invalid model embedding output")]
     InvalidEmbedding(&'static str),
     /// Self-test must pass before activation.
+    #[error("model pack self-test has not passed")]
     SelfTestRequired,
     /// Local model-pack file path is unsafe.
+    #[error("model-pack file path is invalid")]
     InvalidFilePath,
     /// Local model-pack file failed size or checksum verification.
+    #[error("model-pack file verification failed")]
     FileVerificationFailed,
     /// Local model-pack file I/O failed.
-    Io(std::io::Error),
+    #[error("model-pack file io error")]
+    Io(#[from] std::io::Error),
     /// Storage operation failed.
-    Storage(crate::storage::StorageError),
+    #[error("model-pack storage error")]
+    Storage(#[from] crate::storage::StorageError),
     /// Generated storage key was invalid.
-    StorageKey(StorageKeyError),
+    #[error("model-pack storage key error")]
+    StorageKey(#[from] StorageKeyError),
     /// Job queue operation failed.
-    Job(jobs::JobError),
+    #[error("model-pack job queue error")]
+    Job(#[from] jobs::JobError),
     /// Database failed.
-    Database(sqlx::Error),
-}
-
-impl std::fmt::Display for ModelPackError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidManifest(_) => "invalid model-pack manifest",
-            Self::NotFound => "model pack not found",
-            Self::InvalidEmbedding(_) => "invalid model embedding output",
-            Self::SelfTestRequired => "model pack self-test has not passed",
-            Self::InvalidFilePath => "model-pack file path is invalid",
-            Self::FileVerificationFailed => "model-pack file verification failed",
-            Self::Io(_) => "model-pack file io error",
-            Self::Storage(_) => "model-pack storage error",
-            Self::StorageKey(_) => "model-pack storage key error",
-            Self::Job(_) => "model-pack job queue error",
-            Self::Database(_) => "model-pack database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for ModelPackError {}
-
-impl From<sqlx::Error> for ModelPackError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
-}
-
-impl From<jobs::JobError> for ModelPackError {
-    fn from(error: jobs::JobError) -> Self {
-        Self::Job(error)
-    }
-}
-
-impl From<std::io::Error> for ModelPackError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-impl From<crate::storage::StorageError> for ModelPackError {
-    fn from(error: crate::storage::StorageError) -> Self {
-        Self::Storage(error)
-    }
-}
-
-impl From<StorageKeyError> for ModelPackError {
-    fn from(error: StorageKeyError) -> Self {
-        Self::StorageKey(error)
-    }
+    #[error("model-pack database error")]
+    Database(#[from] sqlx::Error),
 }
 
 /// Validates and records a model pack.

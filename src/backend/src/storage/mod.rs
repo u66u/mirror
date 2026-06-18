@@ -11,6 +11,7 @@ use bytes::Bytes;
 use futures_util::{Stream, TryStreamExt, stream};
 use opendal::{Operator, services::Fs};
 use tokio::io::AsyncWriteExt;
+use thiserror::Error;
 
 pub use keys::{StorageKey, StorageKeyError};
 
@@ -214,35 +215,18 @@ impl ObjectStorage {
 }
 
 /// Storage operation failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum StorageError {
     /// Local storage root path is not valid UTF-8.
+    #[error("invalid local storage root")]
     InvalidLocalRoot,
     /// OpenDAL returned an operation error.
-    OpenDal(opendal::Error),
+    #[error("storage backend error: {0}")]
+    OpenDal(#[from] opendal::Error),
     /// Local staging file I/O failed.
-    Io(std::io::Error),
+    #[error("storage staging I/O error: {0}")]
+    Io(#[from] std::io::Error),
     /// Object exceeded the caller's staging limit.
+    #[error("storage object exceeds staging limit")]
     ObjectTooLarge,
-}
-
-impl std::fmt::Display for StorageError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidLocalRoot => formatter.write_str("invalid local storage root"),
-            Self::OpenDal(_) => formatter.write_str("storage backend error"),
-            Self::Io(_) => formatter.write_str("storage staging I/O error"),
-            Self::ObjectTooLarge => formatter.write_str("storage object exceeds staging limit"),
-        }
-    }
-}
-
-impl std::error::Error for StorageError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::OpenDal(error) => Some(error),
-            Self::Io(error) => Some(error),
-            _ => None,
-        }
-    }
 }

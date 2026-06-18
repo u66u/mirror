@@ -1,6 +1,7 @@
 //! Original-object integrity scanning and explicit orphan remediation.
 
 use std::collections::{BTreeMap, BTreeSet};
+use thiserror::Error;
 
 use sqlx::PgPool;
 
@@ -36,42 +37,20 @@ pub struct OrphanRemediationReport {
 }
 
 /// Integrity scan or remediation failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum IntegrityError {
     /// Postgres query failed.
-    Database(sqlx::Error),
+    #[error("integrity database error: {0}")]
+    Database(#[from] sqlx::Error),
     /// Object storage operation failed.
-    Storage(StorageError),
+    #[error("integrity storage error: {0}")]
+    Storage(#[from] StorageError),
     /// A storage listing returned an unsafe object key.
+    #[error("storage listed an invalid object key")]
     InvalidListedObjectKey(String),
     /// Remediation was asked to delete outside the originals/BLAKE3 namespace.
+    #[error("invalid original object remediation key")]
     InvalidRemediationKey(String),
-}
-
-impl std::fmt::Display for IntegrityError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::Database(_) => "integrity database error",
-            Self::Storage(_) => "integrity storage error",
-            Self::InvalidListedObjectKey(_) => "storage listed an invalid object key",
-            Self::InvalidRemediationKey(_) => "invalid original object remediation key",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for IntegrityError {}
-
-impl From<sqlx::Error> for IntegrityError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
-}
-
-impl From<StorageError> for IntegrityError {
-    fn from(error: StorageError) -> Self {
-        Self::Storage(error)
-    }
 }
 
 /// Compares all database originals with recursively listed BLAKE3 original objects.

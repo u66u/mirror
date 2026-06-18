@@ -9,6 +9,7 @@ use serde::Serialize;
 use sqlx::{PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
+use thiserror::Error;
 
 use crate::jobs::{JobKind, JobSpec, enqueue_in_tx};
 use crate::public_derivatives;
@@ -121,100 +122,60 @@ pub struct TrashedAssetTimelinePage {
 }
 
 /// Promotion failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum PromoteError {
     /// Upload is missing or not verified.
+    #[error("upload is not verified")]
     UploadNotVerified,
     /// Staged bytes no longer match verified upload metadata.
+    #[error("upload verification failed")]
     VerificationFailed,
     /// Storage backend failed.
-    Storage(crate::storage::StorageError),
+    #[error("asset storage error: {0}")]
+    Storage(#[from] crate::storage::StorageError),
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("asset database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for PromoteError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::UploadNotVerified => "upload is not verified",
-            Self::VerificationFailed => "upload verification failed",
-            Self::Storage(_) => "asset storage error",
-            Self::Database(_) => "asset database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for PromoteError {}
 
 /// Asset listing failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ListAssetsError {
     /// Page size or cursor was invalid.
+    #[error("invalid asset list input")]
     InvalidInput,
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("asset list database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for ListAssetsError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidInput => "invalid asset list input",
-            Self::Database(_) => "asset list database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for ListAssetsError {}
 
 /// Asset read failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum AssetReadError {
     /// Asset or derivative was not found for owner.
+    #[error("asset not found")]
     NotFound,
     /// Derivative kind is not supported.
+    #[error("invalid asset read input")]
     InvalidInput,
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("asset read database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for AssetReadError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::NotFound => "asset not found",
-            Self::InvalidInput => "invalid asset read input",
-            Self::Database(_) => "asset read database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for AssetReadError {}
 
 /// Asset mutation failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum AssetMutationError {
     /// Asset was not found for owner.
+    #[error("asset not found")]
     NotFound,
     /// Asset must be moved to trash before this mutation.
+    #[error("asset is not trashed")]
     NotTrashed,
     /// Database failed.
-    Database(sqlx::Error),
+    #[error("asset mutation database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
-
-impl std::fmt::Display for AssetMutationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::NotFound => "asset not found",
-            Self::NotTrashed => "asset is not trashed",
-            Self::Database(_) => "asset mutation database error",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for AssetMutationError {}
 
 /// Storage metadata for a derivative after owner authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]

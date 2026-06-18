@@ -4,6 +4,7 @@
 //! `jobs`; media behavior stays in `media`.
 
 use std::time::Duration;
+use thiserror::Error;
 
 use time::OffsetDateTime;
 
@@ -74,74 +75,43 @@ impl WorkerPolicy {
 }
 
 /// Invalid worker timing policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum WorkerPolicyError {
     /// Lease expiry must be positive.
+    #[error("worker lease timeout must be positive")]
     ZeroLeaseTimeout,
     /// Job wall-clock budget must be positive.
+    #[error("worker job timeout must be positive")]
     ZeroJobTimeout,
     /// Heartbeat cadence must be positive.
+    #[error("worker heartbeat interval must be positive")]
     ZeroHeartbeatInterval,
     /// Heartbeats must occur before a lease can be reclaimed.
+    #[error("worker heartbeat interval must be shorter than lease timeout")]
     HeartbeatNotShorterThanLease,
     /// Lease timeout cannot be represented by database timestamp arithmetic.
+    #[error("worker lease timeout is out of range")]
     LeaseTimeoutOutOfRange,
 }
 
-impl std::fmt::Display for WorkerPolicyError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::ZeroLeaseTimeout => "worker lease timeout must be positive",
-            Self::ZeroJobTimeout => "worker job timeout must be positive",
-            Self::ZeroHeartbeatInterval => "worker heartbeat interval must be positive",
-            Self::HeartbeatNotShorterThanLease => {
-                "worker heartbeat interval must be shorter than lease timeout"
-            }
-            Self::LeaseTimeoutOutOfRange => "worker lease timeout is out of range",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for WorkerPolicyError {}
-
 /// Worker orchestration failure.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum WorkerError {
     /// Queue operation failed.
-    Jobs(JobError),
+    #[error("worker queue error: {0}")]
+    Jobs(#[from] JobError),
     /// Media handler failed.
-    Media(media::MediaError),
+    #[error("worker media error: {0}")]
+    Media(#[from] media::MediaError),
     /// ML handler failed.
-    Ml(ml::MlError),
+    #[error("worker ml error: {0}")]
+    Ml(#[from] ml::MlError),
     /// This worker no longer owns the leased job.
+    #[error("worker job lease lost")]
     LeaseLost,
     /// Timing policy cannot be applied.
-    Policy(WorkerPolicyError),
-}
-
-impl std::fmt::Display for WorkerError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Jobs(_) => formatter.write_str("worker queue error"),
-            Self::Media(_) => formatter.write_str("worker media error"),
-            Self::Ml(_) => formatter.write_str("worker ml error"),
-            Self::LeaseLost => formatter.write_str("worker job lease lost"),
-            Self::Policy(_) => formatter.write_str("invalid worker timing policy"),
-        }
-    }
-}
-
-impl std::error::Error for WorkerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Jobs(error) => Some(error),
-            Self::Media(error) => Some(error),
-            Self::Ml(error) => Some(error),
-            Self::Policy(error) => Some(error),
-            Self::LeaseLost => None,
-        }
-    }
+    #[error("invalid worker timing policy: {0}")]
+    Policy(#[from] WorkerPolicyError),
 }
 
 /// Handler dependencies for one worker process.
@@ -241,17 +211,9 @@ where
             Ok(WorkerStep::Completed)
         }
         Some(Err(error)) => {
-            fail_leased_job(pool, worker_id, &job, &handler_error_message(&error)).await?;
+            fail_leased_job(pool, worker_id, &job, &error.to_string()).await?;
             Ok(WorkerStep::Failed)
         }
-    }
-}
-
-fn handler_error_message(error: &WorkerError) -> String {
-    match error {
-        WorkerError::Media(error) => error.to_string(),
-        WorkerError::Ml(error) => error.to_string(),
-        _ => error.to_string(),
     }
 }
 
