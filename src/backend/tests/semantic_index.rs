@@ -184,8 +184,7 @@ async fn semantic_search_tracks_trash_and_restore_after_indexing() -> TestResult
         1
     );
 
-    sqlx::query("UPDATE assets SET trashed_at = now() WHERE id = $1")
-        .bind(asset.internal_id)
+    sqlx::query!("UPDATE assets SET trashed_at = now() WHERE id = $1", asset.internal_id)
         .execute(&pool)
         .await?;
     assert!(
@@ -194,8 +193,7 @@ async fn semantic_search_tracks_trash_and_restore_after_indexing() -> TestResult
             .is_empty()
     );
 
-    sqlx::query("UPDATE assets SET trashed_at = NULL WHERE id = $1")
-        .bind(asset.internal_id)
+    sqlx::query!("UPDATE assets SET trashed_at = NULL WHERE id = $1", asset.internal_id)
         .execute(&pool)
         .await?;
     assert_eq!(

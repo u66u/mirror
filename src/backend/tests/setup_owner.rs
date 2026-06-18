@@ -26,8 +26,7 @@ async fn owner_setup_hashes_password_and_consumes_setup_token() -> TestResult {
     .await?;
 
     let stored_hash: String =
-        sqlx::query_scalar("SELECT password_hash FROM owner_accounts WHERE public_id = $1")
-            .bind(output.owner_public_id)
+        sqlx::query_scalar!("SELECT password_hash FROM owner_accounts WHERE public_id = $1", output.owner_public_id)
             .fetch_one(&pool)
             .await?;
 

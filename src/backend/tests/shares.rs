@@ -65,8 +65,7 @@ async fn share_route_hashes_token_serves_derivative_and_revokes() -> TestResult 
     let token = required_json_string(&created, "token")?;
 
     let stored_hash: Vec<u8> =
-        sqlx::query_scalar("SELECT token_hash FROM asset_shares WHERE public_id::text = $1")
-            .bind(&share_id)
+        sqlx::query_scalar!("SELECT token_hash FROM asset_shares WHERE public_id::text = $1", share_id)
             .fetch_one(&deps.pool)
             .await?;
     assert_eq!(

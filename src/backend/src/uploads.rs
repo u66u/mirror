@@ -107,7 +107,7 @@ pub async fn create_upload(
 ) -> Result<UploadSessionView, UploadError> {
     validate_create_input(&input)?;
     let proposed_upload_id = Uuid::now_v7();
-    let inserted_upload_id = sqlx::query_scalar::<_, Uuid>(
+    let inserted_upload_id = sqlx::query_scalar!(
         r#"
         INSERT INTO upload_sessions (
             id,
@@ -124,14 +124,14 @@ pub async fn create_upload(
         DO NOTHING
         RETURNING id
         "#,
+        proposed_upload_id,
+        input.owner_id,
+        input.original_filename,
+        input.expected_size,
+        input.expected_blake3,
+        input.media_type,
+        input.client_upload_key as Option<Uuid>,
     )
-    .bind(proposed_upload_id)
-    .bind(input.owner_id)
-    .bind(&input.original_filename)
-    .bind(input.expected_size)
-    .bind(&input.expected_blake3)
-    .bind(&input.media_type)
-    .bind(input.client_upload_key)
     .fetch_optional(pool)
     .await?;
 
@@ -141,28 +141,28 @@ pub async fn create_upload(
         let Some(client_upload_key) = input.client_upload_key else {
             return Err(UploadError::InvalidInput);
         };
-        let existing = sqlx::query_as::<_, (Uuid, String, i64, String, String)>(
+        let existing = sqlx::query!(
             r#"
             SELECT id, original_filename, expected_size, expected_blake3, media_type
             FROM upload_sessions
             WHERE owner_id = $1
               AND client_upload_key = $2
             "#,
+            input.owner_id,
+            client_upload_key
         )
-        .bind(input.owner_id)
-        .bind(client_upload_key)
         .fetch_optional(pool)
         .await?
         .ok_or(UploadError::InvalidInput)?;
 
-        if existing.1 != input.original_filename
-            || existing.2 != input.expected_size
-            || existing.3 != input.expected_blake3
-            || existing.4 != input.media_type
+        if existing.original_filename != input.original_filename
+            || existing.expected_size != input.expected_size
+            || existing.expected_blake3 != input.expected_blake3
+            || existing.media_type != input.media_type
         {
             return Err(UploadError::InvalidInput);
         }
-        existing.0
+        existing.id
     };
 
     get_upload(pool, input.owner_id, upload_id).await
@@ -367,67 +367,75 @@ async fn load_upload(
     owner_id: i16,
     upload_id: Uuid,
 ) -> Result<UploadRow, UploadError> {
-    let row = sqlx::query_as::<_, (String, i64, String, String)>(
+    let row = sqlx::query!(
         r#"
         SELECT status, expected_size, expected_blake3, media_type
         FROM upload_sessions
         WHERE id = $1
           AND owner_id = $2
         "#,
+        upload_id,
+        owner_id
     )
-    .bind(upload_id)
-    .bind(owner_id)
     .fetch_optional(pool)
     .await?
     .ok_or(UploadError::NotFound)?;
 
     Ok(UploadRow {
-        status: parse_status(&row.0)?,
-        expected_size: row.1,
-        expected_blake3: row.2,
-        media_type: row.3,
+        status: parse_status(&row.status)?,
+        expected_size: row.expected_size,
+        expected_blake3: row.expected_blake3,
+        media_type: row.media_type,
     })
 }
 
 async fn committed_parts(pool: &PgPool, upload_id: Uuid) -> Result<Vec<i32>, UploadError> {
-    sqlx::query_scalar::<_, i32>(
+    sqlx::query_scalar!(
         r#"
         SELECT part_index
         FROM upload_parts
         WHERE upload_id = $1
         ORDER BY part_index
         "#,
+        upload_id,
     )
-    .bind(upload_id)
     .fetch_all(pool)
     .await
     .map_err(UploadError::Database)
 }
 
 async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, UploadError> {
-    let rows = sqlx::query_as::<_, (i32, i64, String, String)>(
+    let rows = sqlx::query_as!(
+        PartRowQuery,
         r#"
         SELECT part_index, size_bytes, storage_key, blake3_hash
         FROM upload_parts
         WHERE upload_id = $1
         ORDER BY part_index
         "#,
+        upload_id,
     )
-    .bind(upload_id)
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
         .map(
-            |(part_index, size_bytes, storage_key, blake3_hash)| PartRow {
-                part_index,
-                size_bytes,
-                storage_key,
-                blake3_hash,
+            |row| PartRow {
+                part_index: row.part_index,
+                size_bytes: row.size_bytes,
+                storage_key: row.storage_key,
+                blake3_hash: row.blake3_hash,
             },
         )
         .collect())
+}
+
+struct PartRowQuery {
+    part_index: i32,
+    size_bytes: i64,
+    storage_key: String,
+    blake3_hash: String,
 }
 
 fn validate_create_input(input: &CreateUploadInput) -> Result<(), UploadError> {

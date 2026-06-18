@@ -172,22 +172,37 @@ async fn backup_run_records_snapshot_and_restore_check_without_secrets() -> Test
     let restore_checked = mark_restore_check(&pool, run.backup_run_id, true, None).await?;
     assert_eq!(restore_checked.status, "restore_check_succeeded");
 
-    let row: (String, serde_json::Value, Option<String>) = sqlx::query_as(
+    struct RunRow {
+        repository_hint: String,
+        manifest: serde_json::Value,
+        error_message: Option<String>,
+    }
+
+    let row = sqlx::query_as!(
+        RunRow,
         r#"
-        SELECT repository_hint, manifest, error_message
+        SELECT repository_hint as "repository_hint!", manifest as "manifest!", error_message
         FROM backup_runs
         WHERE id = $1
         "#,
+        run.backup_run_id
     )
-    .bind(run.backup_run_id)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(row.0, "local-restic-repo");
-    assert_eq!(row.1["durable_object_count"], 2);
-    assert!(row.2.is_none());
-    assert!(!row.1.to_string().contains("RESTIC_PASSWORD"));
+    assert_eq!(row.repository_hint, "local-restic-repo");
+    assert_eq!(row.manifest["durable_object_count"], 2);
+    assert!(row.error_message.is_none());
+    assert!(!row.manifest.to_string().contains("RESTIC_PASSWORD"));
 
-    let audit_rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+    struct AuditRow {
+        action: String,
+        outcome: String,
+        metadata: serde_json::Value,
+    }
+
+    let target_id_str = run.backup_run_id.to_string();
+    let audit_rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as!(
+        AuditRow,
         r#"
         SELECT action, outcome, metadata
         FROM audit_events
@@ -195,10 +210,13 @@ async fn backup_run_records_snapshot_and_restore_check_without_secrets() -> Test
             AND target_id = $1
         ORDER BY id
         "#,
+        target_id_str
     )
-    .bind(run.backup_run_id.to_string())
     .fetch_all(&pool)
-    .await?;
+    .await?
+    .into_iter()
+    .map(|row| (row.action, row.outcome, row.metadata))
+    .collect();
     assert_eq!(
         audit_rows
             .iter()

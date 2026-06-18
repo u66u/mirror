@@ -216,8 +216,7 @@ async fn model_reindex_queues_embedding_jobs_for_active_assets_only() -> TestRes
         Some(run.reindex_run_id.to_string().as_str())
     );
     let rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM model_reindex_assets WHERE reindex_run_id = $1")
-            .bind(run.reindex_run_id)
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM model_reindex_assets WHERE reindex_run_id = $1"#, run.reindex_run_id)
             .fetch_one(&pool)
             .await?;
     assert_eq!(rows, 1);
@@ -274,15 +273,15 @@ async fn model_reindex_records_terminal_failures_without_double_counting() -> Te
     assert_eq!(duplicate.processed_assets, 1);
     assert_eq!(duplicate.failed_assets, 1);
 
-    let stored_error: Option<String> = sqlx::query_scalar(
+    let stored_error: Option<String> = sqlx::query_scalar!(
         r#"
         SELECT error_message
         FROM model_reindex_assets
         WHERE reindex_run_id = $1 AND asset_id = $2
         "#,
-    )
-    .bind(run.reindex_run_id)
-    .bind(failed_asset_id)
+        run.reindex_run_id,
+        failed_asset_id
+    )    
     .fetch_one(&pool)
     .await?;
     assert_eq!(stored_error.as_deref(), Some("embedding runtime failed"));

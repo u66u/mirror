@@ -525,17 +525,18 @@ async fn purge_route_requires_trash_and_audits_permanent_removal() -> TestResult
     let share_count: i64 = sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM asset_shares"#)
         .fetch_one(&deps.pool)
         .await?;
-    let audit_count: i64 = sqlx::query_scalar(
+    let public_id_str = asset.public_id.to_string();
+    let audit_count: i64 = sqlx::query_scalar!(
         r#"
-        SELECT count(*)
+        SELECT count(*) as "count!"
         FROM audit_events
         WHERE action = 'asset.purge'
           AND outcome = 'success'
           AND target_id = $1
           AND metadata->>'original_removed' = 'true'
         "#,
+        public_id_str,
     )
-    .bind(asset.public_id.to_string())
     .fetch_one(&deps.pool)
     .await?;
 

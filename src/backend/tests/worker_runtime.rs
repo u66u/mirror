@@ -297,10 +297,10 @@ async fn worker_dead_lettered_embed_job_records_reindex_failure() -> TestResult 
     })
     .fetch_one(&deps.pool)
     .await?;
-    let asset_error: Option<String> = sqlx::query_scalar(
+    let asset_error = sqlx::query_scalar!(
         "SELECT error_message FROM model_reindex_assets WHERE reindex_run_id = $1",
+        run.reindex_run_id
     )
-    .bind(run.reindex_run_id)
     .fetch_one(&deps.pool)
     .await?;
 
@@ -444,10 +444,10 @@ fn worker_policy_rejects_heartbeat_that_can_expire_its_lease() {
 
 async fn job_count_by_status(pool: &sqlx::PgPool, status: &str) -> TestResult<i64> {
     Ok(
-        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE status = $1")
-            .bind(status)
+        sqlx::query_scalar!("SELECT count(*) FROM jobs WHERE status = $1", status)
             .fetch_one(pool)
-            .await?,
+            .await?
+            .unwrap_or(0),
     )
 }
 

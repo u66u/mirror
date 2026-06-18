@@ -207,14 +207,16 @@ async fn maintenance_restore_check_marks_failed_when_original_object_missing() -
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("restore_check\t"));
     assert!(stdout.contains("restore_check_failed"));
-    let row: (String, Option<String>) =
-        sqlx::query_as("SELECT status, error_message FROM backup_runs WHERE id = $1")
-            .bind(run.backup_run_id)
+    let row =
+        sqlx::query!(
+            "SELECT status, error_message FROM backup_runs WHERE id = $1",
+            run.backup_run_id
+        )
             .fetch_one(&pool)
             .await?;
-    assert_eq!(row.0, "restore_check_failed");
+    assert_eq!(row.status, "restore_check_failed");
     assert!(
-        row.1
+        row.error_message
             .as_deref()
             .is_some_and(|message| message.contains("missing=1"))
     );

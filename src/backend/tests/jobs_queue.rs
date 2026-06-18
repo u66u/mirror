@@ -175,8 +175,7 @@ async fn enqueue_job(pool: &sqlx::PgPool, spec: JobSpec) -> TestResult<Uuid> {
     enqueue_in_tx(&mut tx, spec).await?;
     tx.commit().await?;
 
-    let job_id = sqlx::query_scalar("SELECT id FROM jobs WHERE idempotency_key = $1")
-        .bind(idempotency_key)
+    let job_id = sqlx::query_scalar!("SELECT id FROM jobs WHERE idempotency_key = $1", idempotency_key)
         .fetch_one(pool)
         .await?;
     Ok(job_id)

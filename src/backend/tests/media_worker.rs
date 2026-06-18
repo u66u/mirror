@@ -138,23 +138,39 @@ async fn metadata_and_derivative_handlers_persist_expected_rows() -> TestResult 
     )
     .await?;
 
-    let (width, height, extractor) = sqlx::query_as::<_, (i32, i32, String)>(
-        "SELECT width, height, raw->>'extractor' FROM asset_metadata WHERE asset_id = $1",
+    struct AspectRow {
+        width: i32,
+        height: i32,
+        extractor: Option<String>,
+    }
+    let row = sqlx::query_as!(
+        AspectRow,
+        r#"SELECT width as "width!", height as "height!", raw->>'extractor' as "extractor" FROM asset_metadata WHERE asset_id = $1"#,
+        asset_id
     )
-    .bind(asset_id)
     .fetch_one(&deps.pool)
     .await?;
-    let derivatives = sqlx::query_as::<_, (String, String, i32, i32, String)>(
+    let (width, height, extractor) = (row.width, row.height, row.extractor.unwrap());
+    struct DerivativeRow {
+        kind: String,
+        format: String,
+        width: i32,
+        height: i32,
+        storage_key: String,
+    }
+    let derivatives_rows = sqlx::query_as!(
+        DerivativeRow,
         r#"
         SELECT kind, format, width, height, storage_key
         FROM derivatives
         WHERE asset_id = $1
         ORDER BY kind
         "#,
+        asset_id
     )
-    .bind(asset_id)
     .fetch_all(&deps.pool)
     .await?;
+    let derivatives: Vec<(String, String, i32, i32, String)> = derivatives_rows.into_iter().map(|row| (row.kind, row.format, row.width, row.height, row.storage_key)).collect();
 
     assert_eq!((width, height), (4000, 3000));
     assert_eq!(extractor, "media-metadata-v2");

@@ -134,8 +134,7 @@ async fn search_route_semantic_mode_uses_active_model_pack() -> TestResult {
     activate_model_pack(&deps.pool, pack.model_pack_id).await?;
     let asset = create_promoted_asset(&deps, "semantic-route.jpg").await?;
     create_promoted_asset(&deps, "not-indexed.jpg").await?;
-    let internal_id: Uuid = sqlx::query_scalar("SELECT id FROM assets WHERE public_id = $1")
-        .bind(asset.public_id)
+    let internal_id = sqlx::query_scalar!("SELECT id FROM assets WHERE public_id = $1", asset.public_id)
         .fetch_one(&deps.pool)
         .await?;
     let mut values = vec![0.0; manifest.embedding_dimension as usize];

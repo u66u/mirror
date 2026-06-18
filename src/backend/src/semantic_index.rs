@@ -149,31 +149,72 @@ pub async fn semantic_search(
     check_dimension(query_embedding, spec.embedding_dimension)?;
 
     let vector = Vector::from(query_embedding.values().to_vec());
-    let order = match spec.distance_metric {
-        DistanceMetric::Cosine => "<=>",
-        DistanceMetric::L2 => "<->",
-        DistanceMetric::Dot => "<#>",
-    };
-
-    let sql = format!(
-        r#"
-        SELECT asset_public_id, embedding {order} $3 AS raw_rank
-        FROM asset_embeddings
-        WHERE model_pack_id = $1
-          AND owner_id = $2
-          AND asset_trashed_at IS NULL
-        ORDER BY raw_rank ASC, asset_created_at DESC, asset_public_id ASC
-        LIMIT $4
-        "#
-    );
-
-    let rows = sqlx::query_as::<_, (Uuid, f64)>(&sql)
-        .bind(model_pack_id)
-        .bind(owner_id)
-        .bind(vector)
-        .bind(limit)
+    let rows: Vec<(Uuid, f64)> = match spec.distance_metric {
+        DistanceMetric::Cosine => sqlx::query!(
+            r#"
+                SELECT asset_public_id, (embedding <=> $3) AS "raw_rank!"
+                FROM asset_embeddings
+                WHERE model_pack_id = $1
+                  AND owner_id = $2
+                  AND asset_trashed_at IS NULL
+                ORDER BY embedding <=> $3 ASC, asset_created_at DESC, asset_public_id ASC
+                LIMIT $4
+                "#,
+            model_pack_id,
+            owner_id,
+            vector as _,
+            limit
+        )
         .fetch_all(pool)
-        .await?;
+        .await?
+        .into_iter()
+        .map(|r| (r.asset_public_id, r.raw_rank))
+        .collect(),
+        DistanceMetric::L2 => sqlx::query!(
+            r#"
+                SELECT asset_public_id, (embedding <-> $3) AS "raw_rank!"
+                FROM asset_embeddings
+                WHERE model_pack_id = $1
+                  AND owner_id = $2
+                  AND asset_trashed_at IS NULL
+                ORDER BY embedding <-> $3 ASC, asset_created_at DESC, asset_public_id ASC
+                LIMIT $4
+                "#,
+            model_pack_id,
+            owner_id,
+            vector as _,
+            limit
+        )
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|r| (r.asset_public_id, r.raw_rank))
+        .collect(),
+        DistanceMetric::Dot => {
+            // Note: Dot product metric in pgvector is '<#>' but ranks ascending.
+            // Pgvector defines <#> as negative inner product to allow ascending sort.
+            sqlx::query!(
+                r#"
+                SELECT asset_public_id, (embedding <#> $3) AS "raw_rank!"
+                FROM asset_embeddings
+                WHERE model_pack_id = $1
+                  AND owner_id = $2
+                  AND asset_trashed_at IS NULL
+                ORDER BY embedding <#> $3 ASC, asset_created_at DESC, asset_public_id ASC
+                LIMIT $4
+                "#,
+                model_pack_id,
+                owner_id,
+                vector as _,
+                limit
+            )
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|r| (r.asset_public_id, r.raw_rank))
+            .collect()
+        }
+    };
 
     Ok(rows
         .into_iter()

@@ -68,8 +68,7 @@ async fn upload_part_route_accepts_four_mib_and_rejects_larger_without_artifacts
     assert_eq!(exact_response.status(), StatusCode::NO_CONTENT);
 
     let exact_size: i64 =
-        sqlx::query_scalar("SELECT size_bytes FROM upload_parts WHERE upload_id = $1")
-            .bind(exact_upload.upload_id)
+        sqlx::query_scalar!("SELECT size_bytes FROM upload_parts WHERE upload_id = $1", exact_upload.upload_id)
             .fetch_one(&deps.pool)
             .await?;
     assert_eq!(exact_size, i64::try_from(UPLOAD_PART_SIZE_BYTES)?);
