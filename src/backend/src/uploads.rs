@@ -501,7 +501,13 @@ fn is_blake3_hex(value: &str) -> bool {
 fn is_supported_media_type(value: &str) -> bool {
     matches!(
         value,
-        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4"
+        "image/jpeg"
+            | "image/png"
+            | "image/gif"
+            | "image/webp"
+            | "image/heic"
+            | "image/heif"
+            | "video/mp4"
     )
 }
 
@@ -511,7 +517,27 @@ fn media_signature_matches(media_type: &str, bytes: &[u8]) -> bool {
         "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
         "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
         "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
+        "image/heic" | "image/heif" => heif_signature_matches(bytes),
         "video/mp4" => bytes.len() >= 12 && &bytes[4..8] == b"ftyp",
         _ => false,
     }
+}
+
+fn heif_signature_matches(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    is_heif_brand(&bytes[8..12])
+        || bytes
+            .get(16..)
+            .unwrap_or_default()
+            .chunks_exact(4)
+            .any(is_heif_brand)
+}
+
+fn is_heif_brand(brand: &[u8]) -> bool {
+    matches!(
+        brand,
+        b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1"
+    )
 }

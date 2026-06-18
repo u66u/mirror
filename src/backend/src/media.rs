@@ -4,7 +4,14 @@
 //! worker path only, never from request handlers. Video handling will use a
 //! separate timeout-bounded external command wrapper.
 
-use std::{collections::BTreeMap, io::Cursor, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Cursor,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use image::{GenericImageView, ImageFormat, ImageReader, Limits};
 use nom_exif::{Exif, ExifTag, MediaParser, MediaSource};
@@ -25,6 +32,8 @@ const MAX_STILL_SOURCE_BYTES: i64 = 512 * 1024 * 1024;
 const MAX_VIDEO_SOURCE_BYTES: i64 = 64 * 1024 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 32_768;
 const MAX_IMAGE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_HEIF_CONVERTED_BYTES: u64 = 512 * 1024 * 1024;
+const HEIF_CONVERT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_OWNER_METADATA_ENTRIES: usize = 256;
 const MAX_OWNER_METADATA_VALUE_CHARS: usize = 1_024;
 
@@ -124,6 +133,62 @@ impl ImageProcessor for RustImageProcessor {
     }
 }
 
+/// Still-image processor that delegates HEIC/HEIF decoding to `heif-convert`.
+#[derive(Debug, Clone)]
+pub struct HeifImageProcessor {
+    inner: RustImageProcessor,
+    heif_convert_path: PathBuf,
+}
+
+impl HeifImageProcessor {
+    /// Creates a processor with an explicit `heif-convert` path.
+    #[must_use]
+    pub fn new(heif_convert_path: impl Into<PathBuf>) -> Self {
+        Self {
+            inner: RustImageProcessor,
+            heif_convert_path: heif_convert_path.into(),
+        }
+    }
+
+    /// Production default resolved through worker `PATH`.
+    #[must_use]
+    pub fn production() -> Self {
+        Self::new("heif-convert")
+    }
+
+    fn bytes_for_image_crate(
+        &self,
+        bytes: &[u8],
+        media_type: &str,
+    ) -> Result<(Vec<u8>, &'static str), MediaToolError> {
+        if is_heif_media_type(media_type) {
+            Ok((
+                convert_heif_to_png(&self.heif_convert_path, bytes)?,
+                "image/png",
+            ))
+        } else {
+            Ok((bytes.to_vec(), media_type_for_image_crate(media_type)?))
+        }
+    }
+}
+
+impl ImageProcessor for HeifImageProcessor {
+    fn inspect(&self, bytes: &[u8], media_type: &str) -> Result<ImageInfo, MediaToolError> {
+        let (bytes, media_type) = self.bytes_for_image_crate(bytes, media_type)?;
+        self.inner.inspect(&bytes, media_type)
+    }
+
+    fn generate(
+        &self,
+        bytes: &[u8],
+        media_type: &str,
+        kind: DerivativeKind,
+    ) -> Result<GeneratedDerivative, MediaToolError> {
+        let (bytes, media_type) = self.bytes_for_image_crate(bytes, media_type)?;
+        self.inner.generate(&bytes, media_type, kind)
+    }
+}
+
 /// Media job failure.
 #[derive(Debug)]
 pub enum MediaError {
@@ -179,6 +244,16 @@ impl std::error::Error for MediaError {}
 pub enum MediaToolError {
     /// Media type is not image input supported by this processor.
     UnsupportedMediaType,
+    /// External HEIC/HEIF converter is not installed.
+    HeifToolUnavailable,
+    /// External HEIC/HEIF converter did not complete in time.
+    HeifTimedOut,
+    /// External HEIC/HEIF converter exited unsuccessfully.
+    HeifCommandFailed,
+    /// External HEIC/HEIF converter output was empty or exceeded bounds.
+    HeifConvertedSizeOutOfRange,
+    /// Temporary HEIC/HEIF conversion file operation failed.
+    HeifIo(std::io::Error),
     /// Image decoder/encoder failed.
     Image(image::ImageError),
 }
@@ -187,6 +262,11 @@ impl std::fmt::Display for MediaToolError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             Self::UnsupportedMediaType => "unsupported media type",
+            Self::HeifToolUnavailable => "heif-convert unavailable",
+            Self::HeifTimedOut => "heif-convert timed out",
+            Self::HeifCommandFailed => "heif-convert failed",
+            Self::HeifConvertedSizeOutOfRange => "converted heif image size out of range",
+            Self::HeifIo(_) => "heif conversion io failed",
             Self::Image(_) => "image processing failed",
         };
         formatter.write_str(message)
@@ -604,7 +684,9 @@ fn asset_id_from_payload(payload: &Value) -> Result<Uuid, MediaError> {
 
 fn classify_media_type(media_type: &str) -> Result<MediaKind, MediaError> {
     match media_type {
-        "image/jpeg" | "image/png" | "image/gif" | "image/webp" => Ok(MediaKind::Image),
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/heic" | "image/heif" => {
+            Ok(MediaKind::Image)
+        }
         "video/mp4" | "video/quicktime" | "video/webm" | "video/x-matroska" => Ok(MediaKind::Video),
         _ => Err(MediaError::UnsupportedMediaType),
     }
@@ -652,12 +734,12 @@ fn ensure_loaded_size(original: &AssetOriginal, loaded: usize) -> Result<(), Med
 }
 
 fn decode_image(bytes: &[u8], media_type: &str) -> Result<image::DynamicImage, MediaToolError> {
-    let format = match media_type {
+    let format = match media_type_for_image_crate(media_type)? {
         "image/jpeg" => ImageFormat::Jpeg,
         "image/png" => ImageFormat::Png,
         "image/gif" => ImageFormat::Gif,
         "image/webp" => ImageFormat::WebP,
-        _ => return Err(MediaToolError::UnsupportedMediaType),
+        _ => unreachable!("media_type_for_image_crate only returns supported still image types"),
     };
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
@@ -667,4 +749,64 @@ fn decode_image(bytes: &[u8], media_type: &str) -> Result<image::DynamicImage, M
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(limits);
     reader.decode().map_err(MediaToolError::Image)
+}
+
+fn media_type_for_image_crate(media_type: &str) -> Result<&'static str, MediaToolError> {
+    match media_type {
+        "image/jpeg" => Ok("image/jpeg"),
+        "image/png" => Ok("image/png"),
+        "image/gif" => Ok("image/gif"),
+        "image/webp" => Ok("image/webp"),
+        _ => Err(MediaToolError::UnsupportedMediaType),
+    }
+}
+
+fn is_heif_media_type(media_type: &str) -> bool {
+    matches!(media_type, "image/heic" | "image/heif")
+}
+
+fn convert_heif_to_png(heif_convert_path: &Path, bytes: &[u8]) -> Result<Vec<u8>, MediaToolError> {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("mirror-heif-")
+        .tempdir()
+        .map_err(MediaToolError::HeifIo)?;
+    let input = temp_dir.path().join("input.heic");
+    let output = temp_dir.path().join("output.png");
+    fs::write(&input, bytes).map_err(MediaToolError::HeifIo)?;
+
+    let mut child = Command::new(heif_convert_path)
+        .arg(&input)
+        .arg(&output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MediaToolError::HeifToolUnavailable
+            } else {
+                MediaToolError::HeifIo(error)
+            }
+        })?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().map_err(MediaToolError::HeifIo)? {
+            if !status.success() {
+                return Err(MediaToolError::HeifCommandFailed);
+            }
+            break;
+        }
+        if started.elapsed() >= HEIF_CONVERT_TIMEOUT {
+            child.kill().map_err(MediaToolError::HeifIo)?;
+            child.wait().map_err(MediaToolError::HeifIo)?;
+            return Err(MediaToolError::HeifTimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let size = fs::metadata(&output).map_err(MediaToolError::HeifIo)?.len();
+    if size == 0 || size > MAX_HEIF_CONVERTED_BYTES {
+        return Err(MediaToolError::HeifConvertedSizeOutOfRange);
+    }
+    fs::read(output).map_err(MediaToolError::HeifIo)
 }

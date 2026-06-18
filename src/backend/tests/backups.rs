@@ -2,7 +2,7 @@ use mirror_backend::{
     backups::{
         BackupError, CreateBackupRunInput, backup_manifest_summary, create_backup_run,
         durable_storage_manifest, mark_backup_succeeded, mark_restore_check, postgres_dump_plan,
-        postgres_restore_plan, restic_backup_plan, restic_restore_plan,
+        postgres_restore_plan, restic_backup_plan, restic_restore_plan, restic_retention_plan,
     },
     storage::{ObjectStorage, StorageKey},
 };
@@ -63,7 +63,10 @@ fn postgres_dump_plan_uses_custom_format_without_secret_argv() -> TestResult {
         plan.args
             .contains(&"/vault/backup/postgres.dump".to_owned())
     );
-    assert_eq!(plan.required_env, vec!["PGDATABASE"]);
+    assert_eq!(
+        plan.required_env,
+        vec!["PGHOST", "PGPORT", "PGUSER", "PGDATABASE"]
+    );
     assert!(!format!("{plan:?}").contains("postgres://secret"));
 
     Ok(())
@@ -109,7 +112,10 @@ fn postgres_restore_plan_uses_env_database_and_clean_restore_args() -> TestResul
     assert!(plan.args.contains(&"--if-exists".to_owned()));
     assert!(plan.args.contains(&"--no-owner".to_owned()));
     assert!(plan.args.contains(&"/restore/postgres.dump".to_owned()));
-    assert_eq!(plan.required_env, vec!["PGDATABASE"]);
+    assert_eq!(
+        plan.required_env,
+        vec!["PGHOST", "PGPORT", "PGUSER", "PGDATABASE"]
+    );
     assert!(!format!("{plan:?}").contains("postgres://secret"));
 
     Ok(())
@@ -126,6 +132,7 @@ fn restic_backup_plan_uses_explicit_durable_paths_and_secret_env() -> TestResult
     assert_eq!(plan.args[0], "backup");
     assert!(plan.args.contains(&"/vault/storage/originals".to_owned()));
     assert!(plan.args.contains(&"/vault/storage/derivatives".to_owned()));
+    assert!(plan.args.contains(&"/vault/storage/model-packs".to_owned()));
     assert!(
         plan.args
             .contains(&"/vault/backup/postgres.dump".to_owned())
@@ -149,6 +156,31 @@ fn restic_backup_plan_rejects_parent_relative_paths() {
     );
 
     assert!(matches!(result, Err(BackupError::InvalidPath)));
+}
+
+#[test]
+fn restic_retention_plan_uses_conservative_prune_policy_without_secret_argv() {
+    let plan = restic_retention_plan();
+
+    assert_eq!(plan.program, "restic");
+    assert_eq!(plan.args[0], "forget");
+    assert!(plan.args.contains(&"--prune".to_owned()));
+    assert!(plan.args.contains(&"--keep-last".to_owned()));
+    assert!(plan.args.contains(&"3".to_owned()));
+    assert!(plan.args.contains(&"--keep-hourly".to_owned()));
+    assert!(plan.args.contains(&"24".to_owned()));
+    assert!(plan.args.contains(&"--keep-daily".to_owned()));
+    assert!(plan.args.contains(&"30".to_owned()));
+    assert!(plan.args.contains(&"--keep-weekly".to_owned()));
+    assert!(plan.args.contains(&"12".to_owned()));
+    assert!(plan.args.contains(&"--keep-monthly".to_owned()));
+    assert!(plan.args.contains(&"--keep-yearly".to_owned()));
+    assert!(plan.args.contains(&"--retry-lock".to_owned()));
+    assert_eq!(
+        plan.required_env,
+        vec!["RESTIC_REPOSITORY", "RESTIC_PASSWORD_FILE"]
+    );
+    assert!(!format!("{plan:?}").contains("password-value"));
 }
 
 #[tokio::test]

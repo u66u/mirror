@@ -341,7 +341,7 @@ Supported v1 media:
 - JPEG
 - PNG
 - WebP
-- HEIC/HEIF when host tooling supports it
+- HEIC/HEIF through timeout-bounded `heif-convert` when host tooling supports it
 - MP4
 - MOV
 
@@ -424,7 +424,9 @@ Model pack manifests declare:
 - Model key and pinned revision.
 - File list and checksums.
 - License.
-- Input sizes and preprocessing.
+- ONNX model paths, tokenizer path, and image/text tensor names.
+- Input sizes and preprocessing: dimensions, channel order, tensor layout,
+  mean, and standard deviation.
 - Embedding dimension.
 - Distance metric.
 - Thresholds.
@@ -747,6 +749,14 @@ Backups and secrets:
   Postgres and is not editable through normal app UI.
 - Admin must keep an offline copy of the restic password. Mirror warns if no
   successful restore check has been recorded.
+- Retention is enforced by restic `forget --prune` after a successful backup:
+  keep the last 3 snapshots, 24 hourly, 30 daily, 12 weekly, 12 monthly, and 3
+  yearly snapshots. Group by host and paths so unrelated repository use does not
+  share retention state.
+- Scheduling is an OS concern in v1. Use a `systemd` one-shot service plus a
+  persistent timer instead of an app worker; this keeps backups running even if
+  the API or background worker is unhealthy, and lets systemd own retries,
+  locking, logs, and mounted secrets.
 - Restore flow is documented and tested: clean Postgres plus empty storage,
   restore restic snapshot, run `pg_restore`, then run a vault integrity scan.
 - Secrets are loaded from environment variables or mounted secret files.

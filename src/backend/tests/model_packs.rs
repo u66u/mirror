@@ -1,17 +1,30 @@
-use mirror_backend::models::{
-    ModelPackError, ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest,
-    activate_model_pack, install_model_pack, install_model_pack_files, record_model_pack_self_test,
-    record_reindex_asset_result, start_model_reindex, validate_embedding_output,
-    validate_model_pack_manifest,
-};
+use std::{num::NonZeroUsize, sync::Arc};
+
+use actix_web::{App, cookie::Cookie, http::StatusCode, test as actix_test, web};
 use mirror_backend::storage::ObjectStorage;
+use mirror_backend::{
+    auth::{SessionCreateInput, SetupState, create_session},
+    config::Config,
+    http,
+    ml::{ImageTextEmbedder, SharedImageTextRuntime, sha256_f32_values},
+    models::{
+        ModelPackError, ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest,
+        activate_model_pack, install_model_pack, install_model_pack_files,
+        record_model_pack_self_test, record_reindex_asset_result, start_model_reindex,
+        validate_embedding_output, validate_model_pack_manifest,
+    },
+    state::AppState,
+};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
 mod support;
-use support::valid_model_pack_manifest;
-use support::{TestResult, fresh_owner_pool};
+use support::{
+    FakeImageTextEmbedder, TestResult, fresh_owner_pool, valid_image_preprocess,
+    valid_model_pack_manifest, valid_onnx_config,
+};
 
 #[test]
 fn model_pack_manifest_rejects_ambiguous_or_unsafe_inputs() {
@@ -48,6 +61,20 @@ fn model_pack_manifest_rejects_ambiguous_or_unsafe_inputs() {
     assert!(matches!(
         validate_model_pack_manifest(&missing_self_test),
         Err(ModelPackError::InvalidManifest("self_tests"))
+    ));
+
+    let mut missing_runtime_file = valid_model_pack_manifest();
+    missing_runtime_file.onnx.image_model_path = "models/missing.onnx".to_owned();
+    assert!(matches!(
+        validate_model_pack_manifest(&missing_runtime_file),
+        Err(ModelPackError::InvalidManifest("onnx.image_model_path"))
+    ));
+
+    let mut invalid_preprocess = valid_model_pack_manifest();
+    invalid_preprocess.image_preprocess.std[0] = 0.0;
+    assert!(matches!(
+        validate_model_pack_manifest(&invalid_preprocess),
+        Err(ModelPackError::InvalidManifest("image_preprocess.std"))
     ));
 }
 
@@ -179,6 +206,197 @@ async fn model_pack_activation_requires_passed_self_test_and_is_one_active_per_k
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn model_pack_admin_routes_install_self_test_activate_and_reindex() -> TestResult {
+    let pool = fresh_owner_pool().await?;
+    let session = create_session(
+        &pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("model-pack-route-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(pool.clone()),
+                setup: SetupState::Disabled,
+                storage: None,
+            }))
+            .configure(http::configure),
+    )
+    .await;
+
+    let install = actix_test::TestRequest::post()
+        .uri("/model-packs")
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .set_json(valid_model_pack_manifest())
+        .to_request();
+    let install_response = actix_test::call_service(&app, install).await;
+    assert_eq!(install_response.status(), StatusCode::CREATED);
+    let installed: Value = actix_test::read_body_json(install_response).await;
+    let model_pack_id = installed["model_pack_id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("model_pack_id missing"))?;
+
+    let early_activate = actix_test::TestRequest::post()
+        .uri(&format!("/model-packs/{model_pack_id}/activate"))
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    let early_activate_response = actix_test::call_service(&app, early_activate).await;
+    assert_eq!(early_activate_response.status(), StatusCode::CONFLICT);
+
+    let self_test = actix_test::TestRequest::post()
+        .uri(&format!("/model-packs/{model_pack_id}/self-test"))
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .set_json(json!({ "passed": true }))
+        .to_request();
+    assert_eq!(
+        actix_test::call_service(&app, self_test).await.status(),
+        StatusCode::OK
+    );
+
+    let activate = actix_test::TestRequest::post()
+        .uri(&format!("/model-packs/{model_pack_id}/activate"))
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    let activate_response = actix_test::call_service(&app, activate).await;
+    assert_eq!(activate_response.status(), StatusCode::OK);
+
+    let reindex = actix_test::TestRequest::post()
+        .uri(&format!("/model-packs/{model_pack_id}/reindex"))
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    let reindex_response = actix_test::call_service(&app, reindex).await;
+    assert_eq!(reindex_response.status(), StatusCode::ACCEPTED);
+    let reindex_body: Value = actix_test::read_body_json(reindex_response).await;
+
+    let list = actix_test::TestRequest::get()
+        .uri("/model-packs")
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .to_request();
+    let list_response = actix_test::call_service(&app, list).await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let packs: Value = actix_test::read_body_json(list_response).await;
+    assert_eq!(packs.as_array().map(Vec::len), Some(1));
+    assert_eq!(packs[0]["model_pack_id"].as_str(), Some(model_pack_id));
+    assert_eq!(packs[0]["status"], "active");
+
+    let runs = actix_test::TestRequest::get()
+        .uri(&format!("/model-packs/{model_pack_id}/reindex-runs"))
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .to_request();
+    let runs_response = actix_test::call_service(&app, runs).await;
+    assert_eq!(runs_response.status(), StatusCode::OK);
+    let runs_body: Value = actix_test::read_body_json(runs_response).await;
+    assert_eq!(runs_body.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        runs_body[0]["reindex_run_id"],
+        reindex_body["reindex_run_id"]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn model_pack_self_test_run_route_records_runtime_result() -> TestResult {
+    let pool = fresh_owner_pool().await?;
+    let storage_dir = TempDir::new()?;
+    let storage = ObjectStorage::local(storage_dir.path())?;
+    let session = create_session(
+        &pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("model-pack-self-test-route-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let embedder: Arc<dyn ImageTextEmbedder + Send + Sync> = Arc::new(FakeImageTextEmbedder);
+    let runtime = SharedImageTextRuntime::new(embedder, NonZeroUsize::MIN);
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(web::Data::new(runtime))
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+
+    let manifest = file_install_manifest_with_expected(&sha256_f32_values(&vec![1.0; 768]))?;
+    let install = actix_test::TestRequest::post()
+        .uri("/model-packs")
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .set_json(&manifest)
+        .to_request();
+    let install_response = actix_test::call_service(&app, install).await;
+    assert_eq!(install_response.status(), StatusCode::CREATED);
+    let installed: Value = actix_test::read_body_json(install_response).await;
+    let model_pack_id = Uuid::parse_str(
+        installed["model_pack_id"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("model_pack_id missing"))?,
+    )
+    .map_err(std::io::Error::other)?;
+
+    let source_dir = write_model_pack_source_files()?;
+    install_model_pack_files(&storage, source_dir.path(), model_pack_id, &manifest).await?;
+
+    let run = actix_test::TestRequest::post()
+        .uri(&format!("/model-packs/{model_pack_id}/self-test/run"))
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    let response = actix_test::call_service(&app, run).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = actix_test::read_body_json(response).await;
+    assert_eq!(body["self_test_status"], "passed");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn model_reindex_queues_embedding_jobs_for_active_assets_only() -> TestResult {
     let pool = fresh_owner_pool().await?;
     let pack = install_model_pack(&pool, valid_model_pack_manifest()).await?;
@@ -293,6 +511,12 @@ async fn model_reindex_records_terminal_failures_without_double_counting() -> Te
 }
 
 fn file_install_manifest() -> TestResult<ModelPackManifest> {
+    file_install_manifest_with_expected(&"d".repeat(64))
+}
+
+fn file_install_manifest_with_expected(
+    expected_output_sha256: &str,
+) -> TestResult<ModelPackManifest> {
     Ok(ModelPackManifest {
         kind: "semantic_image_text".to_owned(),
         runtime: "onnx".to_owned(),
@@ -301,6 +525,8 @@ fn file_install_manifest() -> TestResult<ModelPackManifest> {
         license: "Apache-2.0".to_owned(),
         embedding_dimension: 768,
         distance_metric: "cosine".to_owned(),
+        onnx: valid_onnx_config(),
+        image_preprocess: valid_image_preprocess(),
         files: vec![
             file_manifest("models/image_encoder.onnx", b"image")?,
             file_manifest("models/text_encoder.onnx", b"text")?,
@@ -310,9 +536,27 @@ fn file_install_manifest() -> TestResult<ModelPackManifest> {
         self_tests: vec![ModelPackSelfTestManifest {
             name: "text_image_fixture_similarity".to_owned(),
             input_path: "self-tests/cat.jpg".to_owned(),
-            expected_output_sha256: "d".repeat(64),
+            expected_output_sha256: expected_output_sha256.to_owned(),
         }],
     })
+}
+
+fn write_model_pack_source_files() -> TestResult<TempDir> {
+    let source_dir = TempDir::new()?;
+    std::fs::create_dir_all(source_dir.path().join("models"))?;
+    std::fs::write(
+        source_dir.path().join("models/image_encoder.onnx"),
+        b"image",
+    )?;
+    std::fs::write(source_dir.path().join("models/text_encoder.onnx"), b"text")?;
+    std::fs::create_dir_all(source_dir.path().join("tokenizer"))?;
+    std::fs::write(
+        source_dir.path().join("tokenizer/tokenizer.json"),
+        b"tokenizer",
+    )?;
+    std::fs::create_dir_all(source_dir.path().join("self-tests"))?;
+    std::fs::write(source_dir.path().join("self-tests/cat.jpg"), b"cat")?;
+    Ok(source_dir)
 }
 
 fn file_manifest(path: &str, bytes: &[u8]) -> TestResult<ModelPackFileManifest> {

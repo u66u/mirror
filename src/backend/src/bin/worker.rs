@@ -6,7 +6,7 @@ use mirror_backend::{
     config::Config,
     db,
     jobs::JobKind,
-    media::RustImageProcessor,
+    media::HeifImageProcessor,
     ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError, MlRuntime},
     runtime::io_other,
     storage::ObjectStorage,
@@ -30,7 +30,7 @@ async fn main() -> io::Result<()> {
     db::run_migrations(&pool).await.map_err(io_other)?;
     std::fs::create_dir_all(&config.storage_root)?;
     let storage = ObjectStorage::local(&config.storage_root).map_err(io_other)?;
-    let image_processor = RustImageProcessor;
+    let image_processor = HeifImageProcessor::production();
     let video_processor = FfmpegVideoProcessor::production();
     let ml_runtime = MlRuntime::with_max_image_bytes(
         Arc::new(DisabledEmbedder),

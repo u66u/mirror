@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::Json};
 use time::OffsetDateTime;
+use url::Url;
 use uuid::Uuid;
 
 use crate::storage::{ObjectStorage, StorageError, StorageKey};
@@ -68,6 +69,17 @@ pub struct ResticRestorePlan {
     pub required_env: Vec<&'static str>,
 }
 
+/// Restic retention/prune plan with secrets kept outside argv.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResticRetentionPlan {
+    /// Program name.
+    pub program: &'static str,
+    /// Command arguments.
+    pub args: Vec<String>,
+    /// Environment variable names required at execution time.
+    pub required_env: Vec<&'static str>,
+}
+
 /// PostgreSQL restore plan with the database URL kept outside argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresRestorePlan {
@@ -77,6 +89,15 @@ pub struct PostgresRestorePlan {
     pub args: Vec<String>,
     /// Environment variable names required at execution time.
     pub required_env: Vec<&'static str>,
+}
+
+struct PostgresCommandEnv {
+    host: String,
+    port: String,
+    user: String,
+    password: Option<String>,
+    database: String,
+    sslmode: Option<String>,
 }
 
 /// Persisted backup status.
@@ -147,12 +168,16 @@ pub enum BackupError {
     InvalidPath,
     /// Restic snapshot ID is empty or unsafe.
     InvalidSnapshotId,
+    /// PostgreSQL URL cannot be converted to libpq child-process env vars.
+    InvalidDatabaseUrl,
     /// Database failed.
     Database(sqlx::Error),
     /// Restic process could not start.
     Command(std::io::Error),
     /// pg_dump returned a non-zero status.
     PgDumpFailed,
+    /// pg_restore returned a non-zero status.
+    PgRestoreFailed,
     /// Restic returned a non-zero status.
     ResticFailed,
 }
@@ -164,9 +189,11 @@ impl std::fmt::Display for BackupError {
             Self::InvalidStorageKey(_) => "backup storage key is invalid",
             Self::InvalidPath => "backup path is invalid",
             Self::InvalidSnapshotId => "backup snapshot ID is invalid",
+            Self::InvalidDatabaseUrl => "backup database URL is invalid",
             Self::Database(_) => "backup database error",
             Self::Command(_) => "backup command error",
             Self::PgDumpFailed => "postgres dump failed",
+            Self::PgRestoreFailed => "postgres restore failed",
             Self::ResticFailed => "backup command failed",
         };
         formatter.write_str(message)
@@ -282,6 +309,7 @@ pub fn restic_backup_plan(
             "backup".to_owned(),
             storage_root.join("originals").display().to_string(),
             storage_root.join("derivatives").display().to_string(),
+            storage_root.join("model-packs").display().to_string(),
             postgres_dump_path.display().to_string(),
             "--exclude".to_owned(),
             storage_root.join("staging").display().to_string(),
@@ -315,10 +343,43 @@ pub fn restic_restore_plan(
     })
 }
 
+/// Builds the V1 restic retention command.
+///
+/// Retention is intentionally fixed in v1: enough short-term restore points for
+/// recent mistakes, plus monthly/yearly anchors. Keep this boring unless real
+/// operator feedback shows the defaults are wrong.
+#[must_use]
+pub fn restic_retention_plan() -> ResticRetentionPlan {
+    ResticRetentionPlan {
+        program: "restic",
+        args: vec![
+            "forget".to_owned(),
+            "--prune".to_owned(),
+            "--keep-last".to_owned(),
+            "3".to_owned(),
+            "--keep-hourly".to_owned(),
+            "24".to_owned(),
+            "--keep-daily".to_owned(),
+            "30".to_owned(),
+            "--keep-weekly".to_owned(),
+            "12".to_owned(),
+            "--keep-monthly".to_owned(),
+            "12".to_owned(),
+            "--keep-yearly".to_owned(),
+            "3".to_owned(),
+            "--group-by".to_owned(),
+            "host,paths".to_owned(),
+            "--retry-lock".to_owned(),
+            "30m".to_owned(),
+        ],
+        required_env: vec!["RESTIC_REPOSITORY", "RESTIC_PASSWORD_FILE"],
+    }
+}
+
 /// Builds a `pg_restore` command plan for a custom-format dump.
 ///
-/// The destination database URL is supplied through `PGDATABASE` at execution
-/// time so it is not exposed through process argv.
+/// The destination database connection is supplied through libpq environment
+/// variables at execution time so it is not exposed through process argv.
 pub fn postgres_restore_plan(dump_path: &Path) -> Result<PostgresRestorePlan, BackupError> {
     let dump_path = clean_path(dump_path)?;
     Ok(PostgresRestorePlan {
@@ -329,14 +390,14 @@ pub fn postgres_restore_plan(dump_path: &Path) -> Result<PostgresRestorePlan, Ba
             "--no-owner".to_owned(),
             dump_path.display().to_string(),
         ],
-        required_env: vec!["PGDATABASE"],
+        required_env: vec!["PGHOST", "PGPORT", "PGUSER", "PGDATABASE"],
     })
 }
 
 /// Builds a `pg_dump -Fc` command plan.
 ///
-/// The database URL is supplied through `PGDATABASE` at execution time so it is
-/// not exposed through process argv.
+/// The database connection is supplied through libpq environment variables at
+/// execution time so it is not exposed through process argv.
 pub fn postgres_dump_plan(dump_path: &Path) -> Result<PostgresDumpPlan, BackupError> {
     let dump_path = clean_path(dump_path)?;
     Ok(PostgresDumpPlan {
@@ -346,7 +407,7 @@ pub fn postgres_dump_plan(dump_path: &Path) -> Result<PostgresDumpPlan, BackupEr
             "--file".to_owned(),
             dump_path.display().to_string(),
         ],
-        required_env: vec!["PGDATABASE"],
+        required_env: vec!["PGHOST", "PGPORT", "PGUSER", "PGDATABASE"],
     })
 }
 
@@ -355,9 +416,9 @@ pub fn run_postgres_dump_plan(
     plan: &PostgresDumpPlan,
     database_url: &str,
 ) -> Result<(), BackupError> {
-    let output = Command::new(plan.program)
+    let env = postgres_command_env(database_url)?;
+    let output = postgres_command(plan.program, &env)
         .args(&plan.args)
-        .env("PGDATABASE", database_url)
         .output()
         .map_err(BackupError::Command)?;
     if output.status.success() {
@@ -365,6 +426,70 @@ pub fn run_postgres_dump_plan(
     } else {
         Err(BackupError::PgDumpFailed)
     }
+}
+
+/// Runs `pg_restore` with the supplied plan.
+pub fn run_postgres_restore_plan(
+    plan: &PostgresRestorePlan,
+    database_url: &str,
+) -> Result<(), BackupError> {
+    let env = postgres_command_env(database_url)?;
+    let output = postgres_command(plan.program, &env)
+        .arg("--dbname")
+        .arg(&env.database)
+        .args(&plan.args)
+        .output()
+        .map_err(BackupError::Command)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BackupError::PgRestoreFailed)
+    }
+}
+
+fn postgres_command(program: &'static str, env: &PostgresCommandEnv) -> Command {
+    let mut command = Command::new(program);
+    command
+        .env("PGHOST", &env.host)
+        .env("PGPORT", &env.port)
+        .env("PGUSER", &env.user)
+        .env("PGDATABASE", &env.database);
+    if let Some(password) = env.password.as_ref() {
+        command.env("PGPASSWORD", password);
+    }
+    if let Some(sslmode) = env.sslmode.as_ref() {
+        command.env("PGSSLMODE", sslmode);
+    }
+    command
+}
+
+fn postgres_command_env(database_url: &str) -> Result<PostgresCommandEnv, BackupError> {
+    let url = Url::parse(database_url).map_err(|_| BackupError::InvalidDatabaseUrl)?;
+    if !matches!(url.scheme(), "postgres" | "postgresql") {
+        return Err(BackupError::InvalidDatabaseUrl);
+    }
+    let host = url.host_str().ok_or(BackupError::InvalidDatabaseUrl)?;
+    let user = url.username();
+    if user.is_empty() {
+        return Err(BackupError::InvalidDatabaseUrl);
+    }
+    let database = url
+        .path()
+        .strip_prefix('/')
+        .filter(|database| !database.is_empty())
+        .ok_or(BackupError::InvalidDatabaseUrl)?;
+    let sslmode = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "sslmode").then(|| value.into_owned()));
+
+    Ok(PostgresCommandEnv {
+        host: host.to_owned(),
+        port: url.port().unwrap_or(5432).to_string(),
+        user: user.to_owned(),
+        password: url.password().map(ToOwned::to_owned),
+        database: database.to_owned(),
+        sslmode,
+    })
 }
 
 /// Runs restic with the supplied plan and returns the snapshot ID.
@@ -386,6 +511,32 @@ pub fn run_restic_backup_plan(plan: &ResticBackupPlan) -> Result<ResticBackupOut
             .unwrap_or("unknown")
             .to_owned(),
     })
+}
+
+/// Runs restic restore with the supplied plan.
+pub fn run_restic_restore_plan(plan: &ResticRestorePlan) -> Result<(), BackupError> {
+    let output = Command::new(plan.program)
+        .args(&plan.args)
+        .output()
+        .map_err(BackupError::Command)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BackupError::ResticFailed)
+    }
+}
+
+/// Runs restic retention/prune.
+pub fn run_restic_retention_plan(plan: &ResticRetentionPlan) -> Result<(), BackupError> {
+    let output = Command::new(plan.program)
+        .args(&plan.args)
+        .output()
+        .map_err(BackupError::Command)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BackupError::ResticFailed)
+    }
 }
 
 /// Builds the durable object-storage selection for backup.

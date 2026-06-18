@@ -836,7 +836,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 
 ### T301: Metadata And Derivative Worker
 
-- Status: [~]
+- Status: [x]
 - Milestone: M3
 - Risk: High
 - Touched subsystems: backend, media, jobs, storage
@@ -879,6 +879,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Video and still-image derivative generation no longer upscales tiny
       originals; generated preview/thumbnail dimensions are capped by source
       dimensions and requested max edge.
+    - HEIC/HEIF upload validation, database constraints, archive export
+      extensions, and media-worker derivative generation are supported through
+      a timeout-bounded `heif-convert` wrapper that converts to PNG before the
+      Rust image pipeline.
     - MP4 upload support now spans app validation, DB constraints, original
       promotion, metadata extraction, and video poster generation.
     - Worker heartbeats prevent live lease reclaim. CPU media work runs on the
@@ -889,7 +893,8 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - V1 emits WebP only. AVIF is intentionally deferred to avoid format
       negotiation, duplicate derivative storage, and another codec test matrix.
     - Backend container image uses Rust 1.93.0 for builds, ships API, worker,
-      and maintenance binaries, installs `ffmpeg`, and runs as UID/GID 10001.
+      and maintenance binaries, installs `ffmpeg` plus `libheif-examples`, and
+      runs as UID/GID 10001.
     - Compose defines non-root API and worker services with read-only root
       filesystems, dropped capabilities, `no-new-privileges`, tmpfs scratch
       directories, private storage volume mounts, CPU/memory limits, and PID
@@ -898,10 +903,12 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `make gate-backend` -> passed after MP4/no-upscale integration.
     - `make test-db` -> passed against local Postgres.
     - `docker compose -f infra/compose.yaml config` -> passed.
-    - `docker build -f src/backend/Dockerfile -t mirror-backend:dev .` reached
-      dependency download with `rust:1.93.0-bookworm`, but Docker Desktop
-      failed resolving/downloading from Docker Hub CloudFront in this
-      environment.
+    - `docker build -f src/backend/Dockerfile -t mirror-backend:dev .` ->
+      passed.
+    - `docker run --rm --entrypoint /usr/local/bin/mirror-maintenance
+      mirror-backend:dev --help` -> passed.
+    - `docker run --rm --entrypoint heif-convert mirror-backend:dev --version`
+      -> passed with `1.15.1`.
   - Files touched:
     - `Cargo.toml`
     - `infra/compose.yaml`
@@ -926,6 +933,8 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/tests/worker_runtime.rs`
     - `src/backend/tests/storage_keys.rs`
     - `src/backend/tests/video_tools.rs`
+    - `src/backend/migrations/20260618000600_heic_heif_uploads.up.sql`
+    - `src/backend/migrations/20260618000600_heic_heif_uploads.down.sql`
     - `src/backend/tests/support/mod.rs`
     - `docs/tasks.md`
     - `docs/v1-architecture.md`
@@ -938,6 +947,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       timeout kill, rotation-correct display dimensions, and no upscaling for
       extensionless staged video inputs.
     - Upload tests verify MP4 `ftyp` signature acceptance.
+    - Processor tests verify HEIC conversion reports a missing converter
+      cleanly, and uses real host `heif-enc`/`heif-convert` when both are
+      available.
+    - Upload tests verify HEIC `ftyp` signature acceptance.
     - Storage test verifies oversized streamed staging removes its partial
       file.
     - Opt-in worker tests cover heartbeat lease retention and timeout retry.
@@ -951,14 +964,9 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Worker runtime tests complete queued media jobs and dead-letter a maxed
       failing job.
     - Storage-key test rejects untrusted derivative generator segments.
-  - Still pending:
-    - Complete a backend image build/run once Docker Desktop registry DNS/proxy
-      is fixed.
-    - Capability-tested HEIC/HEIF path.
-
 ### T302: Timeline API And Web/Android Timeline
 
-- Status: [~]
+- Status: [x]
 - Milestone: M3
 - Risk: Medium
 - Touched subsystems: backend, web, android
@@ -1170,25 +1178,44 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       compression, metadata preservation, symlinks, or broader archive
       compatibility.
     - Added durable storage backup manifest selection that includes only
-      content-addressed originals and generated derivatives, excluding staging,
-      temp, logs, and scratch by construction.
-    - Added `pg_dump -Fc` command planning with the database URL supplied
-      through `PGDATABASE` instead of argv.
-    - Added restic backup command planning for explicit durable paths plus a DB
-      dump path, with repository/password supplied through environment variables
-      rather than argv.
+      content-addressed originals, generated derivatives, and model-pack files,
+      excluding staging, temp, logs, and scratch by construction.
+    - Added `pg_dump -Fc` command planning with database host, port, user,
+      password, database name, and optional sslmode supplied through libpq
+      environment variables instead of a database URL in argv.
+    - Added restic backup command planning for explicit durable originals,
+      derivatives, model-pack files, plus a DB dump path, with
+      repository/password supplied through environment variables rather than
+      argv.
     - Added `maintenance --backup-plan PG_DUMP_PATH` dry-run output for the
       pg_dump/restic programs, args, and required secret environment variables.
     - Added `maintenance --run-backup PG_DUMP_PATH --repository-hint HINT` to
       create a `backup_runs` row, run pg_dump, execute restic, persist the
       parsed snapshot ID on success, and persist failure status on pg_dump or
       restic command failure.
+    - Added fixed v1 restic retention planning and execution:
+      `forget --prune`, keep last 3, hourly 24, daily 30, weekly 12, monthly
+      12, yearly 3, grouped by host and paths with a 30 minute lock retry.
+    - Added `maintenance --retention-plan` and `maintenance --run-retention`.
+    - Added systemd service/timer examples for daily one-shot backups followed
+      by retention pruning. Backups are scheduled outside the app worker so OS
+      supervision, persistent timers, logs, and mounted secrets handle the
+      durable orchestration boundary.
+    - Added `scripts/install_systemd_backup.sh` for host installs: builds and
+      installs `/usr/local/bin/mirror-maintenance`, installs the systemd
+      service/timer, creates `/etc/mirror/maintenance.env` from an example when
+      missing, reloads systemd, and can enable the timer.
     - Added restic restore and `pg_restore` command planning for restore drills,
-      keeping repository/password and destination DB URL in environment
-      variables instead of argv.
+      keeping repository/password and destination DB URL out of argv. Restore
+      supplies only the non-secret database name to `pg_restore --dbname` and
+      keeps host/user/password in environment variables.
     - Added `maintenance --restore-plan SNAPSHOT_ID RESTORE_TARGET
       PG_DUMP_PATH` dry-run output for the restic restore and pg_restore
       programs, args, and required secret environment variables.
+    - Added `maintenance --run-restore SNAPSHOT_ID RESTORE_TARGET
+      PG_DUMP_PATH` to execute restic restore followed by `pg_restore` into
+      `MIRROR_DATABASE_URL`, with repository/password and database URL kept out
+      of argv/output.
     - Added `maintenance --restore-check BACKUP_RUN_ID` to scan the currently
       configured restored Postgres/storage pair, record restore-check status,
       and fail the process when originals are missing or orphaned.
@@ -1198,6 +1225,14 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - Commands:
     - `make gate-backend` -> passed.
     - `make test-db` -> passed.
+    - `scripts/backup_restore_drill.sh` against Docker Postgres and real
+      restic/pg_dump/pg_restore restored two assets, two originals, one
+      derivative, and one model-pack file into a clean database and empty
+      storage root, ran real restic retention, excluded staging/tmp/logs/scratch
+      files from restore, and `maintenance --restore-check` marked the restored
+      run `restore_check_succeeded`.
+    - `make backup-restore-drill` -> passed.
+    - `scripts/install_systemd_backup.sh --dry-run` -> passed.
   - Tests:
     - Asset timeline integration test verifies trash hides an asset from
       timeline and derivative routes, then restore returns it to the timeline.
@@ -1218,25 +1253,32 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       files are selected and staged upload objects are excluded.
     - Postgres dump plan tests verify custom-format dump args, secret-free
       argv/debug output, and parent-relative path rejection.
-    - Restic plan tests verify durable paths are explicit, broad storage-root
-      backup is not used, secret values are not represented in argv, and parent
+    - Restic plan tests verify durable paths are explicit, originals,
+      derivatives, and model-pack files are included, broad storage-root backup
+      is not used, secret values are not represented in argv, and parent
       relative paths are rejected.
+    - Retention plan tests verify the fixed v1 `forget --prune` policy and
+      secret-free argv/debug output.
+    - Maintenance CLI tests verify retention-plan output without database
+      access and fake-restic `--run-retention` execution without database
+      access.
     - Restore plan tests verify snapshot ID validation, secret-free restic and
       pg_restore argv/debug output, and clean restore args.
     - Maintenance CLI test verifies backup-plan output works without database
       access and reports pg_dump/restic inputs/env requirements.
     - Maintenance CLI test verifies restore-plan output works without database
       access and reports restic/pg_restore inputs/env requirements.
+    - Maintenance CLI DB test uses fake restic/pg_restore executables to verify
+      restore execution order, required secret environment, destination database
+      environment, and secret-free output.
     - Maintenance CLI DB test uses fake pg_dump/restic executables to verify
-      backup execution creates the dump, records a succeeded run, parsed
-      snapshot ID, redacted repository hint, and secret-free manifest/output.
+      backup execution creates the dump with split libpq environment variables,
+      records a succeeded run, parsed snapshot ID, redacted repository hint, and
+      secret-free manifest/output.
     - Maintenance CLI restore-check test verifies a missing restored original
       object marks the backup run `restore_check_failed` with mismatch counts.
     - Backup run DB test verifies backup and restore-check status transitions
       create secret-free audit events.
-  - Still pending:
-    - Full restore drill against a freshly restored Postgres database and empty
-      storage root populated from restic.
 
 ### T403: Security And Rate Limits
 
@@ -1381,6 +1423,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       or distance metric, unsafe relative paths, duplicate file paths, invalid
       SHA-256 digests, non-positive file sizes, invalid embedding dimensions,
       and missing golden self-tests.
+    - Manifest validation now requires explicit ONNX runtime wiring:
+      image/text model paths, tokenizer path, image/text tensor names, and image
+      preprocessing dimensions/channel order/tensor layout/mean/std. Runtime
+      file paths must point at declared checksummed model-pack files.
     - Activation is blocked until self-tests pass; activating a new pack
       deactivates the previous active pack for the same task kind.
     - Added `model_reindex_runs` table for durable model-pack reindex
@@ -1426,12 +1472,20 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Queue failure reporting now returns a `JobFailureOutcome`; worker
       dead-letter handling records retry-exhausted `embed_asset` jobs as failed
       reindex assets.
+    - Added owner-authenticated model-pack admin routes to list installed packs,
+      install manifest metadata, record self-test status, activate a passed
+      pack, start a reindex run, and list recent reindex runs.
+    - Added runtime-backed golden self-test execution: read installed fixture
+      bytes from durable model-pack storage, run the configured image/text
+      runtime, validate embedding shape/floats, compare SHA-256 of the f32
+      output, and record passed/failed status.
   - Commands:
     - `make gate-backend` -> passed.
     - `make test-db` -> passed.
   - Tests:
     - Pure model-pack validation test covers missing license, duplicate file
-      path, parent-relative path, invalid checksum, and missing self-tests.
+      path, parent-relative path, invalid checksum, missing self-tests, missing
+      ONNX runtime files, and invalid preprocessing values.
     - DB model-pack test verifies install starts pending, failed self-test
       blocks activation, passed self-test allows activation, and only one pack
       per kind remains active.
@@ -1444,6 +1498,12 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       embedding and marks the reindex run succeeded.
     - Worker runtime DB test verifies a retry-exhausted `embed_asset` job
       records failed reindex progress when it dead-letters.
+    - Model-pack HTTP DB test verifies install, self-test gating, activation,
+      reindex start, reindex-run listing, and list response shape through
+      authenticated routes.
+    - Model-pack HTTP DB test verifies `/model-packs/{id}/self-test/run`
+      records a passed status when the configured runtime output matches the
+      golden fixture digest.
     - Model-pack file install test verifies checksum/size enforcement and
       durable `model-packs/` storage namespace writes.
     - Embedding output validation test rejects wrong dimensions, NaN, and
@@ -1460,6 +1520,8 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/migrations/20260618000300_model_reindex_assets.up.sql`
     - `src/backend/migrations/20260618000300_model_reindex_assets.down.sql`
     - `src/backend/src/models.rs`
+    - `src/backend/src/http/model_packs.rs`
+    - `src/backend/src/http/error.rs`
     - `src/backend/src/ml.rs`
     - `src/backend/src/jobs.rs`
     - `src/backend/src/worker.rs`
@@ -1470,9 +1532,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/tests/support/mod.rs`
   - Still pending:
     - Real ONNX runtime embedder.
-    - Text-query embedding path.
-    - Golden self-test execution against a runtime.
-    - Real model-pack install UI/API.
+    - Real model-pack install UI.
 
 ### T502: Semantic Search And People Albums
 
@@ -1576,14 +1636,18 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/migrations/20260618000500_semantic_search_hardening.down.sql`
     - `src/backend/src/semantic_index.rs`
     - `src/backend/src/ml.rs`
+    - `src/backend/src/search.rs`
+    - `src/backend/src/http/search.rs`
+    - `src/backend/src/http/error.rs`
+    - `src/backend/src/config.rs`
     - `src/backend/src/worker.rs`
     - `src/backend/src/lib.rs`
     - `src/backend/tests/semantic_index.rs`
+    - `src/backend/tests/search.rs`
     - `src/backend/tests/worker_runtime.rs`
     - `src/backend/tests/support/mod.rs`
     - `docs/references/pgvector-ann.md`
   - Still pending:
     - Real model runtime that produces image/text embeddings.
-    - Semantic HTTP search API that uses text embeddings.
     - Web/Android search UI.
     - Face detection/embedding, people clustering, and people review flows.

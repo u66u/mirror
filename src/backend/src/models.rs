@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, types::Json};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::jobs::{self, JobKind, JobSpec};
@@ -86,7 +87,7 @@ impl DistanceMetric {
 }
 
 /// Model-pack manifest accepted by Mirror.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelPackManifest {
     /// Task kind, for example `semantic_image_text`.
     pub kind: String,
@@ -102,10 +103,52 @@ pub struct ModelPackManifest {
     pub embedding_dimension: i32,
     /// Vector distance metric.
     pub distance_metric: String,
+    /// Runtime-specific ONNX config.
+    pub onnx: OnnxModelPackConfig,
+    /// Image preprocessing contract for image inputs.
+    pub image_preprocess: ImagePreprocessConfig,
     /// Files included in the model pack.
     pub files: Vec<ModelPackFileManifest>,
     /// Golden self-tests that must pass before activation.
     pub self_tests: Vec<ModelPackSelfTestManifest>,
+}
+
+/// ONNX session and tensor names required by the runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OnnxModelPackConfig {
+    /// ONNX model used for image embeddings.
+    pub image_model_path: String,
+    /// ONNX model used for text embeddings.
+    pub text_model_path: String,
+    /// Tokenizer JSON used for text inputs.
+    pub tokenizer_path: String,
+    /// Image tensor input name.
+    pub image_input_name: String,
+    /// Image embedding output name.
+    pub image_output_name: String,
+    /// Token IDs tensor input name.
+    pub text_input_ids_name: String,
+    /// Attention mask tensor input name.
+    pub text_attention_mask_name: String,
+    /// Text embedding output name.
+    pub text_output_name: String,
+}
+
+/// Image preprocessing contract required before ONNX image inference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImagePreprocessConfig {
+    /// Resize/crop target width.
+    pub width: u32,
+    /// Resize/crop target height.
+    pub height: u32,
+    /// Channel order expected by the model.
+    pub color_order: String,
+    /// Tensor layout expected by the model.
+    pub tensor_layout: String,
+    /// Per-channel input mean.
+    pub mean: [f32; 3],
+    /// Per-channel input standard deviation.
+    pub std: [f32; 3],
 }
 
 /// One model-pack file selected by path and checksum.
@@ -131,7 +174,7 @@ pub struct ModelPackSelfTestManifest {
 }
 
 /// Installed model-pack row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct InstalledModelPack {
     /// Model-pack row ID.
     pub model_pack_id: Uuid,
@@ -142,7 +185,7 @@ pub struct InstalledModelPack {
 }
 
 /// Reindex run created for a model pack.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ModelReindexRun {
     /// Reindex run ID.
     pub reindex_run_id: Uuid,
@@ -158,6 +201,31 @@ pub struct ModelReindexRun {
     pub processed_assets: i32,
     /// Number of assets that failed terminally.
     pub failed_assets: i32,
+}
+
+/// Owner-visible model-pack catalog row.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelPackSummary {
+    /// Model-pack row ID.
+    pub model_pack_id: Uuid,
+    /// Task kind.
+    pub kind: String,
+    /// Runtime key.
+    pub runtime: String,
+    /// Stable model family/key.
+    pub model_key: String,
+    /// Pinned model revision.
+    pub model_revision: String,
+    /// Current install/activation status.
+    pub status: String,
+    /// Current self-test status.
+    pub self_test_status: String,
+    /// Embedding vector length.
+    pub embedding_dimension: i32,
+    /// Distance metric.
+    pub distance_metric: String,
+    /// Last update time.
+    pub updated_at: OffsetDateTime,
 }
 
 /// Installed model-pack file copy result.
@@ -176,6 +244,36 @@ pub struct InstalledModelPackFile {
 pub struct ValidatedEmbedding {
     /// Dense embedding vector.
     values: Vec<f32>,
+}
+
+type ModelPackSummaryRow = (
+    Uuid,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i32,
+    String,
+    OffsetDateTime,
+);
+
+impl From<ModelPackSummaryRow> for ModelPackSummary {
+    fn from(row: ModelPackSummaryRow) -> Self {
+        Self {
+            model_pack_id: row.0,
+            kind: row.1,
+            runtime: row.2,
+            model_key: row.3,
+            model_revision: row.4,
+            status: row.5,
+            self_test_status: row.6,
+            embedding_dimension: row.7,
+            distance_metric: row.8,
+            updated_at: row.9,
+        }
+    }
 }
 
 impl ValidatedEmbedding {
@@ -325,6 +423,31 @@ pub async fn install_model_pack(
         status: row.1,
         self_test_status: row.2,
     })
+}
+
+/// Lists installed model packs for owner/admin surfaces.
+pub async fn list_model_packs(pool: &PgPool) -> Result<Vec<ModelPackSummary>, ModelPackError> {
+    sqlx::query_as::<_, ModelPackSummaryRow>(
+        r#"
+        SELECT
+            id,
+            kind,
+            runtime,
+            model_key,
+            model_revision,
+            status,
+            self_test_status,
+            embedding_dimension,
+            distance_metric,
+            updated_at
+        FROM model_packs
+        ORDER BY kind ASC, status = 'active' DESC, updated_at DESC, id ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map(|rows| rows.into_iter().map(ModelPackSummary::from).collect())
+    .map_err(ModelPackError::Database)
 }
 
 /// Verifies and copies all files for an installed model pack into durable
@@ -573,6 +696,55 @@ pub async fn start_model_reindex(
     })
 }
 
+/// Lists recent reindex runs for one model pack.
+pub async fn list_model_reindex_runs(
+    pool: &PgPool,
+    model_pack_id: Uuid,
+) -> Result<Vec<ModelReindexRun>, ModelPackError> {
+    let exists = sqlx::query_scalar::<_, bool>("SELECT true FROM model_packs WHERE id = $1")
+        .bind(model_pack_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(false);
+    if !exists {
+        return Err(ModelPackError::NotFound);
+    }
+
+    sqlx::query_as::<_, (Uuid, Uuid, String, i32, i32, i32, i32)>(
+        r#"
+        SELECT
+            id,
+            model_pack_id,
+            status,
+            total_assets,
+            queued_assets,
+            processed_assets,
+            failed_assets
+        FROM model_reindex_runs
+        WHERE model_pack_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 20
+        "#,
+    )
+    .bind(model_pack_id)
+    .fetch_all(pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|row| ModelReindexRun {
+                reindex_run_id: row.0,
+                model_pack_id: row.1,
+                status: row.2,
+                total_assets: row.3,
+                queued_assets: row.4,
+                processed_assets: row.5,
+                failed_assets: row.6,
+            })
+            .collect()
+    })
+    .map_err(ModelPackError::Database)
+}
+
 /// Records one terminal asset result for a reindex run.
 ///
 /// Retries should call this only after a final success or dead-letter. The
@@ -681,6 +853,8 @@ pub fn validate_model_pack_manifest(
     let kind = parse_kind(&manifest.kind)?;
     let runtime = parse_runtime(&manifest.runtime)?;
     let distance_metric = parse_distance_metric(&manifest.distance_metric)?;
+    validate_onnx_config(&manifest.onnx)?;
+    validate_image_preprocess(&manifest.image_preprocess)?;
     require_text(&manifest.model_key, 120, "model_key")?;
     require_text(&manifest.model_revision, 200, "model_revision")?;
     require_text(&manifest.license, 200, "license")?;
@@ -715,11 +889,87 @@ pub fn validate_model_pack_manifest(
         )?;
     }
 
+    require_manifest_file(
+        &paths,
+        &manifest.onnx.image_model_path,
+        "onnx.image_model_path",
+    )?;
+    require_manifest_file(
+        &paths,
+        &manifest.onnx.text_model_path,
+        "onnx.text_model_path",
+    )?;
+    require_manifest_file(&paths, &manifest.onnx.tokenizer_path, "onnx.tokenizer_path")?;
+
     Ok(ValidatedModelPackManifest {
         kind,
         runtime,
         distance_metric,
     })
+}
+
+fn validate_onnx_config(config: &OnnxModelPackConfig) -> Result<(), ModelPackError> {
+    validate_pack_path(&config.image_model_path, "onnx.image_model_path")?;
+    validate_pack_path(&config.text_model_path, "onnx.text_model_path")?;
+    validate_pack_path(&config.tokenizer_path, "onnx.tokenizer_path")?;
+    require_text(&config.image_input_name, 120, "onnx.image_input_name")?;
+    require_text(&config.image_output_name, 120, "onnx.image_output_name")?;
+    require_text(&config.text_input_ids_name, 120, "onnx.text_input_ids_name")?;
+    require_text(
+        &config.text_attention_mask_name,
+        120,
+        "onnx.text_attention_mask_name",
+    )?;
+    require_text(&config.text_output_name, 120, "onnx.text_output_name")?;
+    Ok(())
+}
+
+fn validate_image_preprocess(config: &ImagePreprocessConfig) -> Result<(), ModelPackError> {
+    if config.width == 0 || config.width > 4096 {
+        return Err(ModelPackError::InvalidManifest("image_preprocess.width"));
+    }
+    if config.height == 0 || config.height > 4096 {
+        return Err(ModelPackError::InvalidManifest("image_preprocess.height"));
+    }
+    match config.color_order.as_str() {
+        "rgb" | "bgr" => {}
+        _ => {
+            return Err(ModelPackError::InvalidManifest(
+                "image_preprocess.color_order",
+            ));
+        }
+    }
+    match config.tensor_layout.as_str() {
+        "nchw" | "nhwc" => {}
+        _ => {
+            return Err(ModelPackError::InvalidManifest(
+                "image_preprocess.tensor_layout",
+            ));
+        }
+    }
+    if !config.mean.into_iter().all(f32::is_finite) {
+        return Err(ModelPackError::InvalidManifest("image_preprocess.mean"));
+    }
+    if !config
+        .std
+        .into_iter()
+        .all(|value| value.is_finite() && value > 0.0)
+    {
+        return Err(ModelPackError::InvalidManifest("image_preprocess.std"));
+    }
+    Ok(())
+}
+
+fn require_manifest_file(
+    paths: &HashSet<&str>,
+    path: &str,
+    field: &'static str,
+) -> Result<(), ModelPackError> {
+    if paths.contains(path) {
+        Ok(())
+    } else {
+        Err(ModelPackError::InvalidManifest(field))
+    }
 }
 
 fn parse_kind(value: &str) -> Result<ModelPackKind, ModelPackError> {

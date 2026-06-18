@@ -411,6 +411,8 @@ fn archive_extension(media_type: &str) -> &'static str {
         "image/png" => ".png",
         "image/gif" => ".gif",
         "image/webp" => ".webp",
+        "image/heic" => ".heic",
+        "image/heif" => ".heif",
         "video/mp4" => ".mp4",
         _ => "",
     }

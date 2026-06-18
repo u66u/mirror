@@ -1,4 +1,4 @@
-1. [deferred by user] This is dumb, let's implement automatic error message conversion with thiserror or whatever else. This applies to all errors everywhere, unless we have a valid reason not to. Same for fmt::Display for errors, unless auto derives for them lost information
+1. [deferred by user] [deferred by user] This is dumb, let's implement automatic error message conversion with thiserror or whatever else. This applies to all errors everywhere, unless we have a valid reason not to. Same for fmt::Display for errors, unless auto derives for them lost information
 fn handler_error_message(error: &WorkerError) -> String {
     match error {
         WorkerError::Media(error) => error.to_string(),
@@ -14,7 +14,7 @@ fn timeout_message(kind: JobKind) -> &'static str {
     }
 }
 
-2. [done] Why are these 2 different functions? Is it just one or no?
+2. [done] [done] Why are these 2 different functions? Is it just one or no?
 pub async fn upsert_asset_embedding_with_dimension(
     pool: &PgPool,
     asset_id: Uuid,
@@ -95,8 +95,8 @@ pub async fn upsert_asset_embedding_with_dimension_in_tx(
     Ok(())
 }
 
-3. [done] If you are creating helper functions, such as parse_semantic_distance_metric, search_limit, etc., you need to make sure their presence is justified (they are used more than once or will be used more than once, or they improve readability)
-4. [done] Should this be from and to implementation or is this correct?
+3. [done] [done] If you are creating helper functions, such as parse_semantic_distance_metric, search_limit, etc., you need to make sure their presence is justified (they are used more than once or will be used more than once, or they improve readability)
+4. [done] [done] Should this be from and to implementation or is this correct?
 fn search_item(row: SearchAssetRow) -> AssetTimelineItem {
     let (
         asset_id,
@@ -140,8 +140,8 @@ fn derivative_view(
 }
 same for asset_derivative_view, etc
 
-5. [done] Do we properly handle errors when upload size exceeds limit or when image embedding size during search gets exceeded? Should they be handled client side or what should we do with them?
-6. [done] The search filters on denormalized asset_embeddings.asset_trashed_at IS NULL, not the live assets.trashed_at value. The upsert snapshots asset_trashed_at into asset_embeddings, and semantic_search filters on that copied field. But trash_asset and restore_asset update only the assets table in the code shown
-7. [done] The public /search route still calls filename search only. The route’s query is documented as “Filename query for v1 metadata search,” and the handler calls search::search_assets, not semantic_text_search
-8. [done for v1 exact search; ANN static index intentionally deferred] Query not optimal for large libraries unless the database has appropriate pgvector and filter indexes. pgvector performs exact nearest-neighbor search by default; approximate HNSW or IVFFlat indexes trade some recall for speed. With WHERE model_pack_id = $1 AND owner_id = $2 AND asset_trashed_at IS NULL, pgvector’s own docs recommend starting with indexes on filter columns and considering multicolumn indexes. For vector ANN indexing, the best design depends on whether embedding is vector(n) or variable vector. pgvector can index rows with the same dimensions via fixed columns or expression/partial indexes; for mixed model dimensions, a per-model or per-dimension partial index is usually needed
-9. [done] Add tests for “trash after indexing,” “restore after trash,” dimension mismatch, wrong model kind, and dot/cosine score ordering.
+5. [done] [done] Do we properly handle errors when upload size exceeds limit or when image embedding size during search gets exceeded? Should they be handled client side or what should we do with them?
+6. [done] [done] The search filters on denormalized asset_embeddings.asset_trashed_at IS NULL, not the live assets.trashed_at value. The upsert snapshots asset_trashed_at into asset_embeddings, and semantic_search filters on that copied field. But trash_asset and restore_asset update only the assets table in the code shown
+7. [done] [done] The public /search route still calls filename search only. The route’s query is documented as “Filename query for v1 metadata search,” and the handler calls search::search_assets, not semantic_text_search
+8. [done for v1 exact search; ANN static index intentionally deferred] [done for v1 exact search; ANN static index intentionally deferred] Query not optimal for large libraries unless the database has appropriate pgvector and filter indexes. pgvector performs exact nearest-neighbor search by default; approximate HNSW or IVFFlat indexes trade some recall for speed. With WHERE model_pack_id = $1 AND owner_id = $2 AND asset_trashed_at IS NULL, pgvector’s own docs recommend starting with indexes on filter columns and considering multicolumn indexes. For vector ANN indexing, the best design depends on whether embedding is vector(n) or variable vector. pgvector can index rows with the same dimensions via fixed columns or expression/partial indexes; for mixed model dimensions, a per-model or per-dimension partial index is usually needed
+9. [done] [done] Add tests for “trash after indexing,” “restore after trash,” dimension mismatch, wrong model kind, and dot/cosine score ordering.

@@ -57,7 +57,29 @@ fn maintenance_backup_plan_prints_restic_inputs_without_database() -> TestResult
     assert!(stdout.contains("backup_program\trestic"));
     assert!(stdout.contains("/vault/storage/originals"));
     assert!(stdout.contains("/vault/storage/derivatives"));
+    assert!(stdout.contains("/vault/storage/model-packs"));
     assert!(stdout.contains("/vault/backup/postgres.dump"));
+    assert!(stdout.contains("RESTIC_REPOSITORY"));
+    assert!(stdout.contains("RESTIC_PASSWORD_FILE"));
+    assert!(!stdout.contains("MIRROR_DATABASE_URL"));
+
+    Ok(())
+}
+
+#[test]
+fn maintenance_retention_plan_prints_prune_policy_without_database() -> TestResult {
+    let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .arg("--retention-plan")
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("retention_program\trestic"));
+    assert!(stdout.contains("retention_args\tforget"));
+    assert!(stdout.contains("--prune"));
+    assert!(stdout.contains("--keep-daily"));
+    assert!(stdout.contains("--keep-weekly"));
+    assert!(stdout.contains("--keep-monthly"));
     assert!(stdout.contains("RESTIC_REPOSITORY"));
     assert!(stdout.contains("RESTIC_PASSWORD_FILE"));
     assert!(!stdout.contains("MIRROR_DATABASE_URL"));
@@ -108,7 +130,13 @@ async fn maintenance_run_backup_records_restic_snapshot_without_secrets() -> Tes
         &bin_dir.join("pg_dump"),
         r#"#!/bin/sh
 set -eu
+test -n "${PGHOST:-}"
+test -n "${PGPORT:-}"
+test -n "${PGUSER:-}"
 test -n "${PGDATABASE:-}"
+case "$PGDATABASE" in
+  *://*) exit 3 ;;
+esac
 out=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -165,6 +193,163 @@ printf '%s\n' 'dump' > "$out"
     assert_eq!(row.1.as_deref(), Some("snapshot-test-id"));
     assert_eq!(row.2["durable_object_count"], 0);
     assert!(!row.2.to_string().contains("RESTIC_PASSWORD"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn maintenance_run_retention_executes_forget_prune_without_database() -> TestResult {
+    let temp_dir = TempDir::new()?;
+    let bin_dir = temp_dir.path().join("bin");
+    std::fs::create_dir(&bin_dir)?;
+    let marker = temp_dir.path().join("retention-ran");
+    write_executable_script(
+        &bin_dir.join("restic"),
+        &format!(
+            r#"#!/bin/sh
+set -eu
+test "$1" = forget
+case " $* " in
+  *" --prune "*) ;;
+  *) exit 2 ;;
+esac
+case " $* " in
+  *" --keep-daily "*) ;;
+  *) exit 2 ;;
+esac
+test -n "${{RESTIC_REPOSITORY:-}}"
+test -n "${{RESTIC_PASSWORD_FILE:-}}"
+printf '%s\n' "$*" > "{}"
+"#,
+            marker.display()
+        ),
+    )?;
+    let password_file = temp_dir.path().join("restic-password");
+    std::fs::write(&password_file, "test-password")?;
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .env("RESTIC_REPOSITORY", "local-test-repo")
+        .env("RESTIC_PASSWORD_FILE", &password_file)
+        .env("PATH", path)
+        .arg("--run-retention")
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("retention_run\tsucceeded"));
+    assert!(!stdout.contains("test-password"));
+    let args = std::fs::read_to_string(marker)?;
+    assert!(args.contains("--prune"));
+    assert!(args.contains("--keep-daily"));
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn maintenance_run_restore_executes_restic_then_pg_restore_without_secret_argv() -> TestResult
+{
+    let _pool = fresh_owner_pool().await?;
+    let test_database_url = env::var("MIRROR_TEST_DATABASE_URL").map_err(std::io::Error::other)?;
+    let temp_dir = TempDir::new()?;
+    let bin_dir = temp_dir.path().join("bin");
+    std::fs::create_dir(&bin_dir)?;
+    let restore_marker = temp_dir.path().join("restic-ran");
+    let pg_marker = temp_dir.path().join("pg-restore-ran");
+    write_executable_script(
+        &bin_dir.join("restic"),
+        &format!(
+            r#"#!/bin/sh
+set -eu
+test "$1" = restore
+test "$2" = snapshot-restore-test
+test "$3" = --target
+test -n "${{RESTIC_REPOSITORY:-}}"
+test -n "${{RESTIC_PASSWORD_FILE:-}}"
+printf '%s\n' "$4" > "{}"
+"#,
+            restore_marker.display()
+        ),
+    )?;
+    write_executable_script(
+        &bin_dir.join("pg_restore"),
+        &format!(
+            r#"#!/bin/sh
+set -eu
+test -n "${{PGHOST:-}}"
+test -n "${{PGPORT:-}}"
+test -n "${{PGUSER:-}}"
+test -n "${{PGDATABASE:-}}"
+case "${{PGDATABASE}}" in
+  *://*) exit 3 ;;
+esac
+case " $* " in
+  *" --clean "*) ;;
+  *) exit 2 ;;
+esac
+case " $* " in
+  *" --if-exists "*) ;;
+  *) exit 2 ;;
+esac
+case " $* " in
+  *" --no-owner "*) ;;
+  *) exit 2 ;;
+esac
+printf 'database=%s\nhost=%s\nport=%s\nuser=%s\n' "$PGDATABASE" "$PGHOST" "$PGPORT" "$PGUSER" > "{}"
+"#,
+            pg_marker.display()
+        ),
+    )?;
+    let password_file = temp_dir.path().join("restic-password");
+    std::fs::write(&password_file, "test-password")?;
+    let restore_target = temp_dir.path().join("restore-target");
+    let dump_path = temp_dir
+        .path()
+        .join("restore-target/vault/backup/postgres.dump");
+    std::fs::create_dir_all(dump_path.parent().unwrap_or(temp_dir.path()))?;
+    std::fs::write(&dump_path, "dump")?;
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .env("MIRROR_DATABASE_URL", &test_database_url)
+        .env("MIRROR_STORAGE_ROOT", temp_dir.path().join("storage"))
+        .env("RESTIC_REPOSITORY", "local-test-repo")
+        .env("RESTIC_PASSWORD_FILE", &password_file)
+        .env("PATH", path)
+        .args([
+            "--run-restore",
+            "snapshot-restore-test",
+            restore_target.to_str().unwrap_or_default(),
+            dump_path.to_str().unwrap_or_default(),
+        ])
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("restore_run\tsnapshot-restore-test"));
+    assert!(!stdout.contains("test-password"));
+    assert!(!stdout.contains(&test_database_url));
+    assert_eq!(
+        std::fs::read_to_string(&restore_marker)?,
+        format!("{}\n", restore_target.display())
+    );
+    let pg_env = std::fs::read_to_string(&pg_marker)?;
+    assert!(pg_env.contains("database="));
+    assert!(pg_env.contains("host="));
+    assert!(pg_env.contains("port="));
+    assert!(pg_env.contains("user="));
+    assert!(!pg_env.contains("://"));
 
     Ok(())
 }

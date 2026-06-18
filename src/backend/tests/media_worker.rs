@@ -1,12 +1,18 @@
-use std::{fs, io::Cursor, time::Duration};
+use std::{
+    fs,
+    io::Cursor,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use image::{ImageBuffer, ImageFormat, Rgba};
 use mirror_backend::{
     assets::promote_verified_upload,
     jobs::{JobKind, LeasedJob},
     media::{
-        DerivativeKind, ImageInfo, ImageProcessor, MediaError, MediaToolError, RustImageProcessor,
-        extract_metadata, extract_owner_metadata, generate_derivatives, run_media_job,
+        DerivativeKind, HeifImageProcessor, ImageInfo, ImageProcessor, MediaError, MediaToolError,
+        RustImageProcessor, extract_metadata, extract_owner_metadata, generate_derivatives,
+        run_media_job,
     },
     storage::StorageKey,
     video::FfmpegVideoProcessor,
@@ -63,6 +69,54 @@ fn rust_image_processor_rejects_decompression_bomb_dimensions() -> TestResult {
         result,
         Err(MediaToolError::Image(image::ImageError::Limits(_)))
     ));
+    Ok(())
+}
+
+#[test]
+fn heif_processor_reports_missing_converter_for_heic_inputs() {
+    let processor = HeifImageProcessor::new("__mirror_missing_heif_convert__");
+
+    let result = processor.inspect(b"\0\0\0\x18ftypheic\0\0\0\0mif1heic", "image/heic");
+
+    assert!(matches!(result, Err(MediaToolError::HeifToolUnavailable)));
+}
+
+#[test]
+fn heif_processor_uses_host_converter_when_available() -> TestResult {
+    if !command_available("heif-enc") || !command_available("heif-convert") {
+        return Ok(());
+    }
+    let temp_dir = TempDir::new()?;
+    let source = temp_dir.path().join("source.png");
+    let heic = temp_dir.path().join("source.heic");
+    fs::write(&source, png_fixture_with_dimensions(16, 8)?)?;
+    let status = Command::new("heif-enc")
+        .arg("-o")
+        .arg(&heic)
+        .arg(&source)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Ok(());
+    }
+    let bytes = fs::read(heic)?;
+    let processor = HeifImageProcessor::production();
+
+    let info = processor.inspect(&bytes, "image/heic")?;
+    let generated = processor.generate(&bytes, "image/heic", DerivativeKind::Thumbnail)?;
+
+    assert_eq!(
+        info,
+        ImageInfo {
+            width: 16,
+            height: 8
+        }
+    );
+    assert_eq!(generated.format, "webp");
+    assert_eq!((generated.width, generated.height), (16, 8));
+
     Ok(())
 }
 
@@ -289,6 +343,16 @@ fn png_fixture_with_dimensions(width: u32, height: u32) -> TestResult<Vec<u8>> {
     let mut output = Cursor::new(Vec::new());
     image.write_to(&mut output, ImageFormat::Png)?;
     Ok(output.into_inner())
+}
+
+fn command_available(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn jpeg_with_exif_fixture() -> TestResult<Vec<u8>> {
