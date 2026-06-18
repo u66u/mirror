@@ -9,6 +9,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::{
+    face, integrity,
     jobs::{self, JobError, JobKind},
     media::{self, ImageProcessor},
     ml::{self, ImageTextEmbedder, MlRuntime},
@@ -106,6 +107,12 @@ pub enum WorkerError {
     /// ML handler failed.
     #[error("worker ml error: {0}")]
     Ml(#[from] ml::MlError),
+    /// Face indexing handler failed.
+    #[error("worker face error: {0}")]
+    Face(#[from] face::FaceIndexError),
+    /// Integrity handler failed.
+    #[error("worker integrity error: {0}")]
+    Integrity(#[from] integrity::IntegrityError),
     /// This worker no longer owns the leased job.
     #[error("worker job lease lost")]
     LeaseLost,
@@ -126,6 +133,20 @@ pub struct WorkerHandlers<'a, I, V, E> {
     pub ml_runtime: &'a MlRuntime<E>,
     /// Job kinds this worker is allowed to lease.
     pub job_kinds: &'a [JobKind],
+}
+
+/// Job kinds leased by the production worker for the given feature flags.
+#[must_use]
+pub fn production_job_kinds(face_recognition_enabled: bool) -> Vec<JobKind> {
+    let mut kinds = vec![
+        JobKind::ExtractMetadata,
+        JobKind::GenerateDerivatives,
+        JobKind::IntegrityScan,
+    ];
+    if face_recognition_enabled {
+        kinds.push(JobKind::IndexFaces);
+    }
+    kinds
 }
 
 /// Runs at most one ready job.
@@ -170,6 +191,12 @@ where
                     .await
                     .map_err(WorkerError::Ml)
             }
+            JobKind::IndexFaces => face::run_face_index_job(&job)
+                .await
+                .map_err(WorkerError::Face),
+            JobKind::IntegrityScan => integrity::run_integrity_job(pool, handlers.storage, &job)
+                .await
+                .map_err(WorkerError::Integrity),
         }
     };
     tokio::pin!(handler);
@@ -211,16 +238,26 @@ where
             Ok(WorkerStep::Completed)
         }
         Some(Err(error)) => {
-            fail_leased_job(pool, worker_id, &job, &error.to_string()).await?;
+            let message = failure_message(&error);
+            fail_leased_job(pool, worker_id, &job, &message).await?;
             Ok(WorkerStep::Failed)
         }
     }
+}
+
+fn failure_message(error: &WorkerError) -> String {
+    if let WorkerError::Ml(error) = error {
+        return error.to_string();
+    }
+    error.to_string()
 }
 
 fn timeout_message(kind: JobKind) -> &'static str {
     match kind {
         JobKind::ExtractMetadata | JobKind::GenerateDerivatives => "media job timed out",
         JobKind::EmbedAsset => "ml job timed out",
+        JobKind::IndexFaces => "face indexing job timed out",
+        JobKind::IntegrityScan => "integrity job timed out",
     }
 }
 
@@ -246,4 +283,15 @@ async fn fail_leased_job(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_job_kinds_gate_face_indexing() {
+        assert!(!production_job_kinds(false).contains(&JobKind::IndexFaces));
+        assert!(production_job_kinds(true).contains(&JobKind::IndexFaces));
+    }
 }

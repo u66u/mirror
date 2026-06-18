@@ -10,6 +10,7 @@ use std::{
 };
 use thiserror::Error;
 
+use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -21,14 +22,21 @@ use crate::jobs::{self, JobKind, JobSpec};
 use crate::paths::validate_relative_str;
 use crate::storage::{ObjectStorage, StorageKey, StorageKeyError};
 
+/// Manifest filename expected at the root of a local model-pack directory.
+pub const MODEL_PACK_MANIFEST_FILENAME: &str = "manifest.json";
+
 /// Supported model task kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ModelPackKind {
     /// Shared image/text embedding space for semantic search.
     SemanticImageText,
-    /// Face detection/alignment/identity embedding pipeline.
+    /// Combined face detection/alignment/identity embedding pipeline.
     FaceIdentity,
+    /// Face detector model pack.
+    FaceDetection,
+    /// Face identity embedding model pack.
+    FaceEmbedding,
 }
 
 impl ModelPackKind {
@@ -37,6 +45,8 @@ impl ModelPackKind {
         match self {
             Self::SemanticImageText => "semantic_image_text",
             Self::FaceIdentity => "face_identity",
+            Self::FaceDetection => "face_detection",
+            Self::FaceEmbedding => "face_embedding",
         }
     }
 }
@@ -92,7 +102,7 @@ impl DistanceMetric {
 }
 
 /// Model-pack manifest accepted by Mirror.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ModelPackManifest {
     /// Task kind, for example `semantic_image_text`.
     pub kind: String,
@@ -119,7 +129,7 @@ pub struct ModelPackManifest {
 }
 
 /// ONNX session and tensor names required by the runtime.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct OnnxModelPackConfig {
     /// ONNX model used for image embeddings.
     pub image_model_path: String,
@@ -140,7 +150,7 @@ pub struct OnnxModelPackConfig {
 }
 
 /// Image preprocessing contract required before ONNX image inference.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ImagePreprocessConfig {
     /// Resize/crop target width.
     pub width: u32,
@@ -157,7 +167,7 @@ pub struct ImagePreprocessConfig {
 }
 
 /// One model-pack file selected by path and checksum.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ModelPackFileManifest {
     /// Relative path inside the model pack.
     pub path: String,
@@ -168,7 +178,7 @@ pub struct ModelPackFileManifest {
 }
 
 /// One golden self-test declared by a model pack.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ModelPackSelfTestManifest {
     /// Stable self-test name.
     pub name: String,
@@ -244,6 +254,25 @@ pub struct InstalledModelPackFile {
     pub size_bytes: i64,
 }
 
+/// Result of validating a local model-pack directory before install.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelPackDirectoryReport {
+    /// Path to the manifest file read from the directory.
+    pub manifest_path: PathBuf,
+    /// Manifest task kind.
+    pub kind: String,
+    /// Manifest runtime key.
+    pub runtime: String,
+    /// Stable model family/key.
+    pub model_key: String,
+    /// Pinned model revision.
+    pub model_revision: String,
+    /// Number of files verified from the manifest.
+    pub file_count: usize,
+    /// Total declared bytes for verified files.
+    pub total_size_bytes: i64,
+}
+
 /// Embedding output accepted from an ML runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedEmbedding {
@@ -313,6 +342,9 @@ pub enum ModelPackError {
     /// Local model-pack file I/O failed.
     #[error("model-pack file io error")]
     Io(#[from] std::io::Error),
+    /// Model-pack JSON failed to parse or serialize.
+    #[error("model-pack json error")]
+    Json(#[from] serde_json::Error),
     /// Storage operation failed.
     #[error("model-pack storage error")]
     Storage(#[from] crate::storage::StorageError),
@@ -325,6 +357,64 @@ pub enum ModelPackError {
     /// Database failed.
     #[error("model-pack database error")]
     Database(#[from] sqlx::Error),
+}
+
+/// Generates the JSON Schema for model-pack manifests from Rust DTO types.
+pub fn model_pack_manifest_schema_json() -> Result<serde_json::Value, ModelPackError> {
+    serde_json::to_value(schema_for!(ModelPackManifest)).map_err(ModelPackError::Json)
+}
+
+/// Validates a local model-pack directory without touching storage or Postgres.
+///
+/// The directory must contain `manifest.json`. Every manifest file entry is
+/// joined through the same path validator used by install, then checked for
+/// exact byte length and SHA-256 digest.
+pub fn validate_model_pack_directory(
+    source_dir: &Path,
+) -> Result<ModelPackDirectoryReport, ModelPackError> {
+    let manifest_path = source_dir.join(MODEL_PACK_MANIFEST_FILENAME);
+    let manifest_bytes = std::fs::read(&manifest_path)?;
+    let manifest: ModelPackManifest = serde_json::from_slice(&manifest_bytes)?;
+    validate_model_pack_manifest(&manifest)?;
+
+    let mut total_size_bytes = 0_i64;
+    for file in &manifest.files {
+        let source_path = model_pack_source_path(source_dir, &file.path)?;
+        let bytes = std::fs::read(&source_path)?;
+        verify_model_pack_file(&bytes, file)?;
+        total_size_bytes = total_size_bytes
+            .checked_add(file.size_bytes)
+            .ok_or(ModelPackError::InvalidManifest("files.size_bytes"))?;
+    }
+
+    Ok(ModelPackDirectoryReport {
+        manifest_path,
+        kind: manifest.kind,
+        runtime: manifest.runtime,
+        model_key: manifest.model_key,
+        model_revision: manifest.model_revision,
+        file_count: manifest.files.len(),
+        total_size_bytes,
+    })
+}
+
+/// Formats validation errors for operators running the local model-pack checker.
+#[must_use]
+pub fn model_pack_operator_error(error: &ModelPackError) -> String {
+    match error {
+        ModelPackError::InvalidManifest(field) => {
+            format!("invalid model-pack manifest field: {field}")
+        }
+        ModelPackError::InvalidFilePath => "invalid model-pack file path".to_owned(),
+        ModelPackError::FileVerificationFailed => {
+            "model-pack file size or SHA-256 checksum mismatch".to_owned()
+        }
+        ModelPackError::Io(source) => {
+            format!("model-pack file is missing or unreadable: {source}")
+        }
+        ModelPackError::Json(source) => format!("invalid model-pack JSON: {source}"),
+        other => other.to_string(),
+    }
 }
 
 /// Validates and records a model pack.
@@ -563,7 +653,7 @@ pub async fn start_model_reindex(
     let mut tx = pool.begin().await?;
     let row = sqlx::query!(
         r#"
-        SELECT kind
+        SELECT kind, self_test_status
         FROM model_packs
         WHERE id = $1
         FOR UPDATE
@@ -575,6 +665,9 @@ pub async fn start_model_reindex(
     let Some(row) = row else {
         return Err(ModelPackError::NotFound);
     };
+    if row.self_test_status != "passed" {
+        return Err(ModelPackError::SelfTestRequired);
+    }
 
     let asset_ids: Vec<Uuid> = sqlx::query_scalar!(
         r#"
@@ -926,6 +1019,8 @@ fn parse_kind(value: &str) -> Result<ModelPackKind, ModelPackError> {
     match value {
         "semantic_image_text" => Ok(ModelPackKind::SemanticImageText),
         "face_identity" => Ok(ModelPackKind::FaceIdentity),
+        "face_detection" => Ok(ModelPackKind::FaceDetection),
+        "face_embedding" => Ok(ModelPackKind::FaceEmbedding),
         _ => Err(ModelPackError::InvalidManifest("kind")),
     }
 }

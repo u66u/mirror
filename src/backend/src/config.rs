@@ -7,6 +7,7 @@ use std::{env, fmt, net::SocketAddr, path::PathBuf};
 
 use ipnet::IpNet;
 use sha2::{Digest, Sha256};
+use time::Duration;
 
 /// Runtime configuration shared by the API process.
 #[derive(Clone)]
@@ -21,12 +22,18 @@ pub struct Config {
     pub storage_root: PathBuf,
     /// Stable keyed-hash secret for DB-backed rate-limit buckets.
     pub rate_limit_secret: RateLimitSecret,
+    /// Operator-configurable DB-backed rate-limit quotas.
+    pub rate_limits: RateLimitConfig,
     /// Proxy CIDRs allowed to supply forwarded client IP headers.
     pub trusted_proxies: Vec<IpNet>,
     /// Preferred ML execution device for future runtime-backed workers.
     pub ml_device: MlDevicePreference,
     /// Maximum encoded image bytes read into the embedding runtime.
     pub ml_max_image_bytes: usize,
+    /// Semantic pgvector search execution knobs.
+    pub semantic_search: SemanticSearchConfig,
+    /// Enables face-index worker jobs. Disabled by default for privacy.
+    pub face_recognition_enabled: bool,
 }
 
 impl fmt::Debug for Config {
@@ -41,10 +48,151 @@ impl fmt::Debug for Config {
             )
             .field("storage_root", &self.storage_root)
             .field("rate_limit_secret", &self.rate_limit_secret)
+            .field("rate_limits", &self.rate_limits)
             .field("trusted_proxies", &self.trusted_proxies)
             .field("ml_device", &self.ml_device)
             .field("ml_max_image_bytes", &self.ml_max_image_bytes)
+            .field("semantic_search", &self.semantic_search)
+            .field("face_recognition_enabled", &self.face_recognition_enabled)
             .finish()
+    }
+}
+
+/// Operator-configurable semantic search behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticSearchConfig {
+    /// Use ANN-compatible pgvector ordering. Exact search remains default.
+    pub ann_enabled: bool,
+    /// pgvector HNSW scan breadth when ANN is enabled.
+    pub ann_ef_search: i32,
+}
+
+impl Default for SemanticSearchConfig {
+    fn default() -> Self {
+        Self {
+            ann_enabled: false,
+            ann_ef_search: 40,
+        }
+    }
+}
+
+impl SemanticSearchConfig {
+    fn from_env() -> Self {
+        let defaults = Self::default();
+        Self {
+            ann_enabled: env_bool("MIRROR_SEMANTIC_ANN_ENABLED", defaults.ann_enabled),
+            ann_ef_search: env_i32("MIRROR_SEMANTIC_ANN_EF_SEARCH", defaults.ann_ef_search),
+        }
+    }
+}
+
+/// One DB-backed rate-limit quota.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimitQuota {
+    /// Maximum accepted attempts per window before quota routes return 429.
+    pub max_per_window: i32,
+    /// Counting window length.
+    pub window: Duration,
+    /// Block length after quota exhaustion.
+    pub block_for: Duration,
+}
+
+/// Operator-configurable route rate limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    /// Failed owner-password login attempts.
+    pub owner_password_login: RateLimitQuota,
+    /// First-run owner setup attempts.
+    pub setup_owner: RateLimitQuota,
+    /// Upload session creation.
+    pub upload_create: RateLimitQuota,
+    /// Upload part writes.
+    pub upload_part: RateLimitQuota,
+    /// Upload completion requests.
+    pub upload_complete: RateLimitQuota,
+    /// Original export manifest reads.
+    pub export_manifest: RateLimitQuota,
+    /// Original export archive/blob downloads.
+    pub export_download: RateLimitQuota,
+    /// Private share creation.
+    pub share_create: RateLimitQuota,
+    /// Semantic search requests.
+    pub semantic_search: RateLimitQuota,
+    /// Model-pack install/self-test/activate/reindex admin actions.
+    pub model_pack_admin: RateLimitQuota,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            owner_password_login: RateLimitQuota::new(
+                5,
+                Duration::minutes(15),
+                Duration::minutes(15),
+            ),
+            setup_owner: RateLimitQuota::per_hour(20),
+            upload_create: RateLimitQuota::per_hour(2_000),
+            upload_part: RateLimitQuota::per_hour(20_000),
+            upload_complete: RateLimitQuota::per_hour(2_000),
+            export_manifest: RateLimitQuota::per_hour(30),
+            export_download: RateLimitQuota::per_hour(120),
+            share_create: RateLimitQuota::per_hour(20),
+            semantic_search: RateLimitQuota::per_hour(300),
+            model_pack_admin: RateLimitQuota::per_hour(60),
+        }
+    }
+}
+
+impl RateLimitConfig {
+    fn from_env() -> Self {
+        let defaults = Self::default();
+        Self {
+            owner_password_login: quota_from_env(
+                "MIRROR_RATE_LIMIT_OWNER_PASSWORD_LOGIN",
+                defaults.owner_password_login,
+            ),
+            setup_owner: quota_from_env("MIRROR_RATE_LIMIT_SETUP_OWNER", defaults.setup_owner),
+            upload_create: quota_from_env(
+                "MIRROR_RATE_LIMIT_UPLOAD_CREATE",
+                defaults.upload_create,
+            ),
+            upload_part: quota_from_env("MIRROR_RATE_LIMIT_UPLOAD_PART", defaults.upload_part),
+            upload_complete: quota_from_env(
+                "MIRROR_RATE_LIMIT_UPLOAD_COMPLETE",
+                defaults.upload_complete,
+            ),
+            export_manifest: quota_from_env(
+                "MIRROR_RATE_LIMIT_EXPORT_MANIFEST",
+                defaults.export_manifest,
+            ),
+            export_download: quota_from_env(
+                "MIRROR_RATE_LIMIT_EXPORT_DOWNLOAD",
+                defaults.export_download,
+            ),
+            share_create: quota_from_env("MIRROR_RATE_LIMIT_SHARE_CREATE", defaults.share_create),
+            semantic_search: quota_from_env(
+                "MIRROR_RATE_LIMIT_SEMANTIC_SEARCH",
+                defaults.semantic_search,
+            ),
+            model_pack_admin: quota_from_env(
+                "MIRROR_RATE_LIMIT_MODEL_PACK_ADMIN",
+                defaults.model_pack_admin,
+            ),
+        }
+    }
+}
+
+impl RateLimitQuota {
+    const fn new(max_per_window: i32, window: Duration, block_for: Duration) -> Self {
+        Self {
+            max_per_window,
+            window,
+            block_for,
+        }
+    }
+
+    const fn per_hour(max_per_window: i32) -> Self {
+        Self::new(max_per_window, Duration::hours(1), Duration::hours(1))
     }
 }
 
@@ -126,6 +274,7 @@ impl Config {
         let rate_limit_secret = env::var("MIRROR_RATE_LIMIT_SECRET")
             .map(|secret| RateLimitSecret::from_secret(&secret))
             .unwrap_or_else(|_| RateLimitSecret::random_or_dev_fallback());
+        let rate_limits = RateLimitConfig::from_env();
         let trusted_proxies = env::var("MIRROR_TRUSTED_PROXIES")
             .ok()
             .map(|value| parse_trusted_proxies(&value))
@@ -138,6 +287,8 @@ impl Config {
             .ok()
             .and_then(|value| parse_positive_usize(&value))
             .unwrap_or(25 * 1024 * 1024);
+        let semantic_search = SemanticSearchConfig::from_env();
+        let face_recognition_enabled = env_bool("MIRROR_FACE_RECOGNITION_ENABLED", false);
 
         Self {
             bind_addr,
@@ -145,15 +296,32 @@ impl Config {
             database_url,
             storage_root,
             rate_limit_secret,
+            rate_limits,
             trusted_proxies,
             ml_device,
             ml_max_image_bytes,
+            semantic_search,
+            face_recognition_enabled,
         }
     }
 }
 
 fn default_bind_addr() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 8080))
+}
+
+fn quota_from_env(prefix: &str, default: RateLimitQuota) -> RateLimitQuota {
+    RateLimitQuota {
+        max_per_window: env_i32(&format!("{prefix}_MAX"), default.max_per_window),
+        window: Duration::seconds(env_i64(
+            &format!("{prefix}_WINDOW_SECONDS"),
+            default.window.whole_seconds(),
+        )),
+        block_for: Duration::seconds(env_i64(
+            &format!("{prefix}_BLOCK_SECONDS"),
+            default.block_for.whole_seconds(),
+        )),
+    }
 }
 
 fn parse_trusted_proxies(value: &str) -> Vec<IpNet> {
@@ -184,4 +352,31 @@ fn parse_ml_device_preference(value: &str) -> Option<MlDevicePreference> {
 fn parse_positive_usize(value: &str) -> Option<usize> {
     let parsed = value.trim().parse().ok()?;
     (parsed > 0).then_some(parsed)
+}
+
+fn env_i32(name: &str, default: i32) -> i32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_i64(name: &str, default: i64) -> i64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    env::var(name)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
 }

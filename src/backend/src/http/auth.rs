@@ -24,9 +24,6 @@ const CSRF_COOKIE: &str = "mirror_csrf";
 const CSRF_HEADER: &str = "x-csrf-token";
 const SESSION_MAX_AGE: Duration = Duration::days(30);
 const OWNER_PASSWORD_LOGIN_ACTION: &str = "owner_password_login";
-const OWNER_PASSWORD_LOGIN_MAX_FAILURES: i32 = 5;
-const OWNER_PASSWORD_LOGIN_WINDOW: Duration = Duration::minutes(15);
-const OWNER_PASSWORD_LOGIN_BLOCK: Duration = Duration::minutes(15);
 
 /// Owner login request body.
 #[derive(Debug, Deserialize)]
@@ -90,6 +87,30 @@ impl OwnerCredential {
         match self {
             Self::Session(session) => session.owner_id,
             Self::Device(device) => device.owner_id,
+        }
+    }
+
+    /// Builds a stable, raw quota key for authenticated expensive routes.
+    ///
+    /// The returned value is immediately keyed-hashed before storage by
+    /// `rate_limit`, so session/device IDs and IPs are not persisted directly.
+    pub fn rate_limit_key(self, req: &HttpRequest, trusted_proxies: &[ipnet::IpNet]) -> String {
+        let ip = client_ip::client_ip(req, trusted_proxies)
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "unknown-peer".to_owned());
+        match self {
+            Self::Session(session) => {
+                format!(
+                    "owner:{}:session:{}:ip:{ip}",
+                    session.owner_id, session.session_id
+                )
+            }
+            Self::Device(device) => {
+                format!(
+                    "owner:{}:device:{}:ip:{ip}",
+                    device.owner_id, device.device_token_id
+                )
+            }
         }
     }
 }
@@ -557,9 +578,9 @@ async fn record_owner_password_login_failure(
             action: OWNER_PASSWORD_LOGIN_ACTION,
             key,
             now: OffsetDateTime::now_utc(),
-            max_attempts: OWNER_PASSWORD_LOGIN_MAX_FAILURES,
-            window: OWNER_PASSWORD_LOGIN_WINDOW,
-            block_for: OWNER_PASSWORD_LOGIN_BLOCK,
+            max_attempts: state.config.rate_limits.owner_password_login.max_per_window,
+            window: state.config.rate_limits.owner_password_login.window,
+            block_for: state.config.rate_limits.owner_password_login.block_for,
         },
     )
     .await

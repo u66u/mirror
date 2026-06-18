@@ -198,7 +198,10 @@ async fn metadata_and_derivative_handlers_persist_expected_rows() -> TestResult 
     )
     .fetch_one(&deps.pool)
     .await?;
-    let (width, height, extractor) = (row.width, row.height, row.extractor.unwrap());
+    let extractor = row
+        .extractor
+        .ok_or_else(|| std::io::Error::other("extractor metadata missing"))?;
+    let (width, height) = (row.width, row.height);
 
     let derivatives_rows = sqlx::query!(
         r#"

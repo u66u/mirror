@@ -8,10 +8,11 @@ use mirror_backend::{
     http,
     ml::{ImageTextEmbedder, SharedImageTextRuntime, sha256_f32_values},
     models::{
-        ModelPackError, ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest,
-        activate_model_pack, install_model_pack, install_model_pack_files,
+        MODEL_PACK_MANIFEST_FILENAME, ModelPackError, ModelPackFileManifest, ModelPackManifest,
+        ModelPackSelfTestManifest, activate_model_pack, install_model_pack,
+        install_model_pack_files, model_pack_manifest_schema_json, model_pack_operator_error,
         record_model_pack_self_test, record_reindex_asset_result, start_model_reindex,
-        validate_embedding_output, validate_model_pack_manifest,
+        validate_embedding_output, validate_model_pack_directory, validate_model_pack_manifest,
     },
     state::AppState,
 };
@@ -76,6 +77,54 @@ fn model_pack_manifest_rejects_ambiguous_or_unsafe_inputs() {
         validate_model_pack_manifest(&invalid_preprocess),
         Err(ModelPackError::InvalidManifest("image_preprocess.std"))
     ));
+}
+
+#[test]
+fn model_pack_manifest_schema_is_generated_from_manifest_types() -> TestResult {
+    let schema = model_pack_manifest_schema_json()?;
+    assert_eq!(schema["title"], "ModelPackManifest");
+    assert!(schema["properties"]["onnx"].is_object());
+    assert!(schema["properties"]["image_preprocess"].is_object());
+    let required = schema["required"]
+        .as_array()
+        .ok_or_else(|| std::io::Error::other("schema.required missing"))?;
+    assert!(required.iter().any(|field| field == "files"));
+    assert!(required.iter().any(|field| field == "self_tests"));
+    Ok(())
+}
+
+#[test]
+fn local_model_pack_directory_validator_checks_manifest_files_and_checksums() -> TestResult {
+    let source_dir = write_model_pack_source_files()?;
+    let manifest = file_install_manifest()?;
+    write_manifest(source_dir.path(), &manifest)?;
+
+    let report = validate_model_pack_directory(source_dir.path())?;
+    assert_eq!(report.kind, "semantic_image_text");
+    assert_eq!(report.runtime, "onnx");
+    assert_eq!(report.file_count, 4);
+    assert_eq!(report.total_size_bytes, 21);
+
+    let missing_dir = write_model_pack_source_files()?;
+    write_manifest(missing_dir.path(), &manifest)?;
+    std::fs::remove_file(missing_dir.path().join("models/text_encoder.onnx"))?;
+    let missing = validate_model_pack_directory(missing_dir.path())
+        .map_err(|error| model_pack_operator_error(&error))
+        .err()
+        .ok_or_else(|| std::io::Error::other("missing file accepted"))?;
+    assert!(missing.contains("missing or unreadable"));
+
+    let bad_checksum_dir = write_model_pack_source_files()?;
+    let mut bad_manifest = manifest;
+    bad_manifest.files[0].sha256 = "0".repeat(64);
+    write_manifest(bad_checksum_dir.path(), &bad_manifest)?;
+    let bad_checksum = validate_model_pack_directory(bad_checksum_dir.path())
+        .map_err(|error| model_pack_operator_error(&error))
+        .err()
+        .ok_or_else(|| std::io::Error::other("bad checksum accepted"))?;
+    assert!(bad_checksum.contains("checksum mismatch"));
+
+    Ok(())
 }
 
 #[test]
@@ -329,6 +378,64 @@ async fn model_pack_admin_routes_install_self_test_activate_and_reindex() -> Tes
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn model_pack_admin_routes_are_owner_credential_rate_limited() -> TestResult {
+    let pool = fresh_owner_pool().await?;
+    let session = create_session(
+        &pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("model-pack-rate-limit-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let mut config = Config::from_env();
+    config.rate_limits.model_pack_admin.max_per_window = 1;
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config,
+                db: Some(pool.clone()),
+                setup: SetupState::Disabled,
+                storage: None,
+            }))
+            .configure(http::configure),
+    )
+    .await;
+
+    let first = actix_test::TestRequest::post()
+        .uri("/model-packs")
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .set_json(valid_model_pack_manifest())
+        .to_request();
+    assert_eq!(
+        actix_test::call_service(&app, first).await.status(),
+        StatusCode::CREATED
+    );
+
+    let second = actix_test::TestRequest::post()
+        .uri("/model-packs")
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .set_json(valid_model_pack_manifest())
+        .to_request();
+    assert_eq!(
+        actix_test::call_service(&app, second).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn model_pack_self_test_run_route_records_runtime_result() -> TestResult {
     let pool = fresh_owner_pool().await?;
     let storage_dir = TempDir::new()?;
@@ -560,6 +667,12 @@ fn write_model_pack_source_files() -> TestResult<TempDir> {
     std::fs::create_dir_all(source_dir.path().join("self-tests"))?;
     std::fs::write(source_dir.path().join("self-tests/cat.jpg"), b"cat")?;
     Ok(source_dir)
+}
+
+fn write_manifest(source_dir: &std::path::Path, manifest: &ModelPackManifest) -> TestResult {
+    let body = serde_json::to_vec_pretty(manifest).map_err(std::io::Error::other)?;
+    std::fs::write(source_dir.join(MODEL_PACK_MANIFEST_FILENAME), body)?;
+    Ok(())
 }
 
 fn file_manifest(path: &str, bytes: &[u8]) -> TestResult<ModelPackFileManifest> {

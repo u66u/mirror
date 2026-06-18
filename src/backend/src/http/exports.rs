@@ -7,6 +7,7 @@ use std::{collections::VecDeque, pin::Pin};
 use uuid::Uuid;
 
 use crate::{
+    config::RateLimitQuota,
     exports::{self, ExportManifestInput, ExportManifestItem, ExportOriginalInput},
     http::{auth, error::ApiError},
     rate_limit::{self, QuotaInput},
@@ -16,10 +17,6 @@ use crate::{
 
 const EXPORT_MANIFEST_ACTION: &str = "export_original_manifest";
 const EXPORT_DOWNLOAD_ACTION: &str = "export_original_download";
-const EXPORT_MANIFEST_MAX_PER_HOUR: i32 = 30;
-const EXPORT_DOWNLOAD_MAX_PER_HOUR: i32 = 120;
-const EXPORT_WINDOW: time::Duration = time::Duration::hours(1);
-const EXPORT_BLOCK: time::Duration = time::Duration::hours(1);
 
 /// Returns an owner export manifest for active originals.
 #[get("/exports/originals/manifest")]
@@ -39,7 +36,7 @@ pub async fn original_manifest_route(
         pool,
         current.owner_id(),
         EXPORT_MANIFEST_ACTION,
-        EXPORT_MANIFEST_MAX_PER_HOUR,
+        state.config.rate_limits.export_manifest,
     )
     .await?;
     let manifest = exports::original_manifest(
@@ -77,7 +74,7 @@ pub async fn original_archive_route(
         pool,
         current.owner_id(),
         EXPORT_DOWNLOAD_ACTION,
-        EXPORT_DOWNLOAD_MAX_PER_HOUR,
+        state.config.rate_limits.export_download,
     )
     .await?;
     let manifest = exports::original_manifest(
@@ -135,7 +132,7 @@ pub async fn original_blob_route(
         pool,
         current.owner_id(),
         EXPORT_DOWNLOAD_ACTION,
-        EXPORT_DOWNLOAD_MAX_PER_HOUR,
+        state.config.rate_limits.export_download,
     )
     .await?;
     let asset_id = path.into_inner();
@@ -167,7 +164,7 @@ async fn reject_blocked_export(
     pool: &sqlx::PgPool,
     owner_id: i16,
     action: &'static str,
-    max_per_hour: i32,
+    quota: RateLimitQuota,
 ) -> Result<(), ApiError> {
     let key = owner_id.to_string();
     let now = time::OffsetDateTime::now_utc();
@@ -188,9 +185,9 @@ async fn reject_blocked_export(
             action,
             key: &key,
             now,
-            max_attempts: max_per_hour + 1,
-            window: EXPORT_WINDOW,
-            block_for: EXPORT_BLOCK,
+            max_attempts: quota.max_per_window.saturating_add(1),
+            window: quota.window,
+            block_for: quota.block_for,
         },
     )
     .await

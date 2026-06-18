@@ -173,7 +173,11 @@ pub async fn load_share(pool: &PgPool, raw_token: &str) -> Result<ShareView, Sha
             row.thumbnail_width,
             row.thumbnail_height,
         ),
-        preview: crate::assets::asset_derivative_view(row.preview_format, row.preview_width, row.preview_height),
+        preview: crate::assets::asset_derivative_view(
+            row.preview_format,
+            row.preview_width,
+            row.preview_height,
+        ),
         allow_original_download: row.allow_original_download,
         expires_at: row.expires_at,
     })
@@ -310,5 +314,3 @@ async fn active_share_row(pool: &PgPool, raw_token: &str) -> Result<ShareRow, Sh
     })
     .ok_or(ShareError::NotFound)
 }
-
-

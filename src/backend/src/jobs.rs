@@ -20,6 +20,10 @@ pub enum JobKind {
     GenerateDerivatives,
     /// Compute an asset embedding for one validated model pack.
     EmbedAsset,
+    /// Detect/embed faces for people clustering when face recognition is enabled.
+    IndexFaces,
+    /// Scan durable original/derivative objects for missing or corrupt data.
+    IntegrityScan,
 }
 
 impl JobKind {
@@ -29,6 +33,8 @@ impl JobKind {
             Self::ExtractMetadata => "extract_metadata",
             Self::GenerateDerivatives => "generate_derivatives",
             Self::EmbedAsset => "embed_asset",
+            Self::IndexFaces => "index_faces",
+            Self::IntegrityScan => "integrity_scan",
         }
     }
 }
@@ -149,6 +155,7 @@ pub async fn lease_next(
             JobKind::ExtractMetadata,
             JobKind::GenerateDerivatives,
             JobKind::EmbedAsset,
+            JobKind::IntegrityScan,
         ],
     )
     .await

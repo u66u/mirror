@@ -12,14 +12,16 @@ use mirror_backend::{
     },
     config::Config,
     db,
-    integrity::{remediate_original_orphans, scan_original_storage},
+    integrity::{enqueue_integrity_scan, remediate_original_orphans, scan_original_storage},
+    models,
     runtime::io_other,
+    semantic_index::ensure_semantic_ann_index,
     storage::{ObjectStorage, StorageKey},
 };
 use uuid::Uuid;
 
 const USAGE: &str = "\
-Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--restore-plan SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--retention-plan] [--run-backup PG_DUMP_PATH] [--run-restore SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--run-retention] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID]
+Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--restore-plan SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--retention-plan] [--run-backup PG_DUMP_PATH] [--run-restore SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--run-retention] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID] [--enqueue-integrity-scan] [--ensure-semantic-ann-index MODEL_PACK_ID] [--model-pack-schema] [--validate-model-pack DIR]
 
 Scans originals by default without modifying storage.
 --delete-orphan KEY  Select a currently reported orphan for remediation.
@@ -34,6 +36,13 @@ Scans originals by default without modifying storage.
 --run-retention      Run restic forget --prune with the v1 retention policy.
 --repository-hint H  Redacted repository label stored with --run-backup.
 --restore-check ID   Scan restored DB/storage and update backup_runs status.
+--enqueue-integrity-scan
+                     Enqueue a durable object integrity scan job.
+--ensure-semantic-ann-index MODEL_PACK_ID
+                     Create the opt-in HNSW ANN index for one semantic model pack.
+--model-pack-schema  Print generated model-pack manifest JSON Schema.
+--validate-model-pack DIR
+                     Validate local model-pack manifest and files without API/DB.
 ";
 
 #[derive(Debug)]
@@ -48,6 +57,10 @@ struct Options {
     run_retention: bool,
     repository_hint: Option<String>,
     restore_check_backup_run_id: Option<Uuid>,
+    enqueue_integrity_scan: bool,
+    ensure_semantic_ann_index: Option<Uuid>,
+    print_model_pack_schema: bool,
+    validate_model_pack_dir: Option<std::path::PathBuf>,
 }
 
 #[actix_web::main]
@@ -59,6 +72,29 @@ async fn main() -> io::Result<()> {
         return Ok(());
     };
     let config = Config::from_env();
+    if options.print_model_pack_schema {
+        let schema = models::model_pack_manifest_schema_json().map_err(io_other)?;
+        let body = serde_json::to_string_pretty(&schema).map_err(io_other)?;
+        println!("{body}");
+        return Ok(());
+    }
+    if let Some(source_dir) = options.validate_model_pack_dir.as_ref() {
+        let report = models::validate_model_pack_directory(source_dir).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                models::model_pack_operator_error(&error),
+            )
+        })?;
+        println!("model_pack\tvalid");
+        println!("manifest\t{}", report.manifest_path.display());
+        println!("kind\t{}", report.kind);
+        println!("runtime\t{}", report.runtime);
+        println!("model_key\t{}", report.model_key);
+        println!("model_revision\t{}", report.model_revision);
+        println!("files\t{}", report.file_count);
+        println!("bytes\t{}", report.total_size_bytes);
+        return Ok(());
+    }
     if let Some(dump_path) = options.backup_plan_dump_path.as_ref() {
         let dump = postgres_dump_plan(dump_path).map_err(io_other)?;
         let plan = restic_backup_plan(&config.storage_root, dump_path).map_err(io_other)?;
@@ -122,6 +158,22 @@ async fn main() -> io::Result<()> {
     }
     if let Some(backup_run_id) = options.restore_check_backup_run_id {
         run_restore_check(&pool, &storage, backup_run_id).await?;
+        return Ok(());
+    }
+    if options.enqueue_integrity_scan {
+        let run = enqueue_integrity_scan(&pool).await.map_err(io_other)?;
+        println!(
+            "integrity_scan\t{}\t{}",
+            run.integrity_scan_run_id, run.status
+        );
+        return Ok(());
+    }
+    if let Some(model_pack_id) = options.ensure_semantic_ann_index {
+        let index = ensure_semantic_ann_index(&pool, model_pack_id)
+            .await
+            .map_err(io_other)?;
+        println!("semantic_ann_index\t{}", index.index_name);
+        println!("operator_class\t{}", index.operator_class);
         return Ok(());
     }
     if let Some(restore) = options.run_restore.as_ref() {
@@ -196,6 +248,10 @@ fn parse_args() -> Result<Option<Options>, CliError> {
     let mut run_retention = false;
     let mut repository_hint = None;
     let mut restore_check_backup_run_id = None;
+    let mut enqueue_integrity_scan = false;
+    let mut ensure_semantic_ann_index = None;
+    let mut print_model_pack_schema = false;
+    let mut validate_model_pack_dir = None;
     let mut args = env::args().skip(1);
 
     while let Some(argument) = args.next() {
@@ -250,6 +306,18 @@ fn parse_args() -> Result<Option<Options>, CliError> {
                         .map_err(|_| CliError::InvalidRestoreCheckId(raw_id))?,
                 );
             }
+            "--enqueue-integrity-scan" => enqueue_integrity_scan = true,
+            "--ensure-semantic-ann-index" => {
+                let raw_id = args.next().ok_or(CliError::MissingModelPackId)?;
+                ensure_semantic_ann_index = Some(
+                    Uuid::parse_str(&raw_id).map_err(|_| CliError::InvalidModelPackId(raw_id))?,
+                );
+            }
+            "--model-pack-schema" => print_model_pack_schema = true,
+            "--validate-model-pack" => {
+                let raw_path = args.next().ok_or(CliError::MissingModelPackDir)?;
+                validate_model_pack_dir = Some(std::path::PathBuf::from(raw_path));
+            }
             "--help" | "-h" => return Ok(None),
             _ => return Err(CliError::UnknownArgument(argument)),
         }
@@ -270,6 +338,10 @@ fn parse_args() -> Result<Option<Options>, CliError> {
         run_retention,
         repository_hint,
         restore_check_backup_run_id,
+        enqueue_integrity_scan,
+        ensure_semantic_ann_index,
+        print_model_pack_schema,
+        validate_model_pack_dir,
     }))
 }
 
@@ -298,8 +370,14 @@ enum CliError {
     MissingRepositoryHint,
     #[error("--restore-check requires ID")]
     MissingRestoreCheckId,
+    #[error("--ensure-semantic-ann-index requires MODEL_PACK_ID")]
+    MissingModelPackId,
+    #[error("--validate-model-pack requires DIR")]
+    MissingModelPackDir,
     #[error("invalid backup run ID: {0}")]
     InvalidRestoreCheckId(String),
+    #[error("invalid model pack ID: {0}")]
+    InvalidModelPackId(String),
     #[error("unknown argument: {0}")]
     UnknownArgument(String),
 }

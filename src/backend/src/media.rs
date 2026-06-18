@@ -277,7 +277,9 @@ where
         JobKind::GenerateDerivatives => {
             generate_derivatives(pool, storage, image_processor, video_processor, asset_id).await
         }
-        JobKind::EmbedAsset => Err(MediaError::UnsupportedJobKind),
+        JobKind::EmbedAsset | JobKind::IndexFaces | JobKind::IntegrityScan => {
+            Err(MediaError::UnsupportedJobKind)
+        }
     }
 }
 
@@ -508,15 +510,17 @@ where
                 format,
                 generator_version,
                 source_blake3,
+                blake3_hash,
                 storage_key,
                 width,
                 height,
                 size_bytes
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (asset_id, kind, format, generator_version)
             DO UPDATE SET
                 source_blake3 = EXCLUDED.source_blake3,
+                blake3_hash = EXCLUDED.blake3_hash,
                 storage_key = EXCLUDED.storage_key,
                 width = EXCLUDED.width,
                 height = EXCLUDED.height,
@@ -524,10 +528,11 @@ where
             "#,
             Uuid::now_v7(),
             asset_id,
-            "thumbnail",
-            "webp",
-            "1",
+            kind.as_str(),
+            generated.format,
+            generator_version,
             original.blake3_hash,
+            blake3::hash(&generated.bytes).to_hex().to_string(),
             key.as_str(),
             generated.width as i32,
             generated.height as i32,

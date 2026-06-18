@@ -4,7 +4,9 @@ use mirror_backend::{
         record_model_pack_self_test, validate_embedding_output,
     },
     semantic_index::{
-        SemanticIndexError, delete_asset_embeddings, semantic_search, upsert_asset_embedding,
+        SemanticIndexError, SemanticSearchOptions, delete_asset_embeddings,
+        ensure_semantic_ann_index, semantic_search, semantic_search_with_options,
+        upsert_asset_embedding,
     },
 };
 use uuid::Uuid;
@@ -120,6 +122,106 @@ async fn semantic_search_dot_metric_returns_positive_similarity_score() -> TestR
     );
     assert_eq!(hits[0].score, 2.0);
     assert_eq!(hits[1].score, 0.5);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
+async fn semantic_ann_index_catalog_matches_metric_dimension_and_filters() -> TestResult {
+    let pool = fresh_owner_pool().await?;
+
+    for (metric, operator_class) in [
+        ("cosine", "vector_cosine_ops"),
+        ("dot", "vector_ip_ops"),
+        ("l2", "vector_l2_ops"),
+    ] {
+        let manifest = semantic_manifest(metric);
+        let pack = install_model_pack(&pool, manifest).await?;
+        record_model_pack_self_test(&pool, pack.model_pack_id, true, None).await?;
+
+        let index = ensure_semantic_ann_index(&pool, pack.model_pack_id).await?;
+        let indexdef: String = sqlx::query_scalar(
+            r#"
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND tablename = 'asset_embeddings'
+              AND indexname = $1
+            "#,
+        )
+        .bind(&index.index_name)
+        .fetch_one(&pool)
+        .await?;
+
+        assert_eq!(index.operator_class, operator_class);
+        assert!(indexdef.contains("USING hnsw"));
+        assert!(indexdef.contains(operator_class));
+        assert!(indexdef.contains("vector(3)"));
+        assert!(indexdef.contains(&pack.model_pack_id.to_string()));
+        assert!(indexdef.contains("asset_trashed_at IS NULL"));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
+async fn semantic_ann_query_path_preserves_metric_ordering() -> TestResult {
+    let pool = fresh_owner_pool().await?;
+
+    for metric in ["cosine", "dot", "l2"] {
+        let manifest = semantic_manifest(metric);
+        let pack = install_model_pack(&pool, manifest.clone()).await?;
+        record_model_pack_self_test(&pool, pack.model_pack_id, true, None).await?;
+        ensure_semantic_ann_index(&pool, pack.model_pack_id).await?;
+        let near = insert_semantic_asset(&pool, 1, false).await?;
+        let far = insert_semantic_asset(&pool, 1, false).await?;
+
+        let near_vector = match metric {
+            "dot" => vec![2.0, 0.0, 0.0],
+            _ => vec![1.0, 0.0, 0.0],
+        };
+        let far_vector = match metric {
+            "l2" => vec![3.0, 0.0, 0.0],
+            _ => vec![0.0, 1.0, 0.0],
+        };
+        upsert_asset_embedding(
+            &pool,
+            near.internal_id,
+            pack.model_pack_id,
+            &validate_embedding_output(&manifest, near_vector)?,
+        )
+        .await?;
+        upsert_asset_embedding(
+            &pool,
+            far.internal_id,
+            pack.model_pack_id,
+            &validate_embedding_output(&manifest, far_vector)?,
+        )
+        .await?;
+
+        let hits = semantic_search_with_options(
+            &pool,
+            1,
+            pack.model_pack_id,
+            &validate_embedding_output(&manifest, vec![1.0, 0.0, 0.0])?,
+            10,
+            SemanticSearchOptions {
+                use_ann: true,
+                ann_ef_search: 80,
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.asset_public_id)
+                .collect::<Vec<_>>(),
+            vec![near.public_id, far.public_id]
+        );
+        assert!(hits[0].score > hits[1].score);
+    }
 
     Ok(())
 }

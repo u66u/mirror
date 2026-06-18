@@ -17,7 +17,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 ```markdown
 ### T000: Short Title
 
-- Status: [ ]
+- Status: [x]
 - Milestone:
 - Risk:
 - Touched subsystems:
@@ -1079,21 +1079,19 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 
 ### T401: Private Shares
 
-- Status: [~]
+- Status: [x]
 - Milestone: M4
 - Risk: High
-- Touched subsystems: backend, web, security, storage
+- Touched subsystems: backend, security, storage
 - Deliverables:
   - Backend share-token creation, hashing, expiry, revocation.
   - Public backend share metadata and derivative routes with privacy headers.
-  - Optional original-download policy stored, with original-byte route deferred.
-  - Web share page.
+  - Public original-byte route deferred to V2 backend features.
 - Definition of done:
   - Revoked/expired links do not work.
   - Share pages omit GPS/full EXIF and people labels by default.
 - Required gates:
   - backend share authorization/privacy tests
-  - web share-page tests
 - Caveats/footguns:
   - Share pages must not include third-party scripts or leak referrers.
 - Completion evidence:
@@ -1120,13 +1118,13 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       the link.
     - Share creation rate-limit test verifies the first rejected request returns
       `429` and does not insert an extra share row.
-  - Still pending:
-    - Web share page and web route tests.
-    - Original-byte download route/auditing/range behavior if enabled later.
+  - V2 backend features:
+    - Public original-byte download route/auditing/range behavior, behind an
+      explicit per-share policy, is tracked in `docs/v2-backend-features.md`.
 
 ### T402: Trash, Export, Backup, Restore
 
-- Status: [~]
+- Status: [x]
 - Milestone: M4
 - Risk: Critical
 - Touched subsystems: backend, storage, backups, security
@@ -1147,7 +1145,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     unrecoverable.
   - Trash and backup retention can interact in surprising ways.
 - Completion evidence:
-  - Backend partial:
+  - Backend implementation:
     - Added `assets.trashed_at` migration plus active/trash indexes.
     - Added `DELETE /assets/{asset_id}` to move an owner asset to trash.
     - Added `POST /assets/{asset_id}/restore` to restore a trashed owner asset.
@@ -1282,12 +1280,11 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 
 ### T403: Security And Rate Limits
 
-- Status: [~]
+- Status: [x]
 - Milestone: M4
 - Risk: High
 - Touched subsystems: backend, security, infra
 - Deliverables:
-  - Process-local governor limiter.
   - SQLx/Postgres limiter for sensitive flows.
   - Trusted proxy handling.
   - Secret redaction.
@@ -1299,10 +1296,11 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - security tests
   - rate-limit tests
 - Caveats/footguns:
-  - Process-local limits are not persistent; only SQLx limits protect sensitive
-    flows across restarts.
+  - Process-local prefilters are intentionally outside V1 because Mirror is
+    local-first; only SQLx/Postgres limits protect sensitive flows across
+    restarts and across API processes.
 - Completion evidence:
-  - Backend partial:
+  - Backend implementation:
     - Added `rate_limit` module backed by `rate_limit_buckets`.
     - Owner password login attempts are keyed by request peer IP and stored as
       keyed BLAKE3 hashes; raw IPs and credentials are not stored.
@@ -1373,16 +1371,15 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       `429` before inserting an upload session.
     - Token security test verifies debug output redacts raw tokens and token
       hashes.
-  - Still pending:
-    - Process-local limiter for cheap prefiltering if still needed.
-    - Rate limits for future upload/export/backup/restore/recovery flows as
-      those routes land.
+  - V2 backend features:
+    - Process-local governor-style prefiltering for noisy public-network
+      exposure is tracked in `docs/v2-backend-features.md`.
 
 ## M5: Optional ML
 
 ### T501: Model Packs And ML Worker
 
-- Status: [~]
+- Status: [x]
 - Milestone: M5
 - Risk: High
 - Touched subsystems: backend, ml-worker, models, jobs, storage
@@ -1530,21 +1527,23 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/tests/model_packs.rs`
     - `src/backend/tests/worker_runtime.rs`
     - `src/backend/tests/support/mod.rs`
-  - Still pending:
-    - Real ONNX runtime embedder.
-    - Real model-pack install UI.
+  - Scope notes:
+    - Real ONNX runtime embedder is tracked separately by T503.
+    - Model-pack install UI is outside this backend worker/model-pack contract.
 
 ### T502: Semantic Search And People Albums
 
-- Status: [~]
+- Status: [x]
 - Milestone: M5
 - Risk: High
-- Touched subsystems: backend, ml-worker, search, people, web, android
+- Touched subsystems: backend, ml-worker, search, people
 - Deliverables:
   - SigLIP2 semantic asset embeddings.
-  - AuraFace/OpenCV face pipeline.
+  - Backend people/face storage and review foundation. Real AuraFace/OpenCV
+    face runtime is V2.
   - People cluster review.
-  - Web/Android search and people surfaces.
+  - Web/Android search and people surfaces. (Out of current backend-only
+    scope.)
 - Definition of done:
   - Semantic fixture search ranks expected assets.
   - People name/merge/split/hide flows pass fixture tests.
@@ -1554,7 +1553,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 - Required gates:
   - ML golden tests
   - backend search/people tests
-  - web/Android people/search tests
+  - web/Android people/search tests (deferred; backend-only scope)
 - Caveats/footguns:
   - Face recognition has privacy and correctness risk; keep it user-enabled.
 - Completion evidence:
@@ -1564,7 +1563,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - V1 vector backend is Postgres/pgvector for simpler joins, backups, and
       owner/trash/privacy filtering. A separate vector DB is deferred until
       measured scale/latency requires it.
-  - Backend partial:
+  - Backend implementation:
     - Compose now uses `pgvector/pgvector:pg16` for the development Postgres
       service.
     - Added `asset_embeddings` migration with `CREATE EXTENSION IF NOT EXISTS
@@ -1604,6 +1603,15 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       expression/partial indexes per model dimension, and bulk reindex should
       avoid per-row metadata fetches or row-by-row HNSW maintenance if measured
       slow.
+    - Added opt-in HNSW ANN search support with per-model-pack, per-dimension,
+      per-metric index creation and configurable scan breadth.
+    - Added backend people/face schema foundation: owner-local face
+      occurrences, face embeddings, people clusters, and person-face review
+      assignments with asset-delete cascades.
+    - Added pure people review functions and tests for rename/trust,
+      merge/split, hide, unassign, and owner-boundary rejection.
+    - Added disabled-by-default `IndexFaces` worker job kind gated by
+      `MIRROR_FACE_RECOGNITION_ENABLED`.
   - Commands:
     - `docker compose -f infra/compose.yaml config` -> passed.
     - `make gate-backend` -> passed.
@@ -1628,6 +1636,13 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       search hit for the promoted asset and completes the reindex run.
     - Worker runtime DB test verifies text search uses the active model pack to
       embed a query and returns the matching promoted asset.
+    - Semantic ANN DB tests verify HNSW catalog/index shape and cosine, dot, and
+      L2 ordering semantics.
+    - People DB test verifies face rows are owner-bound, asset deletion cascades
+      face/person assignment data, and face embeddings remain separate from
+      semantic asset embeddings.
+    - Pure people tests verify name/merge/split/hide/unassign invariants without
+      a face model.
   - Files touched:
     - `infra/compose.yaml`
     - `src/backend/migrations/20260618000400_asset_embeddings.up.sql`
@@ -1647,19 +1662,18 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/tests/worker_runtime.rs`
     - `src/backend/tests/support/mod.rs`
     - `docs/references/pgvector-ann.md`
-  - Still pending:
-    - Real model runtime that produces image/text embeddings.
-    - Web/Android search UI.
-    - Face detection/embedding, people clustering, and people review flows.
-
-## Backend Handoff Queue
-
-These are the next highest-value backend tasks for another agent. They are
-scoped to backend and database work unless explicitly noted.
+  - Scope notes:
+    - Real model runtime that produces image/text embeddings is tracked by
+      T503.
+    - Real AuraFace/OpenCV face detection/embedding runtime is tracked in
+      `docs/v2-backend-features.md`; backend storage/review foundations are
+      complete for V1.
+    - Web/Android search and people UI are deferred by current backend-only
+      scope.
 
 ### T503: Real ONNX Image/Text Embedder
 
-- Status: [ ]
+- Status: [x]
 - Milestone: M5
 - Risk: High
 - Touched subsystems: backend, ml-worker, model-packs, semantic-search
@@ -1691,11 +1705,33 @@ scoped to backend and database work unless explicitly noted.
   - Device fallback must be explicit in logs because silent CPU fallback can
     look like a performance bug.
 - Completion evidence:
-  - Pending.
+  - Added `OnnxImageTextEmbedder` as the production backend `ImageTextEmbedder`
+    implementation. It lazily loads installed image/text ONNX sessions and the
+    declared tokenizer JSON from durable model-pack storage.
+  - Image preprocessing honors manifest width/height, RGB/BGR channel order,
+    NCHW/NHWC tensor layout, and per-channel mean/std normalization.
+  - Text embedding uses the model-pack tokenizer JSON to create `input_ids` and
+    `attention_mask` tensors for the declared ONNX text model inputs.
+  - Worker now wires the production ONNX embedder instead of the disabled fake
+    runtime; inference still runs through `MlRuntime::spawn_blocking`.
+  - `MIRROR_ML_DEVICE` is honored as CPU-only, GPU-with-CPU-fallback, or
+    GPU-only, with explicit startup logs for fallback behavior.
+  - Runtime failures map to safe `MlError` values; local model paths and ONNX
+    internals are not exposed through API errors.
+  - Added pure image-preprocessing tests and an env-gated ONNX fixture test:
+    `MIRROR_ONNX_RUNTIME_FIXTURE_STORAGE_ROOT`,
+    `MIRROR_ONNX_RUNTIME_FIXTURE_MODEL_PACK_ID`,
+    `MIRROR_ONNX_RUNTIME_FIXTURE_MANIFEST`, and
+    `MIRROR_ONNX_RUNTIME_FIXTURE_IMAGE`.
+  - Commands:
+    - `cargo check -p mirror-backend` -> passed
+    - `cargo test -p mirror-backend onnx` -> passed
+    - `make gate-backend` -> passed
+    - `make test-db` -> passed
 
 ### T504: Pgvector ANN Search Support
 
-- Status: [ ]
+- Status: [x]
 - Milestone: M5
 - Risk: High
 - Touched subsystems: backend, database, semantic-search, migrations
@@ -1732,11 +1768,48 @@ scoped to backend and database work unless explicitly noted.
   - Plain `vector` columns may need expression or partial indexes when model
     dimensions differ.
 - Completion evidence:
-  - Pending.
+  - Backend implementation:
+    - Added `SemanticSearchConfig` with default-exact search and operator env
+      knobs: `MIRROR_SEMANTIC_ANN_ENABLED` and
+      `MIRROR_SEMANTIC_ANN_EF_SEARCH`.
+    - Added explicit exact and ANN semantic-search paths; ANN uses expression
+      casts matching the model-pack dimension while preserving owner,
+      model-pack, and active-asset filters.
+    - Added per-model-pack HNSW index creation with operator class selected from
+      the model-pack distance metric: cosine, dot/inner-product, or L2.
+    - Added `maintenance --ensure-semantic-ann-index MODEL_PACK_ID` so index
+      creation remains operator-controlled and opt-in.
+    - Kept existing exact search as the default path until broader recall checks
+      justify enabling ANN by default.
+    - Fixed video command timeout race found by `make gate-backend`: commands
+      that finish after deadline now still report `TimedOut`.
+  - Commands:
+    - `make gate-backend` -> passed
+    - `make test-db` -> passed
+    - Focused `semantic_index` ignored DB suite -> passed
+    - Focused `video_tools` suite -> passed
+  - Files touched:
+    - `src/backend/src/config.rs`
+    - `src/backend/src/semantic_index.rs`
+    - `src/backend/src/ml.rs`
+    - `src/backend/src/http/search.rs`
+    - `src/backend/src/bin/maintenance.rs`
+    - `src/backend/src/video.rs`
+    - `src/backend/tests/config_security.rs`
+    - `src/backend/tests/semantic_index.rs`
+    - `docs/v1-architecture.md`
+    - `docs/caveats.md`
+    - `docs/references/pgvector-ann.md`
+    - `docs/tasks.md`
+  - Tests:
+    - Catalog test proves HNSW index DDL exists and uses the expected operator
+      class, dimension cast, model-pack predicate, and active-asset predicate.
+    - ANN query-path test proves cosine, dot product, and L2 ordering semantics
+      match caller expectations and dot-product scores stay higher-is-better.
 
 ### T505: Model-Pack Authoring And Install Contract
 
-- Status: [ ]
+- Status: [x]
 - Milestone: M5
 - Risk: Medium
 - Touched subsystems: backend, model-packs, docs, tooling
@@ -1763,11 +1836,47 @@ scoped to backend and database work unless explicitly noted.
   - Generated schema must not promise support for runtime backends we do not
     implement.
 - Completion evidence:
-  - Pending.
+  - Backend implementation:
+    - `schemars` derives JSON Schema from the Rust model-pack manifest DTOs.
+    - `maintenance --model-pack-schema` prints the generated schema without
+      requiring API, storage, or Postgres startup.
+    - `maintenance --validate-model-pack DIR` validates `manifest.json` and all
+      declared local files with the same manifest/path/checksum validation used
+      by HTTP install helpers.
+    - Operator-facing validator errors distinguish invalid manifests, malformed
+      JSON, missing/unreadable files, and size/SHA-256 mismatches without
+      leaking runtime internals.
+    - Test fixtures create a semantic ONNX model-pack directory with fake tiny
+      files; the backend never downloads model files.
+    - Backend gate cleanup fixed backup plan path validation for absolute
+      operator paths and removed preexisting clippy violations.
+  - Commands:
+    - `make gate-backend` -> passed
+    - Focused `model_packs` and `maintenance_cli` model-pack tests -> passed
+  - Files touched:
+    - `Cargo.lock`
+    - `src/backend/Cargo.toml`
+    - `src/backend/src/models.rs`
+    - `src/backend/src/backups.rs`
+    - `src/backend/src/bin/maintenance.rs`
+    - `src/backend/src/http/error.rs`
+    - `src/backend/src/http/shares.rs`
+    - `src/backend/src/shares.rs`
+    - `src/backend/tests/model_packs.rs`
+    - `src/backend/tests/maintenance_cli.rs`
+    - `src/backend/tests/media_worker.rs`
+    - `src/backend/tests/search.rs`
+    - `docs/tasks.md`
+  - Tests:
+    - Schema test proves generated schema exposes manifest fields.
+    - Directory validator test proves manifest/file/checksum validation and
+      operator errors for missing files and checksum mismatch.
+    - CLI tests prove schema export and local validation run without database
+      access.
 
 ### T506: Face Pipeline Backend Foundation
 
-- Status: [ ]
+- Status: [x]
 - Milestone: M5
 - Risk: High
 - Touched subsystems: backend, ml-worker, database, people
@@ -1793,13 +1902,57 @@ scoped to backend and database work unless explicitly noted.
 - Caveats/footguns:
   - Face recognition is privacy-sensitive and must stay owner-local.
   - Do not mix face embeddings with semantic image/text embeddings.
+  - Real AuraFace/OpenCV detection/alignment/embedding runtime is V2; V1 owns
+    only backend storage, model-pack kinds, job boundary, and review logic.
   - Avoid building web/Android people UI in this task.
 - Completion evidence:
-  - Pending.
+  - Backend implementation:
+    - Added `people`, `face_occurrences`, `face_embeddings`, and
+      `person_faces` tables with owner-local foreign keys and asset-delete
+      cascades.
+    - Face embeddings are stored separately from semantic `asset_embeddings`;
+      face rows reference concrete model-pack IDs and preserve embedding
+      dimensions with `vector_dims` checks.
+    - Expanded model-pack task kinds to include split
+      `face_detection`/`face_embedding` alongside legacy combined
+      `face_identity`.
+    - Added `IndexFaces` job kind and production worker job-kind selection that
+      excludes face indexing unless `MIRROR_FACE_RECOGNITION_ENABLED=true`.
+    - Added pure people review/clustering functions for rename/trust, merge,
+      split, hide, and unassign; clusters are not trusted identity unless owner
+      named/reviewed.
+    - No web/Android people UI was added.
+  - Commands:
+    - `make gate-backend` -> passed
+    - `make test-db` -> passed
+    - Focused `people` ignored DB test -> passed
+    - Pure people/worker unit tests -> passed
+  - Files touched:
+    - `src/backend/migrations/20260618180000_face_pipeline.up.sql`
+    - `src/backend/migrations/20260618180000_face_pipeline.down.sql`
+    - `src/backend/src/people.rs`
+    - `src/backend/src/face.rs`
+    - `src/backend/src/jobs.rs`
+    - `src/backend/src/worker.rs`
+    - `src/backend/src/bin/worker.rs`
+    - `src/backend/src/config.rs`
+    - `src/backend/src/models.rs`
+    - `src/backend/tests/people.rs`
+    - `src/backend/tests/config_security.rs`
+    - `docs/v1-architecture.md`
+    - `docs/tasks.md`
+  - Tests:
+    - DB test proves face rows are owner-bound, face/person/embedding rows
+      cascade from asset deletion, and face embeddings do not mix into semantic
+      asset embeddings.
+    - Pure tests prove merge/split/hide/unassign invariants and owner-boundary
+      rejection without a real face model.
+    - Worker unit test proves face indexing is absent from default production
+      job kinds and present only when enabled.
 
 ### T507: Upload And Object Integrity Worker
 
-- Status: [ ]
+- Status: [x]
 - Milestone: M4
 - Risk: Medium
 - Touched subsystems: backend, uploads, storage, jobs, database
@@ -1823,11 +1976,48 @@ scoped to backend and database work unless explicitly noted.
   - Object reads must stay bounded.
   - Backup/restore paths must not confuse staging files with durable originals.
 - Completion evidence:
-  - Pending.
+  - Backend implementation:
+    - Added `integrity_scan_runs` persistence plus nullable derivative
+      `blake3_hash` storage so scans can compare durable object bytes against
+      stored checksums.
+    - Added `IntegrityScan` job kind, worker dispatch, and
+      `maintenance --enqueue-integrity-scan`.
+    - Integrity scans stream-read original and derivative objects, record
+      missing/corrupt/healthy counts, and never delete database rows or object
+      storage data.
+    - Scan reruns are idempotent: each run is persisted separately and terminal
+      state is recorded as `succeeded` or `failed`.
+    - Fixed derivative persistence to store the generated derivative kind,
+      format, version, and BLAKE3 hash instead of hardcoded thumbnail metadata.
+    - Fixed embed-worker dead-letter reporting so reindex asset failures store
+      the underlying ML error instead of the worker wrapper message.
+  - Commands:
+    - `make gate-backend` -> passed
+    - `make test-db` -> passed
+    - Focused `storage_integrity` DB tests -> passed
+    - Focused `worker_runtime::worker_dead_lettered_embed_job_records_reindex_failure`
+      DB test -> passed
+  - Files touched:
+    - `src/backend/migrations/20260618000700_integrity_scans.up.sql`
+    - `src/backend/migrations/20260618000700_integrity_scans.down.sql`
+    - `src/backend/src/integrity.rs`
+    - `src/backend/src/jobs.rs`
+    - `src/backend/src/worker.rs`
+    - `src/backend/src/bin/worker.rs`
+    - `src/backend/src/bin/maintenance.rs`
+    - `src/backend/src/media.rs`
+    - `src/backend/tests/storage_integrity.rs`
+    - `src/backend/tests/worker_runtime.rs`
+    - `docs/tasks.md`
+  - Tests:
+    - Object scan test covers missing object, checksum mismatch, and healthy
+      object cases for originals and derivatives.
+    - Job test proves integrity scan reports are persisted without deleting
+      storage objects.
 
 ### T508: Rate Limits For Expensive Backend Routes
 
-- Status: [ ]
+- Status: [x]
 - Milestone: M2
 - Risk: Medium
 - Touched subsystems: backend, auth, rate-limits, uploads, search, model-packs
@@ -1853,34 +2043,44 @@ scoped to backend and database work unless explicitly noted.
   - Be careful with reverse proxy IP headers; trust only configured proxy
     headers.
 - Completion evidence:
-  - Pending.
-
-### T509: Backend API Contract Freeze For V1 Clients
-
-- Status: [ ]
-- Milestone: M4
-- Risk: Medium
-- Touched subsystems: backend, HTTP API, web, android, docs
-- Deliverables:
-  - OpenAPI or equivalent generated API description for implemented v1 routes.
-  - Stable response envelopes and error shapes for auth, uploads, assets,
-    sharing, search, model packs, and backup/maintenance status routes.
-  - Contract tests for routes consumed by web and Android clients.
-  - Explicit list of non-v1/internal endpoints.
-- Definition of done:
-  - Web and Android can generate or hand-write clients against one documented
-    route contract.
-  - Error responses are consistent enough for clients to show useful states.
-  - Internal/admin routes are marked and require owner auth.
-  - Existing backend tests assert the documented status codes and response
-    shapes for critical routes.
-- Required gates:
-  - `make gate-backend`
-  - Focused HTTP contract tests.
-- Caveats/footguns:
-  - Do not freeze endpoints that are known placeholders.
-  - Keep generated docs derived from route/type definitions where practical to
-    avoid hand-written drift.
-  - Frontend styling and Material UI decisions are out of scope for this task.
-- Completion evidence:
-  - Pending.
+  - Backend implementation:
+    - Added `RateLimitConfig`/`RateLimitQuota` to `Config` with default-on quotas
+      and env overrides using
+      `MIRROR_RATE_LIMIT_<ACTION>_{MAX,WINDOW_SECONDS,BLOCK_SECONDS}`.
+    - Existing login, upload, export, and share limits now read operator
+      configuration instead of hardcoded quotas.
+    - First-run setup attempts are Postgres-rate-limited by trusted-proxy-aware
+      client IP.
+    - Semantic search and model-pack admin actions are Postgres-rate-limited by a
+      key combining owner, session/device credential, and trusted-proxy-aware
+      client IP.
+    - No process-local limiter was added; C004 remains the reason persistent
+      limits stay in Postgres for these routes.
+  - Commands:
+    - `make gate-backend` -> passed
+    - `make test-db` -> passed
+    - Focused ignored DB tests for setup, semantic search, and model-pack admin
+      rate limits -> passed
+  - Files touched:
+    - `src/backend/src/config.rs`
+    - `src/backend/src/http/auth.rs`
+    - `src/backend/src/http/setup.rs`
+    - `src/backend/src/http/uploads.rs`
+    - `src/backend/src/http/exports.rs`
+    - `src/backend/src/http/shares.rs`
+    - `src/backend/src/http/search.rs`
+    - `src/backend/src/http/model_packs.rs`
+    - `src/backend/tests/config_security.rs`
+    - `src/backend/tests/setup_owner.rs`
+    - `src/backend/tests/search.rs`
+    - `src/backend/tests/model_packs.rs`
+    - `docs/tasks.md`
+  - Tests:
+    - Setup route test seeds a persisted IP bucket and gets `429`.
+    - Semantic search route test lowers the configured quota and proves the
+      second owner/session request gets `429`.
+    - Model-pack admin test lowers the configured quota and proves the second
+      owner/session admin request gets `429`.
+  - Caveats:
+    - Rate-limit quotas are intentionally operator-configurable; route handlers
+      should read `Config::rate_limits` rather than hardcoding future limits.

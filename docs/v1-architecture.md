@@ -414,12 +414,20 @@ Shared ML infrastructure:
   records `runtime` so Candle, OpenVINO, TensorRT, or a Python worker can be
   added later for a concrete model, but backend/domain code must depend on
   task outputs rather than ONNX sessions.
+- The production backend ONNX runtime is `OnnxImageTextEmbedder`. It lazily
+  opens image/text ONNX sessions from installed files under
+  `model-packs/{model_pack_id}/`, loads the declared tokenizer JSON, and emits
+  only task-level image/text embedding vectors through `ImageTextEmbedder`.
+- `MIRROR_ML_DEVICE` selects `gpu_with_cpu_fallback`, `cpu_only`, or
+  `gpu_only`. GPU fallback behavior is logged explicitly so CPU fallback is not
+  mistaken for normal GPU performance.
 - Advanced user-supplied models are allowed only if they provide a compatible
   manifest and pass self-tests.
 
 Model pack manifests declare:
 
-- Kind: `semantic_image_text` or `face_identity`.
+- Kind: `semantic_image_text`, combined `face_identity`, or split
+  `face_detection`/`face_embedding`.
 - Runtime, initially `onnx`.
 - Model key and pinned revision.
 - File list and checksums.
@@ -427,6 +435,9 @@ Model pack manifests declare:
 - ONNX model paths, tokenizer path, and image/text tensor names.
 - Input sizes and preprocessing: dimensions, channel order, tensor layout,
   mean, and standard deviation.
+- Image preprocessing currently decodes JPEG/PNG, resizes to the declared
+  dimensions, converts channels to RGB or BGR, scales bytes to `0.0..=1.0`,
+  then applies the declared per-channel mean/std and NCHW or NHWC layout.
 - Embedding dimension.
 - Distance metric.
 - Thresholds.
@@ -446,21 +457,21 @@ Semantic search:
 - Search API returns a normalized score where higher is better. Do not expose
   pgvector raw `<#>` values directly because inner product returns a negative
   value for ordering.
-- V1 uses exact pgvector ordering. Do not add ANN indexes until we have recall
-  fixtures for filtered search.
+- V1 uses exact pgvector ordering by default. ANN is opt-in through operator
+  config until recall fixtures for filtered search are broader.
 - When collection size requires ANN, prefer HNSW first because pgvector's docs
   describe better speed-recall tradeoffs than IVFFlat. Use IVFFlat only when
   HNSW build time or memory is a measured problem.
 - ANN indexes must match the model pack's distance metric: `vector_cosine_ops`
   for `<=>`, `vector_l2_ops` for `<->`, and `vector_ip_ops` for `<#>`.
-- ANN indexes should be partial per active model pack/revision and dimension
-  when needed. Enable/tune pgvector iterative scans because filters are applied
-  after ANN scans and can otherwise reduce recall.
+- ANN indexes are partial per model pack/revision, active rows, dimension, and
+  distance metric. Tune HNSW scan breadth because filters are applied after ANN
+  scans and can otherwise reduce recall.
 - `asset_embeddings` denormalizes owner, public asset ID, created time, and
   trash state from `assets` so exact v1 search filters without joining before
   vector ordering.
-- Because `asset_embeddings.embedding` is plain `vector`, future ANN indexes
-  may need expression casts such as `embedding::vector(768)` plus partial
+- Because `asset_embeddings.embedding` is plain `vector`, ANN indexes use
+  expression casts such as `embedding::vector(768)` plus partial
   `model_pack_id` predicates. Bulk reindex should reuse loaded model metadata
   and avoid row-by-row HNSW maintenance if rebuild/batch indexing is faster.
 - The search boundary is Mirror-specific, not a generic vector database
@@ -470,10 +481,11 @@ Semantic search:
 
 People albums:
 
-- Default model pack: AuraFace.
-- Conservative fallback: OpenCV YuNet/SFace.
-- Pipeline: detect face, align/crop, embed, cluster, let owner name/merge/split
-  or hide clusters.
+- V1 backend stores owner-local face occurrences, face embeddings, people
+  clusters, and review state. Real AuraFace/OpenCV detection/alignment/runtime
+  support is tracked as a V2 backend feature.
+- Pipeline target: detect face, align/crop, embed, cluster, let owner
+  name/merge/split or hide clusters.
 - Face recognition is user-enabled and can be disabled independently from
   semantic search.
 - People labels are private library metadata and are not exposed in share pages
@@ -683,16 +695,12 @@ Authentication:
 Rate limiting:
 
 - Rate limiting is enabled by default and configurable.
-- Use two layers:
-  - A process-local GCRA/token-bucket limiter for cheap burst protection on
-    broad request classes.
-  - A SQLx/Postgres-backed limiter for security-sensitive actions where
-    persistence matters.
-- Prefer using `governor` directly for the process-local limiter. Do not depend
-  on `actix-governor` in v1 because its current package metadata shows a
-  GPL-3.0-or-later license, which is avoidable by integrating `governor`
-  ourselves.
-- Implement the Postgres limiter in the `limits` module with explicit SQLx
+- V1 uses SQLx/Postgres-backed limiters for security-sensitive and expensive
+  actions where persistence matters across restarts and API processes.
+- Process-local GCRA/token-bucket prefilters are V2. They are useful only as
+  cheap burst protection for noisy public-network exposure, not as the durable
+  security boundary.
+- Implement the Postgres limiter in the `rate_limit` module with explicit SQLx
   queries over `rate_limit_buckets`; do not add Redis or an obscure
   rate-limiter framework for v1.
 - Postgres-backed limits cover login attempts, TOTP attempts, recovery-code
@@ -794,7 +802,7 @@ Backend tests:
   session revocation, CSRF, and device tokens.
 - Secure cookie attributes and CSRF success/failure cases.
 - Trusted proxy header handling.
-- Process-local burst limits and SQLx/Postgres security limits.
+- SQLx/Postgres security and expensive-route limits.
 - Login, TOTP, recovery-code, share-token, upload-create, export, backup, and
   restore rate-limit cases.
 - Job leases, retries, idempotency, dead-letter state.
@@ -825,6 +833,8 @@ ML tests:
 - Model pack manifest validation.
 - Model checksum validation.
 - Golden embedding dimension tests.
+- ONNX runtime fixture tests that skip unless large model-pack fixtures are
+  configured through environment variables.
 - Semantic search fixture ranking.
 - Face detection/embedding fixture tests.
 - People cluster merge, split, name, and hide flows.

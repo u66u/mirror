@@ -2,8 +2,13 @@ use std::{env, process::Command};
 
 use mirror_backend::{
     backups::{CreateBackupRunInput, backup_manifest_summary, create_backup_run},
+    models::{
+        ImagePreprocessConfig, ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest,
+        OnnxModelPackConfig,
+    },
     storage::StorageKey,
 };
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -113,6 +118,60 @@ fn maintenance_restore_plan_prints_restore_inputs_without_database() -> TestResu
     Ok(())
 }
 
+#[test]
+fn maintenance_prints_generated_model_pack_schema_without_database() -> TestResult {
+    let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .arg("--model-pack-schema")
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"title\": \"ModelPackManifest\""));
+    assert!(stdout.contains("\"image_preprocess\""));
+    assert!(stdout.contains("\"self_tests\""));
+    assert!(!stdout.contains("MIRROR_DATABASE_URL"));
+
+    Ok(())
+}
+
+#[test]
+fn maintenance_validates_local_model_pack_without_database() -> TestResult {
+    let source_dir = write_cli_model_pack()?;
+    let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .arg("--validate-model-pack")
+        .arg(source_dir.path())
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("model_pack\tvalid"));
+    assert!(stdout.contains("kind\tsemantic_image_text"));
+    assert!(stdout.contains("runtime\tonnx"));
+    assert!(stdout.contains("files\t4"));
+    assert!(stdout.contains("bytes\t21"));
+    assert!(!stdout.contains("MIRROR_DATABASE_URL"));
+
+    Ok(())
+}
+
+#[test]
+fn maintenance_reports_operator_error_for_invalid_model_pack() -> TestResult {
+    let source_dir = write_cli_model_pack()?;
+    std::fs::write(
+        source_dir.path().join("models/image_encoder.onnx"),
+        b"changed",
+    )?;
+    let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .arg("--validate-model-pack")
+        .arg(source_dir.path())
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("size or SHA-256 checksum mismatch"));
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
@@ -195,6 +254,74 @@ printf '%s\n' 'dump' > "$out"
     assert!(!row.2.to_string().contains("RESTIC_PASSWORD"));
 
     Ok(())
+}
+
+fn write_cli_model_pack() -> TestResult<TempDir> {
+    let source_dir = TempDir::new()?;
+    std::fs::create_dir_all(source_dir.path().join("models"))?;
+    std::fs::write(
+        source_dir.path().join("models/image_encoder.onnx"),
+        b"image",
+    )?;
+    std::fs::write(source_dir.path().join("models/text_encoder.onnx"), b"text")?;
+    std::fs::create_dir_all(source_dir.path().join("tokenizer"))?;
+    std::fs::write(
+        source_dir.path().join("tokenizer/tokenizer.json"),
+        b"tokenizer",
+    )?;
+    std::fs::create_dir_all(source_dir.path().join("self-tests"))?;
+    std::fs::write(source_dir.path().join("self-tests/cat.jpg"), b"cat")?;
+
+    let manifest = ModelPackManifest {
+        kind: "semantic_image_text".to_owned(),
+        runtime: "onnx".to_owned(),
+        model_key: "siglip2-base-patch16-224".to_owned(),
+        model_revision: "2026-06-18.cli".to_owned(),
+        license: "Apache-2.0".to_owned(),
+        embedding_dimension: 768,
+        distance_metric: "cosine".to_owned(),
+        onnx: OnnxModelPackConfig {
+            image_model_path: "models/image_encoder.onnx".to_owned(),
+            text_model_path: "models/text_encoder.onnx".to_owned(),
+            tokenizer_path: "tokenizer/tokenizer.json".to_owned(),
+            image_input_name: "pixel_values".to_owned(),
+            image_output_name: "image_embeds".to_owned(),
+            text_input_ids_name: "input_ids".to_owned(),
+            text_attention_mask_name: "attention_mask".to_owned(),
+            text_output_name: "text_embeds".to_owned(),
+        },
+        image_preprocess: ImagePreprocessConfig {
+            width: 224,
+            height: 224,
+            color_order: "rgb".to_owned(),
+            tensor_layout: "nchw".to_owned(),
+            mean: [0.5, 0.5, 0.5],
+            std: [0.5, 0.5, 0.5],
+        },
+        files: vec![
+            cli_file_manifest("models/image_encoder.onnx", b"image")?,
+            cli_file_manifest("models/text_encoder.onnx", b"text")?,
+            cli_file_manifest("tokenizer/tokenizer.json", b"tokenizer")?,
+            cli_file_manifest("self-tests/cat.jpg", b"cat")?,
+        ],
+        self_tests: vec![ModelPackSelfTestManifest {
+            name: "text_image_fixture_similarity".to_owned(),
+            input_path: "self-tests/cat.jpg".to_owned(),
+            expected_output_sha256: "d".repeat(64),
+        }],
+    };
+    let body = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
+    std::fs::write(source_dir.path().join("manifest.json"), body)?;
+    Ok(source_dir)
+}
+
+fn cli_file_manifest(path: &str, bytes: &[u8]) -> TestResult<ModelPackFileManifest> {
+    let digest = Sha256::digest(bytes);
+    Ok(ModelPackFileManifest {
+        path: path.to_owned(),
+        sha256: format!("{digest:x}"),
+        size_bytes: i64::try_from(bytes.len())?,
+    })
 }
 
 #[cfg(unix)]

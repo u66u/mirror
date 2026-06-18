@@ -5,7 +5,7 @@
 
 use actix_web::{HttpRequest, HttpResponse, delete, get, post, web};
 use serde::{Deserialize, Serialize};
-use time::{Duration, OffsetDateTime};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
@@ -16,9 +16,6 @@ use crate::{
 };
 
 const SHARE_CREATE_ACTION: &str = "share_create";
-const SHARE_CREATE_MAX_CREATED_PER_HOUR: i32 = 20;
-const SHARE_CREATE_WINDOW: Duration = Duration::hours(1);
-const SHARE_CREATE_BLOCK: Duration = Duration::hours(1);
 
 /// Owner share creation body.
 #[derive(Debug, Deserialize)]
@@ -145,8 +142,8 @@ pub async fn get_share_route(
         share_id: share.share_id,
         asset_id: share.asset_id,
         media_type: share.media_type,
-        thumbnail: share.thumbnail.map(|d| derivative_response(d)),
-        preview: share.preview.map(|d| derivative_response(d)),
+        thumbnail: share.thumbnail.map(derivative_response),
+        preview: share.preview.map(derivative_response),
         allow_original_download: share.allow_original_download,
         expires_at: share.expires_at,
     }))
@@ -212,9 +209,14 @@ async fn reject_blocked_share_create(
             action: SHARE_CREATE_ACTION,
             key: &key,
             now,
-            max_attempts: SHARE_CREATE_MAX_CREATED_PER_HOUR + 1,
-            window: SHARE_CREATE_WINDOW,
-            block_for: SHARE_CREATE_BLOCK,
+            max_attempts: state
+                .config
+                .rate_limits
+                .share_create
+                .max_per_window
+                .saturating_add(1),
+            window: state.config.rate_limits.share_create.window,
+            block_for: state.config.rate_limits.share_create.block_for,
         },
     )
     .await

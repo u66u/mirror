@@ -6,9 +6,13 @@ use serde::Deserialize;
 use crate::{
     http::{auth, error::ApiError},
     ml::{self, SharedImageTextRuntime},
+    rate_limit::{self, QuotaInput},
     search::{self, SearchAssetsInput},
+    semantic_index::SemanticSearchOptions,
     state::AppState,
 };
+
+const SEMANTIC_SEARCH_ACTION: &str = "semantic_search";
 
 /// Search query parameters.
 #[derive(Debug, Deserialize)]
@@ -48,18 +52,24 @@ pub async fn search_route(
             .await?
         }
         "semantic" => {
+            reject_blocked_semantic_search(&state, pool, &req, current).await?;
             let Some(runtime) = req.app_data::<web::Data<SharedImageTextRuntime>>() else {
                 return Err(ApiError::ServiceUnavailable(
                     "semantic_search_unavailable",
                     "semantic search is unavailable",
                 ));
             };
-            let hits = ml::semantic_text_search(
+            let search_options = SemanticSearchOptions {
+                use_ann: state.config.semantic_search.ann_enabled,
+                ann_ef_search: state.config.semantic_search.ann_ef_search,
+            };
+            let hits = ml::semantic_text_search_with_options(
                 pool,
                 runtime.get_ref(),
                 current.owner_id(),
                 &query.q,
                 query.limit.unwrap_or(search::DEFAULT_LIMIT),
+                search_options,
             )
             .await?;
             let asset_ids = hits
@@ -77,4 +87,53 @@ pub async fn search_route(
     };
 
     Ok(HttpResponse::Ok().json(page))
+}
+
+async fn reject_blocked_semantic_search(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    req: &HttpRequest,
+    credential: auth::OwnerCredential,
+) -> Result<(), ApiError> {
+    let key = credential.rate_limit_key(req, &state.config.trusted_proxies);
+    let now = time::OffsetDateTime::now_utc();
+    if rate_limit::is_blocked(
+        pool,
+        &state.config.rate_limit_secret,
+        SEMANTIC_SEARCH_ACTION,
+        &key,
+        now,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    {
+        return Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many semantic search requests",
+        ));
+    }
+
+    let quota = state.config.rate_limits.semantic_search;
+    let blocked = rate_limit::record_quota_attempt(
+        pool,
+        &state.config.rate_limit_secret,
+        QuotaInput {
+            action: SEMANTIC_SEARCH_ACTION,
+            key: &key,
+            now,
+            max_attempts: quota.max_per_window.saturating_add(1),
+            window: quota.window,
+            block_for: quota.block_for,
+        },
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    if blocked {
+        Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many semantic search requests",
+        ))
+    } else {
+        Ok(())
+    }
 }

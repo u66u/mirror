@@ -1,6 +1,8 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-use mirror_backend::config::{Config, MlDevicePreference, RateLimitSecret};
+use mirror_backend::config::{
+    Config, MlDevicePreference, RateLimitConfig, RateLimitSecret, SemanticSearchConfig,
+};
 
 #[test]
 fn config_debug_redacts_secret_values() {
@@ -10,9 +12,12 @@ fn config_debug_redacts_secret_values() {
         database_url: Some("postgres://mirror:secret@db/mirror".to_owned()),
         storage_root: PathBuf::from("/vault"),
         rate_limit_secret: RateLimitSecret::from_secret("rate-secret"),
+        rate_limits: RateLimitConfig::default(),
         trusted_proxies: Vec::new(),
         ml_device: MlDevicePreference::GpuWithCpuFallback,
         ml_max_image_bytes: 25 * 1024 * 1024,
+        semantic_search: SemanticSearchConfig::default(),
+        face_recognition_enabled: false,
     };
 
     let debug = format!("{config:?}");

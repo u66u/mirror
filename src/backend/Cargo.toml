@@ -17,13 +17,16 @@ image = { version = "0.25.9", default-features = false, features = ["jpeg", "png
 ipnet = "2.12.0"
 nom-exif = "=3.6.0"
 opendal = { version = "0.55.0", default-features = false, features = ["services-fs"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "tracing", "api-24"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.145"
+schemars = "0.8.22"
 sha2 = "0.10.8"
 sqlx = { version = "0.8.3", features = ["runtime-tokio-rustls", "postgres", "uuid", "json", "migrate", "time"] }
 subtle = "2.6.1"
 tempfile = "3.14.0"
 time = { version = "0.3.37", features = ["serde"] }
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
 tracing = "0.1.41"
 tracing-actix-web = "0.7.15"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }

@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     assets::{self, PromotedUpload},
+    config::RateLimitQuota,
     http::{auth, error::ApiError},
     rate_limit::{self, QuotaInput},
     state::AppState,
@@ -18,11 +19,6 @@ use crate::{
 const UPLOAD_CREATE_ACTION: &str = "upload_create";
 const UPLOAD_PART_ACTION: &str = "upload_part";
 const UPLOAD_COMPLETE_ACTION: &str = "upload_complete";
-const UPLOAD_CREATE_MAX_PER_HOUR: i32 = 2_000;
-const UPLOAD_PART_MAX_PER_HOUR: i32 = 20_000;
-const UPLOAD_COMPLETE_MAX_PER_HOUR: i32 = 2_000;
-const UPLOAD_WINDOW: time::Duration = time::Duration::hours(1);
-const UPLOAD_BLOCK: time::Duration = time::Duration::hours(1);
 
 /// Create upload request body.
 #[derive(Debug, Deserialize)]
@@ -62,7 +58,7 @@ pub async fn create_upload_route(
         pool,
         current.owner_id(),
         UPLOAD_CREATE_ACTION,
-        UPLOAD_CREATE_MAX_PER_HOUR,
+        state.config.rate_limits.upload_create,
     )
     .await?;
 
@@ -111,7 +107,7 @@ pub async fn put_part_route(
         pool,
         current.owner_id(),
         UPLOAD_PART_ACTION,
-        UPLOAD_PART_MAX_PER_HOUR,
+        state.config.rate_limits.upload_part,
     )
     .await?;
     let (upload_id, part_index) = path.into_inner();
@@ -155,7 +151,7 @@ pub async fn complete_upload_route(
         pool,
         current.owner_id(),
         UPLOAD_COMPLETE_ACTION,
-        UPLOAD_COMPLETE_MAX_PER_HOUR,
+        state.config.rate_limits.upload_complete,
     )
     .await?;
     let upload_id = path.into_inner();
@@ -202,7 +198,7 @@ async fn reject_blocked_upload(
     pool: &sqlx::PgPool,
     owner_id: i16,
     action: &'static str,
-    max_per_hour: i32,
+    quota: RateLimitQuota,
 ) -> Result<(), ApiError> {
     let key = owner_id.to_string();
     let now = time::OffsetDateTime::now_utc();
@@ -223,9 +219,9 @@ async fn reject_blocked_upload(
             action,
             key: &key,
             now,
-            max_attempts: max_per_hour + 1,
-            window: UPLOAD_WINDOW,
-            block_for: UPLOAD_BLOCK,
+            max_attempts: quota.max_per_window.saturating_add(1),
+            window: quota.window,
+            block_for: quota.block_for,
         },
     )
     .await

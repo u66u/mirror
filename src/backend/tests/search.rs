@@ -15,7 +15,6 @@ use mirror_backend::{
     state::AppState,
 };
 use serde_json::Value;
-use uuid::Uuid;
 
 mod support;
 use support::{
@@ -160,11 +159,13 @@ async fn search_route_semantic_mode_uses_active_model_pack() -> TestResult {
     .await?;
     let embedder: Arc<dyn ImageTextEmbedder + Send + Sync> = Arc::new(FakeImageTextEmbedder);
     let runtime = SharedImageTextRuntime::new(embedder, NonZeroUsize::MIN);
+    let mut config = Config::from_env();
+    config.rate_limits.semantic_search.max_per_window = 1;
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(runtime))
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -187,5 +188,17 @@ async fn search_route_semantic_mode_uses_active_model_pack() -> TestResult {
     assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
     assert_eq!(body["items"][0]["asset_id"], asset.public_id.to_string());
     assert_eq!(body["items"][0]["original_filename"], "semantic-route.jpg");
+
+    let blocked = test::TestRequest::get()
+        .uri("/search?mode=semantic&q=cat&limit=10")
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, blocked).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
     Ok(())
 }

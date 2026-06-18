@@ -130,13 +130,15 @@ Deliverables:
 - Optional local ML worker.
 - Runtime-agnostic curated model-pack manifest.
 - SigLIP2 semantic-search pack.
-- AuraFace people-album pack with OpenCV fallback path.
+- People-album backend foundation for owner-local face/people storage and
+  review flows. Real AuraFace/OpenCV runtime is V2.
 - Reindex progress and model install state.
 
 Definition of done:
 
 - Semantic search works on fixture assets.
-- Face detection/clustering/name/merge/split/hide flows pass fixture tests.
+- People review flows for merge/split/name/hide pass backend tests without a
+  real face model.
 - Model changes do not mix incompatible embedding revisions.
 
 ## Completion Evidence

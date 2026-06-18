@@ -43,12 +43,14 @@ Status values:
 
 ## C004: Process-Local Rate Limits Are Not Persistent
 
-- Status: Open
-- Risk: High
+- Status: Deferred to V2
+- Risk: Medium
 - Related tasks: T403
-- Caveat: Governor/process-local limits reset on restart and do not coordinate
-  across API processes.
-- Mitigation: Use SQLx/Postgres limits for security-sensitive actions.
+- Caveat: Governor/process-local limits reset on restart, do not coordinate
+  across API processes, and are mainly useful as cheap prefilters for noisy
+  public-network exposure.
+- Mitigation: V1 uses SQLx/Postgres limits for security-sensitive actions.
+  Process-local prefiltering is tracked in `docs/v2-backend-features.md`.
 
 ## C005: Media Parser Attack Surface
 
@@ -119,25 +121,27 @@ Status values:
 
 ## C011: Share Metadata Leakage
 
-- Status: Partially mitigated
+- Status: Mitigated for backend V1
 - Risk: High
 - Related tasks: T401
 - Caveat: Private share links can leak GPS/full EXIF, people labels, or
   referrers if pages are not carefully constrained.
-- Mitigation: Omit GPS/full EXIF and people labels by default; set
-  `Referrer-Policy: no-referrer` and `X-Robots-Tag: noindex`; no third-party
-  scripts. Backend share metadata/derivative routes now apply privacy headers
-  and omit owner-only fields; web share page remains pending.
+- Mitigation: Backend public share metadata/derivative routes omit GPS/full
+  EXIF and people labels by default and set `Referrer-Policy: no-referrer`,
+  `X-Robots-Tag: noindex`, and other privacy headers. Public original-byte
+  share downloads are deferred to `docs/v2-backend-features.md` because they
+  need explicit policy, audit, range handling, and EXIF/GPS decisions.
 
 ## C012: Model Supply Chain
 
-- Status: Open
+- Status: Mitigated for backend V1
 - Risk: High
 - Related tasks: T501, T502
 - Caveat: Model downloads are executable-adjacent supply-chain inputs and model
   license changes can affect distribution.
-- Mitigation: Pinned revisions, checksums, license metadata, and golden
-  self-tests before activation.
+- Mitigation: Pinned revisions, checksums, license metadata, schema validation,
+  and golden self-tests before activation. Real face-runtime model contracts are
+  deferred to `docs/v2-backend-features.md`.
 
 ## C013: Embedding Revision Mixing
 
@@ -165,11 +169,11 @@ Status values:
 - Caveat: pgvector approximate indexes apply filters after ANN scan. Owner,
   trash, and model-pack filters can reduce recall or return too few rows unless
   scan breadth/iterative scans/index shape are tuned.
-- Mitigation: Keep v1 semantic search exact. `asset_embeddings` denormalizes
-  owner/trash/model-pack filter fields for the SQL filter path. Before enabling
-  ANN, add recall fixtures with selective filters, prefer partial HNSW per
-  active model pack and dimension, match operator class to distance metric, and
-  tune iterative scans.
+- Mitigation: Keep v1 semantic search exact by default. `asset_embeddings`
+  denormalizes owner/trash/model-pack filter fields for the SQL filter path.
+  ANN stays opt-in and uses partial HNSW per model pack/dimension/metric with
+  configurable scan breadth; add broader recall fixtures before making ANN the
+  default.
 
 ## C016: Dynamic Android Cleartext Scope
 

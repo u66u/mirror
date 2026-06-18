@@ -1,6 +1,8 @@
 # pgvector ANN Notes
 
-- V1 uses exact vector ordering only.
+- V1 uses exact vector ordering by default.
+- ANN is opt-in with `MIRROR_SEMANTIC_ANN_ENABLED=true` and scan breadth tuned
+  by `MIRROR_SEMANTIC_ANN_EF_SEARCH`.
 - Bind vectors through `pgvector::Vector`; do not build vector literals by hand.
 - Add HNSW before IVFFlat for large collections unless build time or memory is
   measured as the limiting factor.
@@ -15,11 +17,12 @@
   include owner/trash/model-pack filters and tune iterative scans.
 - `asset_embeddings` denormalizes owner/trash/public-id/create-time fields so
   exact v1 search filters without joining `assets`.
-- If exact search becomes too slow, first try one partial HNSW index per active
-  semantic model pack and dimension, keeping filter predicates aligned with the
+- If exact search becomes too slow, use `maintenance --ensure-semantic-ann-index
+  MODEL_PACK_ID` to create one partial HNSW index per semantic model pack,
+  dimension, and metric, keeping filter predicates aligned with the
   denormalized projection.
 - `asset_embeddings.embedding` is plain `vector` so different model dimensions
-  can coexist. Any future ANN index may need an expression cast such as
+  can coexist. ANN indexes use an expression cast such as
   `embedding::vector(768)` plus a partial `model_pack_id` predicate.
 - Reindex/bulk indexing should avoid per-row model metadata fetches and should
   not maintain HNSW row-by-row if rebuild or batch strategy is materially

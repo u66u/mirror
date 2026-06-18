@@ -5,7 +5,7 @@
 //! durable vault state.
 
 use std::{
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Command,
 };
 use thiserror::Error;
@@ -17,7 +17,6 @@ use time::OffsetDateTime;
 use url::Url;
 use uuid::Uuid;
 
-use crate::paths::clean_path;
 use crate::storage::{ObjectStorage, StorageError, StorageKey};
 
 /// Durable storage object manifest for backup tooling.
@@ -673,7 +672,16 @@ pub fn backup_manifest_summary(object_count: usize) -> Value {
 }
 
 fn clean_backup_path(path: &Path) -> Result<PathBuf, BackupError> {
-    clean_path(path).map_err(|_| BackupError::InvalidPath)
+    if path.as_os_str().is_empty() {
+        return Err(BackupError::InvalidPath);
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(BackupError::InvalidPath);
+    }
+    Ok(path.to_path_buf())
 }
 
 fn clean_snapshot_id(snapshot_id: &str) -> Result<&str, BackupError> {

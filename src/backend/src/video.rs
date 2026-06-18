@@ -242,13 +242,15 @@ fn run_command(
     let started = Instant::now();
 
     let status = loop {
+        if started.elapsed() >= timeout {
+            if child.try_wait()?.is_none() {
+                child.kill()?;
+                child.wait()?;
+            }
+            return Err(VideoToolError::TimedOut);
+        }
         if let Some(status) = child.try_wait()? {
             break status;
-        }
-        if started.elapsed() >= timeout {
-            child.kill()?;
-            child.wait()?;
-            return Err(VideoToolError::TimedOut);
         }
         thread::sleep(PROCESS_POLL_INTERVAL.min(timeout));
     };

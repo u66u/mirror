@@ -71,6 +71,7 @@ where
         &self,
         bytes: Vec<u8>,
         media_type: String,
+        model_pack_id: Uuid,
         manifest: ModelPackManifest,
     ) -> Result<Vec<f32>, MlError> {
         let permit = self
@@ -88,6 +89,7 @@ where
             embedder.embed_image(EmbedImageRequest {
                 bytes: &bytes,
                 media_type: &media_type,
+                model_pack_id,
                 manifest: &manifest,
             })
         })
@@ -98,6 +100,7 @@ where
     async fn embed_text(
         &self,
         text: String,
+        model_pack_id: Uuid,
         manifest: ModelPackManifest,
     ) -> Result<Vec<f32>, MlError> {
         let permit = self
@@ -114,6 +117,7 @@ where
 
             embedder.embed_text(EmbedTextRequest {
                 text: &text,
+                model_pack_id,
                 manifest: &manifest,
             })
         })
@@ -128,6 +132,8 @@ pub struct EmbedImageRequest<'a> {
     pub bytes: &'a [u8],
     /// Original media type.
     pub media_type: &'a str,
+    /// Installed model-pack ID.
+    pub model_pack_id: Uuid,
     /// Model-pack manifest from the database.
     pub manifest: &'a ModelPackManifest,
 }
@@ -136,6 +142,8 @@ pub struct EmbedImageRequest<'a> {
 pub struct EmbedTextRequest<'a> {
     /// Owner query after boundary validation.
     pub text: &'a str,
+    /// Installed model-pack ID.
+    pub model_pack_id: Uuid,
     /// Model-pack manifest from the database.
     pub manifest: &'a ModelPackManifest,
 }
@@ -173,6 +181,9 @@ pub enum MlError {
     /// Encoded original exceeds the embedding runtime boundary.
     #[error("ml image exceeds embedding byte limit")]
     ImageTooLarge,
+    /// Encoded original is not a decodable still image for the selected media type.
+    #[error("invalid ml image input")]
+    InvalidImage,
     /// Original storage key is invalid.
     #[error("invalid ml storage key")]
     InvalidStorageKey(#[from] StorageKeyError),
@@ -300,15 +311,47 @@ pub async fn semantic_text_search<E>(
 where
     E: ImageTextEmbedder + Send + Sync + 'static + ?Sized,
 {
+    semantic_text_search_with_options(
+        pool,
+        runtime,
+        owner_id,
+        query,
+        limit,
+        semantic_index::SemanticSearchOptions::exact(),
+    )
+    .await
+}
+
+/// Embeds an owner text query and searches with explicit pgvector options.
+pub async fn semantic_text_search_with_options<E>(
+    pool: &PgPool,
+    runtime: &MlRuntime<E>,
+    owner_id: i16,
+    query: &str,
+    limit: i64,
+    options: semantic_index::SemanticSearchOptions,
+) -> Result<Vec<semantic_index::SemanticSearchHit>, MlError>
+where
+    E: ImageTextEmbedder + Send + Sync + 'static + ?Sized,
+{
     let query = valid_text_query(query)?.to_owned();
     let pack = active_semantic_model_pack(pool).await?;
 
-    let values = runtime.embed_text(query, pack.manifest.clone()).await?;
+    let values = runtime
+        .embed_text(query, pack.model_pack_id, pack.manifest.clone())
+        .await?;
     let embedding = validate_embedding_output(&pack.manifest, values)?;
 
-    semantic_index::semantic_search(pool, owner_id, pack.model_pack_id, &embedding, limit)
-        .await
-        .map_err(MlError::SemanticIndex)
+    semantic_index::semantic_search_with_options(
+        pool,
+        owner_id,
+        pack.model_pack_id,
+        &embedding,
+        limit,
+        options,
+    )
+    .await
+    .map_err(MlError::SemanticIndex)
 }
 
 async fn run_embed_asset_job<E>(
@@ -338,7 +381,12 @@ where
         })?;
 
     let values = runtime
-        .embed_image(bytes, asset.media_type.clone(), asset.manifest.clone())
+        .embed_image(
+            bytes,
+            asset.media_type.clone(),
+            payload.model_pack_id,
+            asset.manifest.clone(),
+        )
         .await?;
 
     let embedding = validate_embedding_output(&asset.manifest, values)?;
@@ -407,7 +455,12 @@ where
         })?;
     let media_type = self_test_media_type(&self_test.input_path)?;
     let values = runtime
-        .embed_image(bytes, media_type.to_owned(), manifest.clone())
+        .embed_image(
+            bytes,
+            media_type.to_owned(),
+            model_pack_id,
+            manifest.clone(),
+        )
         .await?;
     let embedding = validate_embedding_output(manifest, values)?;
     Ok(sha256_f32_values(embedding.values()) == self_test.expected_output_sha256)
@@ -721,6 +774,7 @@ fn self_test_runtime_failure(error: &MlError) -> bool {
         error,
         MlError::RuntimeUnavailable
             | MlError::ImageTooLarge
+            | MlError::InvalidImage
             | MlError::Model(ModelPackError::InvalidEmbedding(_))
     )
 }
@@ -750,6 +804,7 @@ fn is_terminal_reindex_failure(error: &MlError) -> bool {
         MlError::NotFound
         | MlError::UnsupportedMediaType
         | MlError::ImageTooLarge
+        | MlError::InvalidImage
         | MlError::InvalidStorageKey(_) => true,
 
         MlError::Model(

@@ -191,7 +191,7 @@ map_api_errors! {
     impl From<MlError> for ApiError;
     MlError::InvalidTextQuery | MlError::SemanticIndex(SemanticIndexError::InvalidLimit) => Self::BadRequest("invalid_search", "invalid search"),
     MlError::NotFound | MlError::RuntimeUnavailable => Self::ServiceUnavailable("semantic_search_unavailable", "semantic search is unavailable"),
-    @internal => MlError::UnsupportedJobKind | MlError::InvalidJobPayload | MlError::UnsupportedMediaType | MlError::ImageTooLarge | MlError::InvalidStorageKey(_) | MlError::Storage(_) | MlError::Model(_) | MlError::SemanticIndex(_) | MlError::Database(_)
+    @internal => MlError::UnsupportedJobKind | MlError::InvalidJobPayload | MlError::UnsupportedMediaType | MlError::ImageTooLarge | MlError::InvalidImage | MlError::InvalidStorageKey(_) | MlError::Storage(_) | MlError::Model(_) | MlError::SemanticIndex(_) | MlError::Database(_)
 }
 
 map_api_errors! {
@@ -200,5 +200,5 @@ map_api_errors! {
     ModelPackError::NotFound => Self::NotFound("model_pack_not_found", "model pack not found"),
     ModelPackError::SelfTestRequired => Self::Conflict("model_pack_self_test_required", "model pack self-test has not passed"),
     ModelPackError::FileVerificationFailed => Self::BadRequest("model_pack_file_verification_failed", "model pack file verification failed"),
-    @internal => ModelPackError::InvalidFilePath | ModelPackError::InvalidEmbedding(_) | ModelPackError::Io(_) | ModelPackError::Storage(_) | ModelPackError::StorageKey(_) | ModelPackError::Job(_) | ModelPackError::Database(_)
+    @internal => ModelPackError::InvalidFilePath | ModelPackError::InvalidEmbedding(_) | ModelPackError::Io(_) | ModelPackError::Json(_) | ModelPackError::Storage(_) | ModelPackError::StorageKey(_) | ModelPackError::Job(_) | ModelPackError::Database(_)
 }
