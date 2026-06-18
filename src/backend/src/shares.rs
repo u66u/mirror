@@ -54,24 +54,13 @@ pub struct ShareView {
     /// Original media type.
     pub media_type: String,
     /// Optional thumbnail derivative.
-    pub thumbnail: Option<ShareDerivativeView>,
+    pub thumbnail: Option<crate::assets::AssetDerivativeView>,
     /// Optional preview derivative.
-    pub preview: Option<ShareDerivativeView>,
+    pub preview: Option<crate::assets::AssetDerivativeView>,
     /// Original-download policy.
     pub allow_original_download: bool,
     /// Share expiration.
     pub expires_at: OffsetDateTime,
-}
-
-/// Public derivative metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShareDerivativeView {
-    /// Encoded format.
-    pub format: String,
-    /// Pixel width.
-    pub width: i32,
-    /// Pixel height.
-    pub height: i32,
 }
 
 /// Public derivative bytes behind a valid share token.
@@ -179,12 +168,12 @@ pub async fn load_share(pool: &PgPool, raw_token: &str) -> Result<ShareView, Sha
         share_id: row.share_public_id,
         asset_id: row.asset_public_id,
         media_type: row.media_type,
-        thumbnail: share_derivative_view(
+        thumbnail: crate::assets::asset_derivative_view(
             row.thumbnail_format,
             row.thumbnail_width,
             row.thumbnail_height,
         ),
-        preview: share_derivative_view(row.preview_format, row.preview_width, row.preview_height),
+        preview: crate::assets::asset_derivative_view(row.preview_format, row.preview_width, row.preview_height),
         allow_original_download: row.allow_original_download,
         expires_at: row.expires_at,
     })
@@ -284,39 +273,22 @@ async fn active_share_row(pool: &PgPool, raw_token: &str) -> Result<ShareRow, Sh
         r#"
         SELECT
             sh.public_id,
-            a.public_id as asset_public_id,
-            o.media_type,
-            t.format as thumbnail_format,
-            t.width as thumbnail_width,
-            t.height as thumbnail_height,
-            p.format as preview_format,
-            p.width as preview_width,
-            p.height as preview_height,
+            v.asset_public_id as "asset_public_id!",
+            v.media_type as "media_type!",
+            v.thumbnail_format as "thumbnail_format?",
+            v.thumbnail_width as "thumbnail_width?",
+            v.thumbnail_height as "thumbnail_height?",
+            v.preview_format as "preview_format?",
+            v.preview_width as "preview_width?",
+            v.preview_height as "preview_height?",
             sh.allow_original_download,
             sh.expires_at
         FROM asset_shares sh
-        JOIN assets a ON a.id = sh.asset_id
-        JOIN originals o ON o.id = a.original_id
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'thumbnail'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) t ON true
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'preview'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) p ON true
+        JOIN asset_display_view v ON v.asset_id = sh.asset_id
         WHERE sh.token_hash = $1
           AND sh.revoked_at IS NULL
           AND sh.expires_at > now()
-          AND a.trashed_at IS NULL
+          AND v.trashed_at IS NULL
         "#,
         token_bytes
     )
@@ -327,26 +299,16 @@ async fn active_share_row(pool: &PgPool, raw_token: &str) -> Result<ShareRow, Sh
         share_public_id: row.public_id,
         asset_public_id: row.asset_public_id,
         media_type: row.media_type,
-        thumbnail_format: Some(row.thumbnail_format),
-        thumbnail_width: Some(row.thumbnail_width),
-        thumbnail_height: Some(row.thumbnail_height),
-        preview_format: Some(row.preview_format),
-        preview_width: Some(row.preview_width),
-        preview_height: Some(row.preview_height),
+        thumbnail_format: row.thumbnail_format,
+        thumbnail_width: row.thumbnail_width,
+        thumbnail_height: row.thumbnail_height,
+        preview_format: row.preview_format,
+        preview_width: row.preview_width,
+        preview_height: row.preview_height,
         allow_original_download: row.allow_original_download,
         expires_at: row.expires_at,
     })
     .ok_or(ShareError::NotFound)
 }
 
-fn share_derivative_view(
-    format: Option<String>,
-    width: Option<i32>,
-    height: Option<i32>,
-) -> Option<ShareDerivativeView> {
-    Some(ShareDerivativeView {
-        format: format?,
-        width: width?,
-        height: height?,
-    })
-}
+

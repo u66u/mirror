@@ -145,8 +145,8 @@ pub async fn get_share_route(
         share_id: share.share_id,
         asset_id: share.asset_id,
         media_type: share.media_type,
-        thumbnail: share.thumbnail.map(derivative_response),
-        preview: share.preview.map(derivative_response),
+        thumbnail: share.thumbnail.map(|d| derivative_response(d)),
+        preview: share.preview.map(|d| derivative_response(d)),
         allow_original_download: share.allow_original_download,
         expires_at: share.expires_at,
     }))
@@ -229,7 +229,7 @@ async fn reject_blocked_share_create(
     }
 }
 
-fn derivative_response(value: shares::ShareDerivativeView) -> ShareDerivativeResponse {
+fn derivative_response(value: crate::assets::AssetDerivativeView) -> ShareDerivativeResponse {
     ShareDerivativeResponse {
         format: value.format,
         width: value.width,

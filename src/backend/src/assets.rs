@@ -758,47 +758,23 @@ async fn list_assets_first_page(
         AssetTimelineRow,
         r#"
         SELECT
-            a.public_id,
-            a.created_at,
-            a.favorite_at,
-            o.blake3_hash,
-            o.media_type,
-            o.size_bytes,
-            s.original_filename,
-            t.format as thumbnail_format,
-            t.width as thumbnail_width,
-            t.height as thumbnail_height,
-            p.format as preview_format,
-            p.width as preview_width,
-            p.height as preview_height
-        FROM assets a
-        JOIN originals o ON o.id = a.original_id
-        LEFT JOIN LATERAL (
-            SELECT original_filename
-            FROM asset_sources
-            WHERE asset_id = a.id
-            ORDER BY created_at ASC
-            LIMIT 1
-        ) s ON true
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'thumbnail'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) t ON true
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'preview'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) p ON true
-        WHERE a.owner_id = $1
-          AND a.trashed_at IS NULL
-        ORDER BY a.created_at DESC, a.public_id DESC
+            asset_public_id as "public_id!",
+            created_at as "created_at!",
+            favorite_at,
+            blake3_hash as "blake3_hash!",
+            media_type as "media_type!",
+            size_bytes as "size_bytes!",
+            original_filename,
+            thumbnail_format as "thumbnail_format?",
+            thumbnail_width as "thumbnail_width?",
+            thumbnail_height as "thumbnail_height?",
+            preview_format as "preview_format?",
+            preview_width as "preview_width?",
+            preview_height as "preview_height?"
+        FROM asset_display_view
+        WHERE asset_owner_id = $1
+          AND trashed_at IS NULL
+        ORDER BY created_at DESC, asset_public_id DESC
         LIMIT $2
         "#,
         owner_id,
@@ -818,48 +794,24 @@ async fn list_trashed_assets_first_page(
         TrashedAssetTimelineRow,
         r#"
         SELECT
-            a.public_id,
-            a.created_at,
-            a.trashed_at as "trashed_at!",
-            a.favorite_at,
-            o.blake3_hash,
-            o.media_type,
-            o.size_bytes,
-            s.original_filename,
-            t.format as thumbnail_format,
-            t.width as thumbnail_width,
-            t.height as thumbnail_height,
-            p.format as preview_format,
-            p.width as preview_width,
-            p.height as preview_height
-        FROM assets a
-        JOIN originals o ON o.id = a.original_id
-        LEFT JOIN LATERAL (
-            SELECT original_filename
-            FROM asset_sources
-            WHERE asset_id = a.id
-            ORDER BY created_at ASC
-            LIMIT 1
-        ) s ON true
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'thumbnail'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) t ON true
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'preview'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) p ON true
-        WHERE a.owner_id = $1
-          AND a.trashed_at IS NOT NULL
-        ORDER BY a.trashed_at DESC, a.public_id DESC
+            asset_public_id as "public_id!",
+            created_at as "created_at!",
+            trashed_at as "trashed_at!",
+            favorite_at,
+            blake3_hash as "blake3_hash!",
+            media_type as "media_type!",
+            size_bytes as "size_bytes!",
+            original_filename,
+            thumbnail_format as "thumbnail_format?",
+            thumbnail_width as "thumbnail_width?",
+            thumbnail_height as "thumbnail_height?",
+            preview_format as "preview_format?",
+            preview_width as "preview_width?",
+            preview_height as "preview_height?"
+        FROM asset_display_view
+        WHERE asset_owner_id = $1
+          AND trashed_at IS NOT NULL
+        ORDER BY trashed_at DESC, asset_public_id DESC
         LIMIT $2
         "#,
         owner_id,
@@ -881,48 +833,24 @@ async fn list_assets_after(
         AssetTimelineRow,
         r#"
         SELECT
-            a.public_id,
-            a.created_at,
-            a.favorite_at,
-            o.blake3_hash,
-            o.media_type,
-            o.size_bytes,
-            s.original_filename,
-            t.format as thumbnail_format,
-            t.width as thumbnail_width,
-            t.height as thumbnail_height,
-            p.format as preview_format,
-            p.width as preview_width,
-            p.height as preview_height
-        FROM assets a
-        JOIN originals o ON o.id = a.original_id
-        LEFT JOIN LATERAL (
-            SELECT original_filename
-            FROM asset_sources
-            WHERE asset_id = a.id
-            ORDER BY created_at ASC
-            LIMIT 1
-        ) s ON true
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'thumbnail'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) t ON true
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'preview'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) p ON true
-        WHERE a.owner_id = $1
-          AND a.trashed_at IS NULL
-          AND (a.created_at, a.public_id) < ($3, $4)
-        ORDER BY a.created_at DESC, a.public_id DESC
+            asset_public_id as "public_id!",
+            created_at as "created_at!",
+            favorite_at,
+            blake3_hash as "blake3_hash!",
+            media_type as "media_type!",
+            size_bytes as "size_bytes!",
+            original_filename,
+            thumbnail_format as "thumbnail_format?",
+            thumbnail_width as "thumbnail_width?",
+            thumbnail_height as "thumbnail_height?",
+            preview_format as "preview_format?",
+            preview_width as "preview_width?",
+            preview_height as "preview_height?"
+        FROM asset_display_view
+        WHERE asset_owner_id = $1
+          AND trashed_at IS NULL
+          AND (created_at, asset_public_id) < ($3, $4)
+        ORDER BY created_at DESC, asset_public_id DESC
         LIMIT $2
         "#,
         owner_id,
@@ -946,49 +874,25 @@ async fn list_trashed_assets_after(
         TrashedAssetTimelineRow,
         r#"
         SELECT
-            a.public_id,
-            a.created_at,
-            a.trashed_at as "trashed_at!",
-            a.favorite_at,
-            o.blake3_hash,
-            o.media_type,
-            o.size_bytes,
-            s.original_filename,
-            t.format as thumbnail_format,
-            t.width as thumbnail_width,
-            t.height as thumbnail_height,
-            p.format as preview_format,
-            p.width as preview_width,
-            p.height as preview_height
-        FROM assets a
-        JOIN originals o ON o.id = a.original_id
-        LEFT JOIN LATERAL (
-            SELECT original_filename
-            FROM asset_sources
-            WHERE asset_id = a.id
-            ORDER BY created_at ASC
-            LIMIT 1
-        ) s ON true
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'thumbnail'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) t ON true
-        LEFT JOIN LATERAL (
-            SELECT format, width, height
-            FROM derivatives
-            WHERE asset_id = a.id
-              AND kind = 'preview'
-            ORDER BY created_at DESC
-            LIMIT 1
-        ) p ON true
-        WHERE a.owner_id = $1
-          AND a.trashed_at IS NOT NULL
-          AND (a.trashed_at, a.public_id) < ($3, $4)
-        ORDER BY a.trashed_at DESC, a.public_id DESC
+            asset_public_id as "public_id!",
+            created_at as "created_at!",
+            trashed_at as "trashed_at!",
+            favorite_at,
+            blake3_hash as "blake3_hash!",
+            media_type as "media_type!",
+            size_bytes as "size_bytes!",
+            original_filename,
+            thumbnail_format as "thumbnail_format?",
+            thumbnail_width as "thumbnail_width?",
+            thumbnail_height as "thumbnail_height?",
+            preview_format as "preview_format?",
+            preview_width as "preview_width?",
+            preview_height as "preview_height?"
+        FROM asset_display_view
+        WHERE asset_owner_id = $1
+          AND trashed_at IS NOT NULL
+          AND (trashed_at, asset_public_id) < ($3, $4)
+        ORDER BY trashed_at DESC, asset_public_id DESC
         LIMIT $2
         "#,
         owner_id,
@@ -1093,7 +997,7 @@ fn page_limit(limit: Option<i64>) -> Result<i64, ListAssetsError> {
     }
 }
 
-fn asset_derivative_view(
+pub fn asset_derivative_view(
     format: Option<String>,
     width: Option<i32>,
     height: Option<i32>,

@@ -1,0 +1,1 @@
+DROP VIEW asset_display_view;

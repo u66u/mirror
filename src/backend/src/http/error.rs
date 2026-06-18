@@ -86,199 +86,119 @@ impl ResponseError for ApiError {
     }
 }
 
-impl From<OwnerSetupError> for ApiError {
-    fn from(error: OwnerSetupError) -> Self {
-        match error {
-            OwnerSetupError::SetupUnavailable => {
-                Self::Conflict("setup_unavailable", "owner setup is unavailable")
+macro_rules! map_api_errors {
+    (
+        impl From<$err_type:ty> for ApiError;
+        $(
+            $( $variant:pat_param )|+ => $response:expr,
+        )*
+        @internal => $( $internal_variant:pat_param )|+ $(,)?
+    ) => {
+        impl From<$err_type> for ApiError {
+            fn from(error: $err_type) -> Self {
+                match error {
+                    $( $( $variant )|+ => $response, )*
+                    $( $internal_variant )|+ => {
+                        tracing::error!(action = "http_error_mapped", ?error, "internal server error");
+                        Self::Internal
+                    }
+                }
             }
-            OwnerSetupError::InvalidSetupToken => {
-                Self::Unauthorized("invalid_setup_token", "invalid setup token")
-            }
-            OwnerSetupError::InvalidDisplayName => {
-                Self::BadRequest("invalid_display_name", "invalid display name")
-            }
-            OwnerSetupError::InvalidPassword => {
-                Self::BadRequest("invalid_password", "invalid password")
-            }
-            OwnerSetupError::OwnerAlreadyExists => {
-                Self::Conflict("owner_exists", "owner already exists")
-            }
-            OwnerSetupError::Database(_) => Self::Internal,
         }
-    }
+    };
 }
 
-impl From<OwnerLoginError> for ApiError {
-    fn from(error: OwnerLoginError) -> Self {
-        match error {
-            OwnerLoginError::InvalidCredentials => {
-                Self::Unauthorized("invalid_credentials", "invalid credentials")
-            }
-            OwnerLoginError::Session(_) | OwnerLoginError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<OwnerSetupError> for ApiError;
+    OwnerSetupError::SetupUnavailable => Self::Conflict("setup_unavailable", "owner setup is unavailable"),
+    OwnerSetupError::InvalidSetupToken => Self::Unauthorized("invalid_setup_token", "invalid setup token"),
+    OwnerSetupError::InvalidDisplayName => Self::BadRequest("invalid_display_name", "invalid display name"),
+    OwnerSetupError::InvalidPassword => Self::BadRequest("invalid_password", "invalid password"),
+    OwnerSetupError::OwnerAlreadyExists => Self::Conflict("owner_exists", "owner already exists"),
+    @internal => OwnerSetupError::Database(_)
 }
 
-impl From<DeviceTokenError> for ApiError {
-    fn from(error: DeviceTokenError) -> Self {
-        match error {
-            DeviceTokenError::InvalidName => {
-                Self::BadRequest("invalid_device_name", "invalid device name")
-            }
-            DeviceTokenError::TokenGeneration | DeviceTokenError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<OwnerLoginError> for ApiError;
+    OwnerLoginError::InvalidCredentials => Self::Unauthorized("invalid_credentials", "invalid credentials"),
+    @internal => OwnerLoginError::Session(_) | OwnerLoginError::Database(_)
 }
 
-impl From<UploadError> for ApiError {
-    fn from(error: UploadError) -> Self {
-        match error {
-            UploadError::InvalidInput => Self::BadRequest("invalid_upload", "invalid upload"),
-            UploadError::PartOutOfRange => Self::BadRequest(
-                "upload_part_out_of_range",
-                "upload part index is out of range",
-            ),
-            UploadError::PartLengthMismatch => Self::BadRequest(
-                "upload_part_wrong_length",
-                "upload part has the wrong length",
-            ),
-            UploadError::NotFound => Self::BadRequest("upload_not_found", "upload not found"),
-            UploadError::NotOpen => Self::Conflict("upload_not_open", "upload is not open"),
-            UploadError::VerificationFailed => {
-                Self::BadRequest("upload_verification_failed", "upload verification failed")
-            }
-            UploadError::Storage(_) | UploadError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<DeviceTokenError> for ApiError;
+    DeviceTokenError::InvalidName => Self::BadRequest("invalid_device_name", "invalid device name"),
+    @internal => DeviceTokenError::TokenGeneration | DeviceTokenError::Database(_)
 }
 
-impl From<PromoteError> for ApiError {
-    fn from(error: PromoteError) -> Self {
-        match error {
-            PromoteError::UploadNotVerified => {
-                Self::Conflict("upload_not_verified", "upload is not verified")
-            }
-            PromoteError::VerificationFailed => {
-                Self::BadRequest("upload_verification_failed", "upload verification failed")
-            }
-            PromoteError::Storage(_) | PromoteError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<UploadError> for ApiError;
+    UploadError::InvalidInput => Self::BadRequest("invalid_upload", "invalid upload"),
+    UploadError::PartOutOfRange => Self::BadRequest("upload_part_out_of_range", "upload part index is out of range"),
+    UploadError::PartLengthMismatch => Self::BadRequest("upload_part_wrong_length", "upload part has the wrong length"),
+    UploadError::NotFound => Self::BadRequest("upload_not_found", "upload not found"),
+    UploadError::NotOpen => Self::Conflict("upload_not_open", "upload is not open"),
+    UploadError::VerificationFailed => Self::BadRequest("upload_verification_failed", "upload verification failed"),
+    @internal => UploadError::Storage(_) | UploadError::Database(_)
 }
 
-impl From<ListAssetsError> for ApiError {
-    fn from(error: ListAssetsError) -> Self {
-        match error {
-            ListAssetsError::InvalidInput => {
-                Self::BadRequest("invalid_asset_list", "invalid asset list")
-            }
-            ListAssetsError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<PromoteError> for ApiError;
+    PromoteError::UploadNotVerified => Self::Conflict("upload_not_verified", "upload is not verified"),
+    PromoteError::VerificationFailed => Self::BadRequest("upload_verification_failed", "upload verification failed"),
+    @internal => PromoteError::Storage(_) | PromoteError::Database(_)
 }
 
-impl From<AssetReadError> for ApiError {
-    fn from(error: AssetReadError) -> Self {
-        match error {
-            AssetReadError::NotFound => Self::NotFound("asset_not_found", "asset not found"),
-            AssetReadError::InvalidInput => {
-                Self::BadRequest("invalid_asset_request", "invalid asset request")
-            }
-            AssetReadError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<ListAssetsError> for ApiError;
+    ListAssetsError::InvalidInput => Self::BadRequest("invalid_asset_list", "invalid asset list"),
+    @internal => ListAssetsError::Database(_)
 }
 
-impl From<AssetMutationError> for ApiError {
-    fn from(error: AssetMutationError) -> Self {
-        match error {
-            AssetMutationError::NotFound => Self::NotFound("asset_not_found", "asset not found"),
-            AssetMutationError::NotTrashed => {
-                Self::Conflict("asset_not_trashed", "asset is not in trash")
-            }
-            AssetMutationError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<AssetReadError> for ApiError;
+    AssetReadError::NotFound => Self::NotFound("asset_not_found", "asset not found"),
+    AssetReadError::InvalidInput => Self::BadRequest("invalid_asset_request", "invalid asset request"),
+    @internal => AssetReadError::Database(_)
 }
 
-impl From<ShareError> for ApiError {
-    fn from(error: ShareError) -> Self {
-        match error {
-            ShareError::InvalidInput => Self::BadRequest("invalid_share", "invalid share"),
-            ShareError::NotFound => Self::NotFound("share_not_found", "share not found"),
-            ShareError::TokenGeneration | ShareError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<AssetMutationError> for ApiError;
+    AssetMutationError::NotFound => Self::NotFound("asset_not_found", "asset not found"),
+    AssetMutationError::NotTrashed => Self::Conflict("asset_not_trashed", "asset is not in trash"),
+    @internal => AssetMutationError::Database(_)
 }
 
-impl From<ExportError> for ApiError {
-    fn from(error: ExportError) -> Self {
-        match error {
-            ExportError::NotFound => Self::NotFound("export_not_found", "export not found"),
-            ExportError::InvalidStorageKey => Self::Internal,
-            ExportError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<ShareError> for ApiError;
+    ShareError::InvalidInput => Self::BadRequest("invalid_share", "invalid share"),
+    ShareError::NotFound => Self::NotFound("share_not_found", "share not found"),
+    @internal => ShareError::TokenGeneration | ShareError::Database(_)
 }
 
-impl From<SearchError> for ApiError {
-    fn from(error: SearchError) -> Self {
-        match error {
-            SearchError::InvalidInput => Self::BadRequest("invalid_search", "invalid search"),
-            SearchError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<ExportError> for ApiError;
+    ExportError::NotFound => Self::NotFound("export_not_found", "export not found"),
+    @internal => ExportError::InvalidStorageKey | ExportError::Database(_)
 }
 
-impl From<MlError> for ApiError {
-    fn from(error: MlError) -> Self {
-        match error {
-            MlError::InvalidTextQuery
-            | MlError::SemanticIndex(SemanticIndexError::InvalidLimit) => {
-                Self::BadRequest("invalid_search", "invalid search")
-            }
-            MlError::NotFound | MlError::RuntimeUnavailable => Self::ServiceUnavailable(
-                "semantic_search_unavailable",
-                "semantic search is unavailable",
-            ),
-            MlError::UnsupportedJobKind
-            | MlError::InvalidJobPayload
-            | MlError::UnsupportedMediaType
-            | MlError::ImageTooLarge
-            | MlError::InvalidStorageKey(_)
-            | MlError::Storage(_)
-            | MlError::Model(_)
-            | MlError::SemanticIndex(_)
-            | MlError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<SearchError> for ApiError;
+    SearchError::InvalidInput => Self::BadRequest("invalid_search", "invalid search"),
+    @internal => SearchError::Database(_)
 }
 
-impl From<ModelPackError> for ApiError {
-    fn from(error: ModelPackError) -> Self {
-        match error {
-            ModelPackError::InvalidManifest(_) => {
-                Self::BadRequest("invalid_model_pack", "invalid model pack")
-            }
-            ModelPackError::NotFound => {
-                Self::NotFound("model_pack_not_found", "model pack not found")
-            }
-            ModelPackError::SelfTestRequired => Self::Conflict(
-                "model_pack_self_test_required",
-                "model pack self-test has not passed",
-            ),
-            ModelPackError::FileVerificationFailed => Self::BadRequest(
-                "model_pack_file_verification_failed",
-                "model pack file verification failed",
-            ),
-            ModelPackError::InvalidFilePath
-            | ModelPackError::InvalidEmbedding(_)
-            | ModelPackError::Io(_)
-            | ModelPackError::Storage(_)
-            | ModelPackError::StorageKey(_)
-            | ModelPackError::Job(_)
-            | ModelPackError::Database(_) => Self::Internal,
-        }
-    }
+map_api_errors! {
+    impl From<MlError> for ApiError;
+    MlError::InvalidTextQuery | MlError::SemanticIndex(SemanticIndexError::InvalidLimit) => Self::BadRequest("invalid_search", "invalid search"),
+    MlError::NotFound | MlError::RuntimeUnavailable => Self::ServiceUnavailable("semantic_search_unavailable", "semantic search is unavailable"),
+    @internal => MlError::UnsupportedJobKind | MlError::InvalidJobPayload | MlError::UnsupportedMediaType | MlError::ImageTooLarge | MlError::InvalidStorageKey(_) | MlError::Storage(_) | MlError::Model(_) | MlError::SemanticIndex(_) | MlError::Database(_)
+}
+
+map_api_errors! {
+    impl From<ModelPackError> for ApiError;
+    ModelPackError::InvalidManifest(_) => Self::BadRequest("invalid_model_pack", "invalid model pack"),
+    ModelPackError::NotFound => Self::NotFound("model_pack_not_found", "model pack not found"),
+    ModelPackError::SelfTestRequired => Self::Conflict("model_pack_self_test_required", "model pack self-test has not passed"),
+    ModelPackError::FileVerificationFailed => Self::BadRequest("model_pack_file_verification_failed", "model pack file verification failed"),
+    @internal => ModelPackError::InvalidFilePath | ModelPackError::InvalidEmbedding(_) | ModelPackError::Io(_) | ModelPackError::Storage(_) | ModelPackError::StorageKey(_) | ModelPackError::Job(_) | ModelPackError::Database(_)
 }
