@@ -6,7 +6,6 @@
 use serde::Serialize;
 use sqlx::PgPool;
 use thiserror::Error;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::assets::{AssetDerivativeView, AssetTimelineItem};

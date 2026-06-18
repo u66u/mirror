@@ -13,7 +13,7 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, types::Json};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::jobs::{self, JobKind, JobSpec};
@@ -235,8 +235,6 @@ pub async fn install_model_pack(
     manifest: ModelPackManifest,
 ) -> Result<InstalledModelPack, ModelPackError> {
     let validated = validate_model_pack_manifest(&manifest)?;
-    let manifest_json =
-        serde_json::to_value(&manifest).map_err(|_| ModelPackError::InvalidManifest("json"))?;
     let id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
 
