@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Mirror backup daily
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=30m
+Unit=mirror-backup.service
+
+[Install]
+WantedBy=timers.target
+

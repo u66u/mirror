@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check clippy test check-duplicate-fns db-up db-down test-db gate-backend web-typecheck web-lint web-test web-e2e web-build gate-web android-format android-static android-test android-lint android-build android-device-test gate-android gate
+.PHONY: fmt fmt-check check clippy test check-duplicate-fns db-up db-down test-db backup-restore-drill gate-backend web-typecheck web-lint web-test web-e2e web-build gate-web android-format android-static android-test android-lint android-build android-device-test gate-android gate
 
 ANDROID_JAVA_HOME ?= /usr/lib/jvm/java-17-openjdk
 ANDROID_SDK_ROOT ?= $(HOME)/Android/Sdk
@@ -32,6 +32,9 @@ db-down:
 
 test-db:
 	MIRROR_TEST_DATABASE_URL=$${MIRROR_TEST_DATABASE_URL:-postgres://mirror:mirror@127.0.0.1:54329/mirror_test} cargo test -p mirror-backend --tests -- --ignored --test-threads=1
+
+backup-restore-drill:
+	scripts/backup_restore_drill.sh
 
 gate-backend: fmt-check check clippy test check-duplicate-fns
 

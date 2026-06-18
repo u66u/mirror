@@ -1,0 +1,22 @@
+[Unit]
+Description=Mirror backup and retention
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=mirror
+Group=mirror
+EnvironmentFile=/etc/mirror/maintenance.env
+ExecStartPre=/usr/bin/install -d -m 0700 -o mirror -g mirror /var/lib/mirror/backup
+ExecStart=/usr/local/bin/mirror-maintenance --run-backup /var/lib/mirror/backup/postgres.dump
+ExecStart=/usr/local/bin/mirror-maintenance --run-retention
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mirror
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+

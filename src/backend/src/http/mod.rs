@@ -11,6 +11,7 @@ pub mod client_ip;
 pub mod error;
 pub mod exports;
 pub mod health;
+pub mod model_packs;
 pub mod search;
 pub mod setup;
 pub mod shares;
@@ -37,6 +38,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(exports::original_manifest_route)
         .service(exports::original_archive_route)
         .service(exports::original_blob_route)
+        .service(model_packs::list_model_packs_route)
+        .service(model_packs::install_model_pack_route)
+        .service(model_packs::record_model_pack_self_test_route)
+        .service(model_packs::run_model_pack_self_test_route)
+        .service(model_packs::activate_model_pack_route)
+        .service(model_packs::start_model_reindex_route)
+        .service(model_packs::list_model_reindex_runs_route)
         .service(search::search_route)
         .service(shares::create_share_route)
         .service(shares::revoke_share_route)

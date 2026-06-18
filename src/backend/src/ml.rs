@@ -8,6 +8,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 use thiserror::Error;
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction, types::Json};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -347,6 +348,71 @@ where
     Ok(())
 }
 
+/// Runs a model pack's golden image self-tests with the configured runtime.
+pub async fn run_model_pack_self_tests<E>(
+    pool: &PgPool,
+    storage: &ObjectStorage,
+    runtime: &MlRuntime<E>,
+    model_pack_id: Uuid,
+) -> Result<crate::models::InstalledModelPack, MlError>
+where
+    E: ImageTextEmbedder + Send + Sync + 'static + ?Sized,
+{
+    let manifest = load_model_pack_manifest(pool, model_pack_id).await?;
+    validate_semantic_model_pack_row(
+        &manifest,
+        manifest.embedding_dimension,
+        &manifest.distance_metric,
+    )?;
+
+    for self_test in &manifest.self_tests {
+        let result =
+            run_one_model_pack_self_test(storage, runtime, model_pack_id, &manifest, self_test)
+                .await;
+        match result {
+            Ok(true) => {}
+            Ok(false) => {
+                return record_self_test_failure(pool, model_pack_id, "self-test output mismatch")
+                    .await;
+            }
+            Err(error) if self_test_runtime_failure(&error) => {
+                return record_self_test_failure(pool, model_pack_id, &error.to_string()).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    crate::models::record_model_pack_self_test(pool, model_pack_id, true, None)
+        .await
+        .map_err(MlError::Model)
+}
+
+async fn run_one_model_pack_self_test<E>(
+    storage: &ObjectStorage,
+    runtime: &MlRuntime<E>,
+    model_pack_id: Uuid,
+    manifest: &ModelPackManifest,
+    self_test: &crate::models::ModelPackSelfTestManifest,
+) -> Result<bool, MlError>
+where
+    E: ImageTextEmbedder + Send + Sync + 'static + ?Sized,
+{
+    let storage_key = StorageKey::model_pack_file(model_pack_id, &self_test.input_path)?;
+    let bytes = storage
+        .read_bounded(&storage_key, runtime.max_image_bytes)
+        .await
+        .map_err(|error| match error {
+            StorageError::ObjectTooLarge => MlError::ImageTooLarge,
+            error => MlError::Storage(error),
+        })?;
+    let media_type = self_test_media_type(&self_test.input_path)?;
+    let values = runtime
+        .embed_image(bytes, media_type.to_owned(), manifest.clone())
+        .await?;
+    let embedding = validate_embedding_output(manifest, values)?;
+    Ok(sha256_f32_values(embedding.values()) == self_test.expected_output_sha256)
+}
+
 async fn commit_embed_asset_success(
     pool: &PgPool,
     payload: &EmbedAssetPayload,
@@ -572,6 +638,25 @@ async fn active_semantic_model_pack(pool: &PgPool) -> Result<ActiveSemanticModel
     })
 }
 
+async fn load_model_pack_manifest(
+    pool: &PgPool,
+    model_pack_id: Uuid,
+) -> Result<ModelPackManifest, MlError> {
+    sqlx::query_scalar::<_, Json<ModelPackManifest>>(
+        r#"
+        SELECT manifest
+        FROM model_packs
+        WHERE id = $1
+        "#,
+    )
+    .bind(model_pack_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(MlError::Database)?
+    .map(|manifest| manifest.0)
+    .ok_or(MlError::NotFound)
+}
+
 fn validate_semantic_model_pack_row(
     manifest: &ModelPackManifest,
     embedding_dimension: i32,
@@ -620,6 +705,45 @@ fn is_supported_still_image_media_type(media_type: &str) -> bool {
     // the runtime explicitly rejects animated variants or defines first-frame
     // embedding semantics.
     matches!(media_type, "image/jpeg" | "image/png")
+}
+
+fn self_test_media_type(path: &str) -> Result<&'static str, MlError> {
+    if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        Ok("image/jpeg")
+    } else if path.ends_with(".png") {
+        Ok("image/png")
+    } else {
+        Err(ModelPackError::InvalidManifest("self_test.input_path").into())
+    }
+}
+
+fn self_test_runtime_failure(error: &MlError) -> bool {
+    matches!(
+        error,
+        MlError::RuntimeUnavailable
+            | MlError::ImageTooLarge
+            | MlError::Model(ModelPackError::InvalidEmbedding(_))
+    )
+}
+
+async fn record_self_test_failure(
+    pool: &PgPool,
+    model_pack_id: Uuid,
+    message: &str,
+) -> Result<crate::models::InstalledModelPack, MlError> {
+    let message = truncate_chars(message, MAX_REINDEX_ERROR_MESSAGE_CHARS);
+    crate::models::record_model_pack_self_test(pool, model_pack_id, false, Some(&message))
+        .await
+        .map_err(MlError::Model)
+}
+
+/// Returns the stable SHA-256 digest of little-endian f32 task output values.
+pub fn sha256_f32_values(values: &[f32]) -> String {
+    let mut hasher = Sha256::new();
+    for value in values {
+        hasher.update(value.to_le_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn is_terminal_reindex_failure(error: &MlError) -> bool {

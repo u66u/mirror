@@ -74,8 +74,9 @@ Status values:
 - Related tasks: T301
 - Caveat: HEIC/HEIF support depends on host libraries/codecs and may vary by
   container image or distribution.
-- Mitigation: Treat support as capability-detected; tests should skip with a
-  clear message if unsupported by the environment.
+- Mitigation: V1 worker uses timeout-bounded `heif-convert` from
+  `libheif-examples` before the Rust image pipeline. Capability tests exercise
+  the real converter when present and skip when the host lacks it.
 
 ## C007: Android Media Permissions Drift
 

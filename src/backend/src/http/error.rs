@@ -11,6 +11,7 @@ use crate::{
     auth::{DeviceTokenError, OwnerLoginError, OwnerSetupError},
     exports::ExportError,
     ml::MlError,
+    models::ModelPackError,
     search::SearchError,
     semantic_index::SemanticIndexError,
     shares::ShareError,
@@ -258,6 +259,34 @@ impl From<MlError> for ApiError {
             | MlError::Model(_)
             | MlError::SemanticIndex(_)
             | MlError::Database(_) => Self::Internal,
+        }
+    }
+}
+
+impl From<ModelPackError> for ApiError {
+    fn from(error: ModelPackError) -> Self {
+        match error {
+            ModelPackError::InvalidManifest(_) => {
+                Self::BadRequest("invalid_model_pack", "invalid model pack")
+            }
+            ModelPackError::NotFound => {
+                Self::NotFound("model_pack_not_found", "model pack not found")
+            }
+            ModelPackError::SelfTestRequired => Self::Conflict(
+                "model_pack_self_test_required",
+                "model pack self-test has not passed",
+            ),
+            ModelPackError::FileVerificationFailed => Self::BadRequest(
+                "model_pack_file_verification_failed",
+                "model pack file verification failed",
+            ),
+            ModelPackError::InvalidFilePath
+            | ModelPackError::InvalidEmbedding(_)
+            | ModelPackError::Io(_)
+            | ModelPackError::Storage(_)
+            | ModelPackError::StorageKey(_)
+            | ModelPackError::Job(_)
+            | ModelPackError::Database(_) => Self::Internal,
         }
     }
 }

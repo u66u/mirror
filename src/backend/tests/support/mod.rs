@@ -22,7 +22,10 @@ use mirror_backend::{
         DerivativeKind, GeneratedDerivative, ImageInfo, ImageProcessor, MediaError, MediaToolError,
     },
     ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError, MlRuntime},
-    models::{ModelPackError, ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest},
+    models::{
+        ImagePreprocessConfig, ModelPackError, ModelPackFileManifest, ModelPackManifest,
+        ModelPackSelfTestManifest, OnnxModelPackConfig,
+    },
     search::SearchError,
     semantic_index::SemanticIndexError,
     shares::ShareError,
@@ -263,6 +266,8 @@ pub fn valid_model_pack_manifest() -> ModelPackManifest {
         license: "Apache-2.0".to_owned(),
         embedding_dimension: 768,
         distance_metric: "cosine".to_owned(),
+        onnx: valid_onnx_config(),
+        image_preprocess: valid_image_preprocess(),
         files: vec![
             ModelPackFileManifest {
                 path: "models/image_encoder.onnx".to_owned(),
@@ -285,6 +290,32 @@ pub fn valid_model_pack_manifest() -> ModelPackManifest {
             input_path: "self-tests/cat.jpg".to_owned(),
             expected_output_sha256: "d".repeat(64),
         }],
+    }
+}
+
+#[allow(dead_code)] // T501/T502: shared semantic model-pack fixture across model/ML/search tests.
+pub fn valid_onnx_config() -> OnnxModelPackConfig {
+    OnnxModelPackConfig {
+        image_model_path: "models/image_encoder.onnx".to_owned(),
+        text_model_path: "models/text_encoder.onnx".to_owned(),
+        tokenizer_path: "tokenizer/tokenizer.json".to_owned(),
+        image_input_name: "pixel_values".to_owned(),
+        image_output_name: "image_embeds".to_owned(),
+        text_input_ids_name: "input_ids".to_owned(),
+        text_attention_mask_name: "attention_mask".to_owned(),
+        text_output_name: "text_embeds".to_owned(),
+    }
+}
+
+#[allow(dead_code)] // T501/T502: shared semantic model-pack fixture across model/ML/search tests.
+pub fn valid_image_preprocess() -> ImagePreprocessConfig {
+    ImagePreprocessConfig {
+        width: 224,
+        height: 224,
+        color_order: "rgb".to_owned(),
+        tensor_layout: "nchw".to_owned(),
+        mean: [0.5, 0.5, 0.5],
+        std: [0.5, 0.5, 0.5],
     }
 }
 

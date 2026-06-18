@@ -6,8 +6,9 @@ use mirror_backend::{
     backups::{
         CreateBackupRunInput, backup_manifest_summary, create_backup_run, durable_storage_manifest,
         mark_backup_failed, mark_backup_succeeded, mark_restore_check, postgres_dump_plan,
-        postgres_restore_plan, restic_backup_plan, restic_restore_plan, run_postgres_dump_plan,
-        run_restic_backup_plan,
+        postgres_restore_plan, restic_backup_plan, restic_restore_plan, restic_retention_plan,
+        run_postgres_dump_plan, run_postgres_restore_plan, run_restic_backup_plan,
+        run_restic_restore_plan, run_restic_retention_plan,
     },
     config::Config,
     db,
@@ -18,7 +19,7 @@ use mirror_backend::{
 use uuid::Uuid;
 
 const USAGE: &str = "\
-Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--restore-plan SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--run-backup PG_DUMP_PATH] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID]
+Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--restore-plan SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--retention-plan] [--run-backup PG_DUMP_PATH] [--run-restore SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--run-retention] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID]
 
 Scans originals by default without modifying storage.
 --delete-orphan KEY  Select a currently reported orphan for remediation.
@@ -26,7 +27,11 @@ Scans originals by default without modifying storage.
 --backup-plan PATH   Print pg_dump/restic command plans for durable backup inputs.
 --restore-plan ID TARGET PATH
                      Print restic/pg_restore command plans for a restore drill.
+--retention-plan     Print restic forget/prune retention inputs.
 --run-backup PATH    Run pg_dump then restic backup and persist backup_runs metadata.
+--run-restore ID TARGET PATH
+                     Run restic restore then pg_restore into MIRROR_DATABASE_URL.
+--run-retention      Run restic forget --prune with the v1 retention policy.
 --repository-hint H  Redacted repository label stored with --run-backup.
 --restore-check ID   Scan restored DB/storage and update backup_runs status.
 ";
@@ -37,7 +42,10 @@ struct Options {
     selected_keys: Vec<StorageKey>,
     backup_plan_dump_path: Option<std::path::PathBuf>,
     restore_plan: Option<RestorePlanOptions>,
+    retention_plan: bool,
     run_backup_dump_path: Option<std::path::PathBuf>,
+    run_restore: Option<RestorePlanOptions>,
+    run_retention: bool,
     repository_hint: Option<String>,
     restore_check_backup_run_id: Option<Uuid>,
 }
@@ -77,6 +85,17 @@ async fn main() -> io::Result<()> {
         );
         return Ok(());
     }
+    if options.retention_plan {
+        let plan = restic_retention_plan();
+        println!("retention_program\t{}", plan.program);
+        println!("retention_args\t{}", plan.args.join("\t"));
+        println!("retention_required_env\t{}", plan.required_env.join("\t"));
+        return Ok(());
+    }
+    if options.run_retention {
+        run_retention()?;
+        return Ok(());
+    }
 
     let database_url = config.database_url.as_deref().ok_or_else(|| {
         io::Error::new(
@@ -103,6 +122,10 @@ async fn main() -> io::Result<()> {
     }
     if let Some(backup_run_id) = options.restore_check_backup_run_id {
         run_restore_check(&pool, &storage, backup_run_id).await?;
+        return Ok(());
+    }
+    if let Some(restore) = options.run_restore.as_ref() {
+        run_restore(database_url, restore).await?;
         return Ok(());
     }
 
@@ -167,7 +190,10 @@ fn parse_args() -> Result<Option<Options>, CliError> {
     let mut selected_keys = Vec::new();
     let mut backup_plan_dump_path = None;
     let mut restore_plan = None;
+    let mut retention_plan = false;
     let mut run_backup_dump_path = None;
+    let mut run_restore = None;
+    let mut run_retention = false;
     let mut repository_hint = None;
     let mut restore_check_backup_run_id = None;
     let mut args = env::args().skip(1);
@@ -198,10 +224,22 @@ fn parse_args() -> Result<Option<Options>, CliError> {
                     dump_path: std::path::PathBuf::from(dump_path),
                 });
             }
+            "--retention-plan" => retention_plan = true,
             "--run-backup" => {
                 let raw_path = args.next().ok_or(CliError::MissingBackupDumpPath)?;
                 run_backup_dump_path = Some(std::path::PathBuf::from(raw_path));
             }
+            "--run-restore" => {
+                let snapshot_id = args.next().ok_or(CliError::MissingRestorePlanArgument)?;
+                let restore_target = args.next().ok_or(CliError::MissingRestorePlanArgument)?;
+                let dump_path = args.next().ok_or(CliError::MissingRestorePlanArgument)?;
+                run_restore = Some(RestorePlanOptions {
+                    snapshot_id,
+                    restore_target: std::path::PathBuf::from(restore_target),
+                    dump_path: std::path::PathBuf::from(dump_path),
+                });
+            }
+            "--run-retention" => run_retention = true,
             "--repository-hint" => {
                 repository_hint = Some(args.next().ok_or(CliError::MissingRepositoryHint)?);
             }
@@ -226,7 +264,10 @@ fn parse_args() -> Result<Option<Options>, CliError> {
         selected_keys,
         backup_plan_dump_path,
         restore_plan,
+        retention_plan,
         run_backup_dump_path,
+        run_restore,
+        run_retention,
         repository_hint,
         restore_check_backup_run_id,
     }))
@@ -323,9 +364,32 @@ async fn run_backup(
     }
 }
 
+async fn run_restore(database_url: &str, restore: &RestorePlanOptions) -> io::Result<()> {
+    let restic =
+        restic_restore_plan(&restore.snapshot_id, &restore.restore_target).map_err(io_other)?;
+    let postgres = postgres_restore_plan(&restore.dump_path).map_err(io_other)?;
+
+    run_restic_restore_plan(&restic).map_err(io_other)?;
+    run_postgres_restore_plan(&postgres, database_url).map_err(io_other)?;
+    println!(
+        "restore_run\t{}\t{}",
+        restore.snapshot_id,
+        restore.restore_target.display()
+    );
+    Ok(())
+}
+
 fn ensure_backup_input_dirs(storage_root: &std::path::Path) -> io::Result<()> {
     std::fs::create_dir_all(storage_root.join("originals").join("blake3"))?;
     std::fs::create_dir_all(storage_root.join("derivatives"))?;
+    std::fs::create_dir_all(storage_root.join("model-packs"))?;
+    Ok(())
+}
+
+fn run_retention() -> io::Result<()> {
+    let plan = restic_retention_plan();
+    run_restic_retention_plan(&plan).map_err(io_other)?;
+    println!("retention_run\tsucceeded");
     Ok(())
 }
 

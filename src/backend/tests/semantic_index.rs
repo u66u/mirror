@@ -10,7 +10,7 @@ use mirror_backend::{
 use uuid::Uuid;
 
 mod support;
-use support::{TestResult, fresh_owner_pool};
+use support::{TestResult, fresh_owner_pool, valid_image_preprocess, valid_onnx_config};
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
@@ -250,11 +250,25 @@ fn semantic_manifest_with_dimension(
         license: "Apache-2.0".to_owned(),
         embedding_dimension,
         distance_metric: distance_metric.to_owned(),
-        files: vec![ModelPackFileManifest {
-            path: "models/image_encoder.onnx".to_owned(),
-            sha256: "a".repeat(64),
-            size_bytes: 10,
-        }],
+        onnx: valid_onnx_config(),
+        image_preprocess: valid_image_preprocess(),
+        files: vec![
+            ModelPackFileManifest {
+                path: "models/image_encoder.onnx".to_owned(),
+                sha256: "a".repeat(64),
+                size_bytes: 10,
+            },
+            ModelPackFileManifest {
+                path: "models/text_encoder.onnx".to_owned(),
+                sha256: "b".repeat(64),
+                size_bytes: 10,
+            },
+            ModelPackFileManifest {
+                path: "tokenizer/tokenizer.json".to_owned(),
+                sha256: "c".repeat(64),
+                size_bytes: 10,
+            },
+        ],
         self_tests: vec![ModelPackSelfTestManifest {
             name: "embedding_fixture".to_owned(),
             input_path: "fixtures/photo.jpg".to_owned(),

@@ -10,7 +10,7 @@ RUN cargo build --release -p mirror-backend --bin api --bin worker --bin mainten
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg libheif-examples \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 mirror \
     && useradd --system --uid 10001 --gid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin mirror \
