@@ -642,17 +642,16 @@ async fn load_model_pack_manifest(
     pool: &PgPool,
     model_pack_id: Uuid,
 ) -> Result<ModelPackManifest, MlError> {
-    sqlx::query_scalar::<_, Json<ModelPackManifest>>(
+    sqlx::query_scalar!(
         r#"
-        SELECT manifest
+        SELECT manifest as "manifest: Json<ModelPackManifest>"
         FROM model_packs
         WHERE id = $1
         "#,
+        model_pack_id
     )
-    .bind(model_pack_id)
     .fetch_optional(pool)
-    .await
-    .map_err(MlError::Database)?
+    .await?
     .map(|manifest| manifest.0)
     .ok_or(MlError::NotFound)
 }

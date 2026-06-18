@@ -661,19 +661,22 @@ pub async fn list_model_reindex_runs(
     pool: &PgPool,
     model_pack_id: Uuid,
 ) -> Result<Vec<ModelReindexRun>, ModelPackError> {
-    let exists = sqlx::query_scalar::<_, bool>("SELECT true FROM model_packs WHERE id = $1")
-        .bind(model_pack_id)
-        .fetch_optional(pool)
-        .await?
-        .unwrap_or(false);
+    let exists = sqlx::query_scalar!(
+        r#"SELECT true as "b!" FROM model_packs WHERE id = $1"#,
+        model_pack_id
+    )
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
     if !exists {
         return Err(ModelPackError::NotFound);
     }
 
-    sqlx::query_as::<_, (Uuid, Uuid, String, i32, i32, i32, i32)>(
+    sqlx::query_as!(
+        ModelReindexRun,
         r#"
         SELECT
-            id,
+            id as reindex_run_id,
             model_pack_id,
             status,
             total_assets,
@@ -685,23 +688,10 @@ pub async fn list_model_reindex_runs(
         ORDER BY created_at DESC, id DESC
         LIMIT 20
         "#,
+        model_pack_id
     )
-    .bind(model_pack_id)
     .fetch_all(pool)
     .await
-    .map(|rows| {
-        rows.into_iter()
-            .map(|row| ModelReindexRun {
-                reindex_run_id: row.0,
-                model_pack_id: row.1,
-                status: row.2,
-                total_assets: row.3,
-                queued_assets: row.4,
-                processed_assets: row.5,
-                failed_assets: row.6,
-            })
-            .collect()
-    })
     .map_err(ModelPackError::Database)
 }
 

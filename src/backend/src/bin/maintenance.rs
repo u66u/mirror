@@ -280,43 +280,29 @@ struct RestorePlanOptions {
     dump_path: std::path::PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum CliError {
+    #[error("--apply requires at least one --delete-orphan KEY")]
     ApplyWithoutSelection,
+    #[error("not a content-addressed original key: {0}")]
     InvalidOriginalObjectKey(String),
+    #[error("invalid storage key: {0}")]
     InvalidStorageKey(String),
+    #[error("--delete-orphan requires KEY")]
     MissingOrphanKey,
+    #[error("--backup-plan requires PATH")]
     MissingBackupDumpPath,
+    #[error("--restore-plan requires SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH")]
     MissingRestorePlanArgument,
+    #[error("--repository-hint requires HINT")]
     MissingRepositoryHint,
+    #[error("--restore-check requires ID")]
     MissingRestoreCheckId,
+    #[error("invalid backup run ID: {0}")]
     InvalidRestoreCheckId(String),
+    #[error("unknown argument: {0}")]
     UnknownArgument(String),
 }
-
-impl std::fmt::Display for CliError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ApplyWithoutSelection => {
-                formatter.write_str("--apply requires at least one --delete-orphan KEY")
-            }
-            Self::InvalidOriginalObjectKey(key) => {
-                write!(formatter, "not a content-addressed original key: {key}")
-            }
-            Self::InvalidStorageKey(key) => write!(formatter, "invalid storage key: {key}"),
-            Self::MissingOrphanKey => formatter.write_str("--delete-orphan requires KEY"),
-            Self::MissingBackupDumpPath => formatter.write_str("--backup-plan requires PATH"),
-            Self::MissingRestorePlanArgument => formatter
-                .write_str("--restore-plan requires SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH"),
-            Self::MissingRepositoryHint => formatter.write_str("--repository-hint requires HINT"),
-            Self::MissingRestoreCheckId => formatter.write_str("--restore-check requires ID"),
-            Self::InvalidRestoreCheckId(id) => write!(formatter, "invalid backup run ID: {id}"),
-            Self::UnknownArgument(argument) => write!(formatter, "unknown argument: {argument}"),
-        }
-    }
-}
-
-impl std::error::Error for CliError {}
 
 async fn run_backup(
     pool: &sqlx::PgPool,

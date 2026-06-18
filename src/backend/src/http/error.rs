@@ -28,40 +28,32 @@ pub struct ErrorBody {
 }
 
 /// HTTP boundary error.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     /// Request violates local validation.
+    #[error("{1}")]
     BadRequest(&'static str, &'static str),
     /// Request body exceeds a route-local size limit.
+    #[error("{1}")]
     PayloadTooLarge(&'static str, &'static str),
     /// Authentication or setup token failed.
+    #[error("{1}")]
     Unauthorized(&'static str, &'static str),
     /// Request is temporarily blocked by rate limiting.
+    #[error("{1}")]
     TooManyRequests(&'static str, &'static str),
     /// Requested state transition conflicts with persisted state.
+    #[error("{1}")]
     Conflict(&'static str, &'static str),
     /// Requested resource does not exist for the caller.
+    #[error("{1}")]
     NotFound(&'static str, &'static str),
     /// Required dependency is unavailable.
+    #[error("{1}")]
     ServiceUnavailable(&'static str, &'static str),
     /// Internal failure. Details are logged server-side only.
+    #[error("internal error")]
     Internal,
-}
-
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::BadRequest(_, message)
-            | Self::PayloadTooLarge(_, message)
-            | Self::Unauthorized(_, message)
-            | Self::TooManyRequests(_, message)
-            | Self::Conflict(_, message)
-            | Self::NotFound(_, message)
-            | Self::ServiceUnavailable(_, message) => *message,
-            Self::Internal => "internal error",
-        };
-        formatter.write_str(message)
-    }
 }
 
 impl ResponseError for ApiError {
