@@ -21,6 +21,7 @@ use mirror_backend::{
     },
     ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError},
     models::{ModelPackError, ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest},
+    search::SearchError,
     semantic_index::SemanticIndexError,
     shares::ShareError,
     storage::ObjectStorage,
@@ -223,6 +224,12 @@ impl From<MlError> for TestError {
 impl From<SemanticIndexError> for TestError {
     fn from(error: SemanticIndexError) -> Self {
         Self::new("semantic index failed", error)
+    }
+}
+
+impl From<SearchError> for TestError {
+    fn from(error: SearchError) -> Self {
+        Self::new("search failed", error)
     }
 }
 

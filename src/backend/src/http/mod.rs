@@ -11,6 +11,7 @@ pub mod client_ip;
 pub mod error;
 pub mod exports;
 pub mod health;
+pub mod search;
 pub mod setup;
 pub mod shares;
 pub mod uploads;
@@ -30,10 +31,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(assets::get_derivative)
         .service(assets::trash_asset_route)
         .service(assets::restore_asset_route)
+        .service(assets::favorite_asset_route)
+        .service(assets::unfavorite_asset_route)
         .service(assets::purge_asset_route)
         .service(exports::original_manifest_route)
         .service(exports::original_archive_route)
         .service(exports::original_blob_route)
+        .service(search::search_route)
         .service(shares::create_share_route)
         .service(shares::revoke_share_route)
         .service(shares::get_share_route)

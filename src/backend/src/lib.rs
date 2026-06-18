@@ -18,6 +18,7 @@ pub mod models;
 mod public_derivatives;
 pub mod rate_limit;
 pub mod runtime;
+pub mod search;
 pub mod semantic_index;
 pub mod shares;
 pub mod state;

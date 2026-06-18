@@ -144,6 +144,42 @@ pub async fn restore_asset_route(
     Ok(HttpResponse::NoContent().finish())
 }
 
+/// Marks an owner asset as favorite.
+#[post("/assets/{asset_id}/favorite")]
+pub async fn favorite_asset_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let current = auth::require_unsafe_owner(pool, &req).await?;
+    assets::favorite_asset(pool, current.owner_id(), path.into_inner()).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// Removes an owner asset favorite marker.
+#[delete("/assets/{asset_id}/favorite")]
+pub async fn unfavorite_asset_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let current = auth::require_unsafe_owner(pool, &req).await?;
+    assets::unfavorite_asset(pool, current.owner_id(), path.into_inner()).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
 /// Permanently purges a trashed owner asset.
 #[delete("/assets/{asset_id}/purge")]
 pub async fn purge_asset_route(

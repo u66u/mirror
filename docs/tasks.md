@@ -984,6 +984,14 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       derivatives exist.
     - `/assets/{asset_id}/derivatives/{kind}` serves authenticated derivative
       bytes.
+    - Added owner favorite mutations: `POST /assets/{asset_id}/favorite` and
+      `DELETE /assets/{asset_id}/favorite`. Mutations are idempotent for active
+      assets and timeline rows expose `favorite_at`.
+    - Added `search` module and authenticated `/search` route for exact
+      filename metadata search over active owner assets. Search results reuse
+      timeline item shape so web/Android can share rendering.
+    - Filename search trims/lowercases bounded queries, escapes SQL wildcard
+      characters, excludes trashed assets, and returns newest-first rows.
     - Cursor is opaque URL-safe base64 over `(created_at, public_id)` and does
       not expose integer IDs.
   - Web:
@@ -1013,14 +1021,16 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       Playwright, and production build
     - `make gate-android` -> passed: detekt, ktlint, unit tests, Android lint,
       and debug APK build
-    - Previous `make test-db` baseline passed; current integration remains
-      pending while Docker Desktop is stopped.
+    - `make test-db` -> passed against local Postgres.
   - Files touched:
     - `src/backend/src/assets.rs`
     - `src/backend/src/http/assets.rs`
+    - `src/backend/src/search.rs`
+    - `src/backend/src/http/search.rs`
     - `src/backend/src/http/error.rs`
     - `src/backend/src/http/mod.rs`
     - `src/backend/tests/assets_timeline.rs`
+    - `src/backend/tests/search.rs`
     - `src/backend/tests/support/mod.rs`
     - `src/web/src/api/client.ts`
     - `src/web/src/ui/App.tsx`
@@ -1046,6 +1056,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Backend tests reject invalid limit/cursor inputs.
     - HTTP route tests cover authenticated timeline response and derivative
       byte serving.
+    - Backend tests cover favorite/unfavorite idempotency and timeline
+      `favorite_at` visibility through authenticated routes.
+    - Backend search tests cover active filename matches, trash exclusion,
+      wildcard escaping, invalid input, and authenticated `/search` response.
     - Web test covers login-to-timeline rendering with thumbnail URL mapping.
     - Vitest covers cursor-page append and preview open/close behavior.
     - Playwright verifies 120-item DOM virtualization, second-page loading,
@@ -1532,6 +1546,6 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `docs/references/pgvector-ann.md`
   - Still pending:
     - Real model runtime that produces image/text embeddings.
-    - HTTP search API.
+    - Semantic HTTP search API that uses text embeddings.
     - Web/Android search UI.
     - Face detection/embedding, people clustering, and people review flows.

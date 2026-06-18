@@ -10,6 +10,7 @@ use crate::{
     assets::{AssetMutationError, AssetReadError, ListAssetsError, PromoteError},
     auth::{DeviceTokenError, OwnerLoginError, OwnerSetupError},
     exports::ExportError,
+    search::SearchError,
     shares::ShareError,
     uploads::UploadError,
 };
@@ -222,6 +223,15 @@ impl From<ExportError> for ApiError {
             ExportError::NotFound => Self::NotFound("export_not_found", "export not found"),
             ExportError::InvalidStorageKey => Self::Internal,
             ExportError::Database(_) => Self::Internal,
+        }
+    }
+}
+
+impl From<SearchError> for ApiError {
+    fn from(error: SearchError) -> Self {
+        match error {
+            SearchError::InvalidInput => Self::BadRequest("invalid_search", "invalid search"),
+            SearchError::Database(_) => Self::Internal,
         }
     }
 }

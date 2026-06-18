@@ -449,6 +449,64 @@ pub async fn restore_asset(
     }
 }
 
+/// Marks an active owner asset as favorite.
+pub async fn favorite_asset(
+    pool: &PgPool,
+    owner_id: i16,
+    asset_public_id: Uuid,
+) -> Result<(), AssetMutationError> {
+    let changed = sqlx::query(
+        r#"
+        UPDATE assets
+        SET favorite_at = COALESCE(favorite_at, now())
+        WHERE owner_id = $1
+          AND public_id = $2
+          AND trashed_at IS NULL
+        "#,
+    )
+    .bind(owner_id)
+    .bind(asset_public_id)
+    .execute(pool)
+    .await
+    .map_err(AssetMutationError::Database)?
+    .rows_affected();
+
+    if changed > 0 {
+        Ok(())
+    } else {
+        Err(AssetMutationError::NotFound)
+    }
+}
+
+/// Removes favorite marker from an active owner asset.
+pub async fn unfavorite_asset(
+    pool: &PgPool,
+    owner_id: i16,
+    asset_public_id: Uuid,
+) -> Result<(), AssetMutationError> {
+    let changed = sqlx::query(
+        r#"
+        UPDATE assets
+        SET favorite_at = NULL
+        WHERE owner_id = $1
+          AND public_id = $2
+          AND trashed_at IS NULL
+        "#,
+    )
+    .bind(owner_id)
+    .bind(asset_public_id)
+    .execute(pool)
+    .await
+    .map_err(AssetMutationError::Database)?
+    .rows_affected();
+
+    if changed > 0 {
+        Ok(())
+    } else {
+        Err(AssetMutationError::NotFound)
+    }
+}
+
 /// Permanently removes a trashed owner asset from application state.
 ///
 /// Original object deletion remains an explicit integrity-remediation step so

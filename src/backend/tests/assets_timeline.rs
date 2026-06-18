@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 
 use actix_web::{App, cookie::Cookie, http::StatusCode, test, web};
 use mirror_backend::{
-    assets::{ListAssetsError, ListAssetsInput, list_assets, trash_asset},
+    assets::{
+        ListAssetsError, ListAssetsInput, favorite_asset, list_assets, trash_asset,
+        unfavorite_asset,
+    },
     auth::{SessionCreateInput, SetupState, create_session},
     config::Config,
     http,
@@ -202,6 +205,86 @@ async fn derivative_route_returns_authenticated_derivative_bytes() -> TestResult
         Some("image/webp")
     );
     assert_eq!(test::read_body(response).await, "thumbnail");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn favorite_routes_update_timeline_marker_idempotently() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let asset = create_promoted_asset(&deps, "favorite.jpg").await?;
+    favorite_asset(&deps.pool, 1, asset.public_id).await?;
+    favorite_asset(&deps.pool, 1, asset.public_id).await?;
+    let favorited = list_assets(
+        &deps.pool,
+        ListAssetsInput {
+            owner_id: 1,
+            limit: Some(10),
+            cursor: None,
+        },
+    )
+    .await?;
+    assert!(favorited.items[0].favorite_at.is_some());
+    unfavorite_asset(&deps.pool, 1, asset.public_id).await?;
+
+    let session = create_session(
+        &deps.pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("favorite-route-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(deps.pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(deps.storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+    let session_cookie = Cookie::new("mirror_session", session.token.expose().to_owned());
+
+    let favorite = test::TestRequest::post()
+        .uri(&format!("/assets/{}/favorite", asset.public_id))
+        .cookie(session_cookie.clone())
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, favorite).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let timeline = test::TestRequest::get()
+        .uri("/assets?limit=10")
+        .cookie(session_cookie.clone())
+        .to_request();
+    let timeline_response = test::call_service(&app, timeline).await;
+    assert_eq!(timeline_response.status(), StatusCode::OK);
+    let timeline_body: Value = test::read_body_json(timeline_response).await;
+    assert!(!timeline_body["items"][0]["favorite_at"].is_null());
+
+    let unfavorite = test::TestRequest::delete()
+        .uri(&format!("/assets/{}/favorite", asset.public_id))
+        .cookie(session_cookie.clone())
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, unfavorite).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let unfavorited = test::TestRequest::get()
+        .uri("/assets?limit=10")
+        .cookie(session_cookie)
+        .to_request();
+    let unfavorited_response = test::call_service(&app, unfavorited).await;
+    assert_eq!(unfavorited_response.status(), StatusCode::OK);
+    let unfavorited_body: Value = test::read_body_json(unfavorited_response).await;
+    assert!(unfavorited_body["items"][0]["favorite_at"].is_null());
 
     Ok(())
 }
