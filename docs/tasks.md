@@ -1651,3 +1651,236 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Real model runtime that produces image/text embeddings.
     - Web/Android search UI.
     - Face detection/embedding, people clustering, and people review flows.
+
+## Backend Handoff Queue
+
+These are the next highest-value backend tasks for another agent. They are
+scoped to backend and database work unless explicitly noted.
+
+### T503: Real ONNX Image/Text Embedder
+
+- Status: [ ]
+- Milestone: M5
+- Risk: High
+- Touched subsystems: backend, ml-worker, model-packs, semantic-search
+- Deliverables:
+  - Production `ImageTextEmbedder` implementation backed by ONNX Runtime.
+  - Tokenizer loading from the active model pack.
+  - Image preprocessing from `image_preprocess` manifest config.
+  - Explicit device selection honoring `MIRROR_ML_DEVICE` with GPU-preferred
+    fallback behavior.
+  - Runtime golden self-tests using installed model-pack files, not fake test
+    embedders.
+- Definition of done:
+  - A valid installed semantic model pack can embed image bytes and text query
+    strings through the existing task-level `ImageTextEmbedder` boundary.
+  - Output vectors pass existing dimension/finite/non-zero validation.
+  - Blocking inference never runs on the async reactor thread.
+  - Runtime errors are typed and map to safe API/worker failures without
+    leaking local paths or model internals.
+- Required gates:
+  - `make gate-backend`
+  - `make test-db`
+  - New model-runtime tests gated so they skip cleanly when large model
+    fixtures are absent.
+- Caveats/footguns:
+  - Do not add a generic model-executor abstraction; keep the boundary at
+    `embed_image` and `embed_text`.
+  - Do not assume every ONNX vision-language model uses the same tensor names,
+    layout, normalization, or tokenizer files.
+  - Device fallback must be explicit in logs because silent CPU fallback can
+    look like a performance bug.
+- Completion evidence:
+  - Pending.
+
+### T504: Pgvector ANN Search Support
+
+- Status: [ ]
+- Milestone: M5
+- Risk: High
+- Touched subsystems: backend, database, semantic-search, migrations
+- Deliverables:
+  - HNSW ANN indexes for image embeddings, with operator class selected by the
+    model pack distance metric.
+  - Exact-search fallback kept available for correctness checks and small
+    libraries.
+  - Search config for ANN enablement and scan breadth, with conservative
+    defaults.
+  - Filter-aware query plan for `model_pack_id`, `owner_id`, and
+    `asset_trashed_at IS NULL`.
+  - Regression tests proving ordering semantics for cosine, dot product, and
+    L2 remain correct.
+- Definition of done:
+  - ANN is opt-in until recall/latency checks exist.
+  - Index DDL matches the vector operator used by the query.
+  - Mixed embedding dimensions are either blocked for ANN or handled with
+    per-model/per-dimension partial or expression indexes.
+  - Tests cover the negative-inner-product pgvector convention so callers still
+    receive higher-is-better scores.
+  - Explain-plan or catalog tests prove the intended ANN and filter indexes
+    exist after migrations.
+- Required gates:
+  - `make gate-backend`
+  - `make test-db`
+  - Focused semantic-index DB tests.
+- Caveats/footguns:
+  - Pgvector applies filters after approximate scans in common plans; selective
+    owner/trash filters can reduce recall unless candidate breadth and indexes
+    are chosen deliberately.
+  - HNSW improves query speed/recall but increases build time, memory, and
+    row-by-row reindex cost.
+  - Plain `vector` columns may need expression or partial indexes when model
+    dimensions differ.
+- Completion evidence:
+  - Pending.
+
+### T505: Model-Pack Authoring And Install Contract
+
+- Status: [ ]
+- Milestone: M5
+- Risk: Medium
+- Touched subsystems: backend, model-packs, docs, tooling
+- Deliverables:
+  - JSON Schema export for the model-pack manifest.
+  - Small validator command that checks a local model-pack directory before
+    install.
+  - Operator-facing error messages for missing files, bad checksums, invalid
+    runtime config, and failed self-tests.
+  - Example semantic model-pack manifest fixture with fake tiny files suitable
+    for tests.
+- Definition of done:
+  - A model-pack author can validate a directory without starting the API.
+  - The CLI and HTTP install path use the same validation function.
+  - Schema generation is derived from Rust types; no hand-written duplicate
+    schema.
+  - No model files are downloaded automatically by the backend.
+- Required gates:
+  - `make gate-backend`
+  - Focused model-pack tests.
+- Caveats/footguns:
+  - Schema libraries do not replace domain validation; path, checksum, self-test,
+    task-kind, and runtime invariants must remain in Rust.
+  - Generated schema must not promise support for runtime backends we do not
+    implement.
+- Completion evidence:
+  - Pending.
+
+### T506: Face Pipeline Backend Foundation
+
+- Status: [ ]
+- Milestone: M5
+- Risk: High
+- Touched subsystems: backend, ml-worker, database, people
+- Deliverables:
+  - Tables for detected faces, face embeddings, people clusters, and user
+    review state.
+  - Worker job kind for face indexing that is disabled unless face recognition
+    is enabled.
+  - Model-pack task kinds for face detection and face embedding.
+  - Pure clustering/review functions for merge, split, hide, rename, and
+    unassigned faces.
+- Definition of done:
+  - Face data model preserves asset ownership boundaries and cascades on asset
+    deletion.
+  - Face recognition can be disabled without breaking semantic search.
+  - No people cluster is exposed as user-trusted identity until reviewed or
+    named by the owner.
+  - Tests cover merge/split/hide invariants without requiring a real face model.
+- Required gates:
+  - `make gate-backend`
+  - `make test-db`
+  - Focused people/face DB tests.
+- Caveats/footguns:
+  - Face recognition is privacy-sensitive and must stay owner-local.
+  - Do not mix face embeddings with semantic image/text embeddings.
+  - Avoid building web/Android people UI in this task.
+- Completion evidence:
+  - Pending.
+
+### T507: Upload And Object Integrity Worker
+
+- Status: [ ]
+- Milestone: M4
+- Risk: Medium
+- Touched subsystems: backend, uploads, storage, jobs, database
+- Deliverables:
+  - Background integrity check job for originals and derivatives.
+  - Stored checksum verification against object storage.
+  - Repair-safe failure state that reports missing/corrupt objects without
+    deleting database rows automatically.
+  - Admin endpoint or maintenance command to enqueue an integrity scan.
+- Definition of done:
+  - Corrupt or missing object data is detected and recorded.
+  - Integrity scan is resumable/idempotent and safe to rerun.
+  - The worker never deletes the only copy of user data as part of detection.
+  - Tests cover missing object, checksum mismatch, and healthy object cases.
+- Required gates:
+  - `make gate-backend`
+  - Focused storage/integrity tests.
+- Caveats/footguns:
+  - Do not make this a full repair system yet; detection plus clear reporting is
+    enough for v1.
+  - Object reads must stay bounded.
+  - Backup/restore paths must not confuse staging files with durable originals.
+- Completion evidence:
+  - Pending.
+
+### T508: Rate Limits For Expensive Backend Routes
+
+- Status: [ ]
+- Milestone: M2
+- Risk: Medium
+- Touched subsystems: backend, auth, rate-limits, uploads, search, model-packs
+- Deliverables:
+  - Persistent Postgres-backed limits on login/setup attempts, upload creation,
+    semantic search, and model-pack admin actions.
+  - Route-level limit keys that combine owner/session/IP where appropriate.
+  - Tests for limit exhaustion and reset behavior.
+- Definition of done:
+  - Expensive or security-sensitive routes cannot be spammed by one session or
+    one source IP.
+  - Limits survive API process restart.
+  - Limit failures return consistent `429` responses without leaking account
+    existence.
+  - No process-local limiter is introduced unless it proves necessary as a cheap
+    prefilter.
+- Required gates:
+  - `make gate-backend`
+  - Focused auth/rate-limit tests.
+- Caveats/footguns:
+  - Do not protect owner-only admin endpoints solely by rate limits; auth remains
+    mandatory.
+  - Be careful with reverse proxy IP headers; trust only configured proxy
+    headers.
+- Completion evidence:
+  - Pending.
+
+### T509: Backend API Contract Freeze For V1 Clients
+
+- Status: [ ]
+- Milestone: M4
+- Risk: Medium
+- Touched subsystems: backend, HTTP API, web, android, docs
+- Deliverables:
+  - OpenAPI or equivalent generated API description for implemented v1 routes.
+  - Stable response envelopes and error shapes for auth, uploads, assets,
+    sharing, search, model packs, and backup/maintenance status routes.
+  - Contract tests for routes consumed by web and Android clients.
+  - Explicit list of non-v1/internal endpoints.
+- Definition of done:
+  - Web and Android can generate or hand-write clients against one documented
+    route contract.
+  - Error responses are consistent enough for clients to show useful states.
+  - Internal/admin routes are marked and require owner auth.
+  - Existing backend tests assert the documented status codes and response
+    shapes for critical routes.
+- Required gates:
+  - `make gate-backend`
+  - Focused HTTP contract tests.
+- Caveats/footguns:
+  - Do not freeze endpoints that are known placeholders.
+  - Keep generated docs derived from route/type definitions where practical to
+    avoid hand-written drift.
+  - Frontend styling and Material UI decisions are out of scope for this task.
+- Completion evidence:
+  - Pending.
