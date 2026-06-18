@@ -24,10 +24,12 @@ async fn promotion_deduplicates_originals_but_keeps_distinct_assets() -> TestRes
 
     assert_eq!(first, first_again);
     assert_ne!(first.asset_id, second.asset_id);
-    let returned_id_is_public =
-        sqlx::query_scalar!("SELECT EXISTS (SELECT 1 FROM assets WHERE public_id = $1)", first.asset_id)
-            .fetch_one(&deps.pool)
-            .await?;
+    let returned_id_is_public = sqlx::query_scalar!(
+        "SELECT EXISTS (SELECT 1 FROM assets WHERE public_id = $1)",
+        first.asset_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
     assert!(returned_id_is_public.unwrap_or(false));
     assert_eq!(original_count(&deps.pool).await?, 1);
     assert_eq!(asset_count(&deps.pool).await?, 2);

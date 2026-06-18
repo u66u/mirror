@@ -419,9 +419,12 @@ pub async fn create_promoted_asset(
 ) -> TestResult<PromotedAssetIds> {
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, filename).await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    let internal_id = sqlx::query_scalar!("SELECT id FROM assets WHERE public_id = $1", promoted.asset_id)
-        .fetch_one(&deps.pool)
-        .await?;
+    let internal_id = sqlx::query_scalar!(
+        "SELECT id FROM assets WHERE public_id = $1",
+        promoted.asset_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
 
     Ok(PromotedAssetIds {
         internal_id,
@@ -490,23 +493,29 @@ pub fn write_executable_script(path: &Path, body: &str) -> TestResult {
 
 #[allow(dead_code)] // T204/T302: shared row assertion for asset-producing integration tests.
 pub async fn asset_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM assets"#)
-        .fetch_one(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM assets"#)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 #[allow(dead_code)] // T204/T301: shared row assertion for enqueue/worker integration tests.
 pub async fn job_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM jobs"#)
-        .fetch_one(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM jobs"#)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 #[allow(dead_code)] // T204: shared row assertion for promotion integration tests.
 pub async fn original_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM originals"#)
-        .fetch_one(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM originals"#)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 #[allow(dead_code)] // T301: media handler and worker tests share deterministic processor output.

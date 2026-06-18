@@ -505,11 +505,13 @@ pub async fn purge_trashed_asset(
         .await
         .map_err(AssetMutationError::Database)?;
 
-    let remaining_original_refs =
-        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM assets WHERE original_id = $1"#, asset.original_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(AssetMutationError::Database)?;
+    let remaining_original_refs = sqlx::query_scalar!(
+        r#"SELECT count(*) as "count!" FROM assets WHERE original_id = $1"#,
+        asset.original_id
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AssetMutationError::Database)?;
     let original_removed = if remaining_original_refs == 0 {
         sqlx::query!("DELETE FROM originals WHERE id = $1", asset.original_id)
             .execute(&mut *tx)

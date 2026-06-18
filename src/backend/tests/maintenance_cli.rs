@@ -151,12 +151,14 @@ printf '%s\n' 'dump' > "$out"
     assert!(!stdout.contains(&test_database_url));
     assert_eq!(std::fs::read_to_string(&dump_path)?, "dump\n");
 
-    let row: (String, Option<String>, serde_json::Value) = sqlx::query_as(r#"
+    let row: (String, Option<String>, serde_json::Value) = sqlx::query_as(
+        r#"
         SELECT status, snapshot_id, manifest
         FROM backup_runs
         ORDER BY created_at DESC
         LIMIT 1
-        "#)
+        "#,
+    )
     .fetch_one(&pool)
     .await?;
     assert_eq!(row.0, "succeeded");
@@ -207,13 +209,12 @@ async fn maintenance_restore_check_marks_failed_when_original_object_missing() -
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("restore_check\t"));
     assert!(stdout.contains("restore_check_failed"));
-    let row =
-        sqlx::query!(
-            "SELECT status, error_message FROM backup_runs WHERE id = $1",
-            run.backup_run_id
-        )
-            .fetch_one(&pool)
-            .await?;
+    let row = sqlx::query!(
+        "SELECT status, error_message FROM backup_runs WHERE id = $1",
+        run.backup_run_id
+    )
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(row.status, "restore_check_failed");
     assert!(
         row.error_message

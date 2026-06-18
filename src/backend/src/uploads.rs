@@ -405,8 +405,7 @@ async fn committed_parts(pool: &PgPool, upload_id: Uuid) -> Result<Vec<i32>, Upl
 }
 
 async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, UploadError> {
-    let rows = sqlx::query_as!(
-        PartRowQuery,
+    let rows = sqlx::query!(
         r#"
         SELECT part_index, size_bytes, storage_key, blake3_hash
         FROM upload_parts
@@ -420,22 +419,13 @@ async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, Uploa
 
     Ok(rows
         .into_iter()
-        .map(
-            |row| PartRow {
-                part_index: row.part_index,
-                size_bytes: row.size_bytes,
-                storage_key: row.storage_key,
-                blake3_hash: row.blake3_hash,
-            },
-        )
+        .map(|row| PartRow {
+            part_index: row.part_index,
+            size_bytes: row.size_bytes,
+            storage_key: row.storage_key,
+            blake3_hash: row.blake3_hash,
+        })
         .collect())
-}
-
-struct PartRowQuery {
-    part_index: i32,
-    size_bytes: i64,
-    storage_key: String,
-    blake3_hash: String,
 }
 
 fn validate_create_input(input: &CreateUploadInput) -> Result<(), UploadError> {

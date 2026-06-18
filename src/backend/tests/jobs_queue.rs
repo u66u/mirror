@@ -111,9 +111,12 @@ async fn expired_lease_can_be_reclaimed_and_failure_retries() -> TestResult {
             .map(|job| job.id),
         Some(job_id)
     );
-    sqlx::query!("UPDATE jobs SET heartbeat_at = now() - interval '2 hours' WHERE id = $1", job_id)
-        .execute(&pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE jobs SET heartbeat_at = now() - interval '2 hours' WHERE id = $1",
+        job_id
+    )
+    .execute(&pool)
+    .await?;
 
     let reclaimed = lease_next(&pool, "worker-b", stale_cutoff()).await?;
 
@@ -153,7 +156,11 @@ async fn failure_dead_letters_after_max_attempts() -> TestResult {
         return Err(std::io::Error::other("leased job should fail").into());
     };
 
-    let (status, message) = sqlx::query!("SELECT status, last_error->>'message' as msg FROM jobs WHERE id = $1", job_id).map(|row| (row.status, row.msg.unwrap_or_default()))
+    let (status, message) = sqlx::query!(
+        "SELECT status, last_error->>'message' as msg FROM jobs WHERE id = $1",
+        job_id
+    )
+    .map(|row| (row.status, row.msg.unwrap_or_default()))
     .fetch_one(&pool)
     .await?;
 
@@ -175,16 +182,21 @@ async fn enqueue_job(pool: &sqlx::PgPool, spec: JobSpec) -> TestResult<Uuid> {
     enqueue_in_tx(&mut tx, spec).await?;
     tx.commit().await?;
 
-    let job_id = sqlx::query_scalar!("SELECT id FROM jobs WHERE idempotency_key = $1", idempotency_key)
-        .fetch_one(pool)
-        .await?;
+    let job_id = sqlx::query_scalar!(
+        "SELECT id FROM jobs WHERE idempotency_key = $1",
+        idempotency_key
+    )
+    .fetch_one(pool)
+    .await?;
     Ok(job_id)
 }
 
 async fn job_status(pool: &sqlx::PgPool, job_id: Uuid) -> TestResult<String> {
-    Ok(sqlx::query_scalar!("SELECT status FROM jobs WHERE id = $1", job_id)
-        .fetch_one(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar!("SELECT status FROM jobs WHERE id = $1", job_id)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 fn stale_cutoff() -> OffsetDateTime {

@@ -29,6 +29,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
 
 /// Lightweight readiness query for Postgres.
 pub async fn ping(pool: &PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query!("SELECT 1 AS \"ping!\"").fetch_one(pool).await?;
+    sqlx::query!("SELECT 1 AS \"ping!\"")
+        .fetch_one(pool)
+        .await?;
     Ok(())
 }

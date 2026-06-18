@@ -233,10 +233,12 @@ async fn original_export_manifest_is_owner_rate_limited() -> TestResult {
         StatusCode::TOO_MANY_REQUESTS
     );
 
-    let stored_keys: Vec<Vec<u8>> =
-        sqlx::query_scalar!("SELECT key_hash FROM rate_limit_buckets WHERE action = $1", "export_original_manifest")
-            .fetch_all(&deps.pool)
-            .await?;
+    let stored_keys: Vec<Vec<u8>> = sqlx::query_scalar!(
+        "SELECT key_hash FROM rate_limit_buckets WHERE action = $1",
+        "export_original_manifest"
+    )
+    .fetch_all(&deps.pool)
+    .await?;
     assert_eq!(stored_keys.len(), 1);
 
     Ok(())

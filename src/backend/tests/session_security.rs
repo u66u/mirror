@@ -21,9 +21,12 @@ async fn session_authenticates_by_hash_and_rejects_wrong_or_revoked_token() -> T
     .await?;
 
     let raw_token = created.token.expose().to_owned();
-    let stored_hash: Vec<u8> = sqlx::query_scalar!("SELECT token_hash FROM sessions WHERE id = $1", created.session_id)
-        .fetch_one(&pool)
-        .await?;
+    let stored_hash: Vec<u8> = sqlx::query_scalar!(
+        "SELECT token_hash FROM sessions WHERE id = $1",
+        created.session_id
+    )
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(stored_hash.len(), 32);
     assert_ne!(stored_hash, raw_token.as_bytes());

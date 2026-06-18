@@ -138,28 +138,15 @@ async fn metadata_and_derivative_handlers_persist_expected_rows() -> TestResult 
     )
     .await?;
 
-    struct AspectRow {
-        width: i32,
-        height: i32,
-        extractor: Option<String>,
-    }
-    let row = sqlx::query_as!(
-        AspectRow,
+    let row = sqlx::query!(
         r#"SELECT width as "width!", height as "height!", raw->>'extractor' as "extractor" FROM asset_metadata WHERE asset_id = $1"#,
         asset_id
     )
     .fetch_one(&deps.pool)
     .await?;
     let (width, height, extractor) = (row.width, row.height, row.extractor.unwrap());
-    struct DerivativeRow {
-        kind: String,
-        format: String,
-        width: i32,
-        height: i32,
-        storage_key: String,
-    }
-    let derivatives_rows = sqlx::query_as!(
-        DerivativeRow,
+
+    let derivatives_rows = sqlx::query!(
         r#"
         SELECT kind, format, width, height, storage_key
         FROM derivatives
@@ -170,7 +157,10 @@ async fn metadata_and_derivative_handlers_persist_expected_rows() -> TestResult 
     )
     .fetch_all(&deps.pool)
     .await?;
-    let derivatives: Vec<(String, String, i32, i32, String)> = derivatives_rows.into_iter().map(|row| (row.kind, row.format, row.width, row.height, row.storage_key)).collect();
+    let derivatives: Vec<(String, String, i32, i32, String)> = derivatives_rows
+        .into_iter()
+        .map(|row| (row.kind, row.format, row.width, row.height, row.storage_key))
+        .collect();
 
     assert_eq!((width, height), (4000, 3000));
     assert_eq!(extractor, "media-metadata-v2");
@@ -201,9 +191,12 @@ async fn video_handlers_stream_original_and_persist_posters() -> TestResult {
     let upload_id =
         create_verified_upload(&deps.pool, &deps.storage, "video.mp4", "video/mp4", bytes).await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    let asset_id = sqlx::query_scalar!("SELECT id FROM assets WHERE public_id = $1", promoted.asset_id)
-        .fetch_one(&deps.pool)
-        .await?;
+    let asset_id = sqlx::query_scalar!(
+        "SELECT id FROM assets WHERE public_id = $1",
+        promoted.asset_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
     let video_processor = FfmpegVideoProcessor::new("ffprobe", "ffmpeg", Duration::from_secs(10));
 
     extract_metadata(
@@ -223,11 +216,15 @@ async fn video_handlers_stream_original_and_persist_posters() -> TestResult {
     )
     .await?;
 
-    let (width, height, duration_ms) = sqlx::query!(r#"
+    let (width, height, duration_ms) = sqlx::query!(
+        r#"
         SELECT width as "width!", height as "height!", (raw->>'duration_ms')::bigint as duration_ms
         FROM asset_metadata
         WHERE asset_id = $1
-        "#, asset_id).map(|r| (r.width, r.height, r.duration_ms.unwrap_or_default()))
+        "#,
+        asset_id
+    )
+    .map(|r| (r.width, r.height, r.duration_ms.unwrap_or_default()))
     .fetch_one(&deps.pool)
     .await?;
     let derivatives = sqlx::query!(r#"
@@ -278,9 +275,12 @@ async fn media_job_rejects_invalid_payload_without_side_effects() -> TestResult 
 async fn promoted_asset(deps: &StorageTestDeps, filename: &str) -> TestResult<Uuid> {
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, filename).await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    let internal_asset_id = sqlx::query_scalar!("SELECT id FROM assets WHERE public_id = $1", promoted.asset_id)
-        .fetch_one(&deps.pool)
-        .await?;
+    let internal_asset_id = sqlx::query_scalar!(
+        "SELECT id FROM assets WHERE public_id = $1",
+        promoted.asset_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
     Ok(internal_asset_id)
 }
 

@@ -162,9 +162,10 @@ async fn derivative_route_returns_authenticated_derivative_bytes() -> TestResult
         asset_id,
     )
     .await?;
-    let public_id: Uuid = sqlx::query_scalar!("SELECT public_id FROM assets WHERE id = $1", asset_id)
-        .fetch_one(&deps.pool)
-        .await?;
+    let public_id: Uuid =
+        sqlx::query_scalar!("SELECT public_id FROM assets WHERE id = $1", asset_id)
+            .fetch_one(&deps.pool)
+            .await?;
     let session = create_session(
         &deps.pool,
         SessionCreateInput {
@@ -374,9 +375,10 @@ async fn trash_route_hides_timeline_and_derivatives_until_restore() -> TestResul
         asset_id,
     )
     .await?;
-    let public_id: Uuid = sqlx::query_scalar!("SELECT public_id FROM assets WHERE id = $1", asset_id)
-        .fetch_one(&deps.pool)
-        .await?;
+    let public_id: Uuid =
+        sqlx::query_scalar!("SELECT public_id FROM assets WHERE id = $1", asset_id)
+            .fetch_one(&deps.pool)
+            .await?;
     let session = create_session(
         &deps.pool,
         SessionCreateInput {

@@ -288,13 +288,7 @@ async fn worker_dead_lettered_embed_job_records_reindex_failure() -> TestResult 
         "#,
         run.reindex_run_id
     )
-    .map(|r| {
-        (
-            r.job_status,
-            r.run_status,
-            r.failed_assets,
-        )
-    })
+    .map(|r| (r.job_status, r.run_status, r.failed_assets))
     .fetch_one(&deps.pool)
     .await?;
     let asset_error = sqlx::query_scalar!(
@@ -452,15 +446,19 @@ async fn job_count_by_status(pool: &sqlx::PgPool, status: &str) -> TestResult<i6
 }
 
 async fn metadata_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM asset_metadata "#)
-        .fetch_one(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM asset_metadata "#)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 async fn derivative_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM derivatives"#)
-        .fetch_one(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM derivatives"#)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 const MEDIA_JOB_KINDS: [JobKind; 2] = [JobKind::ExtractMetadata, JobKind::GenerateDerivatives];

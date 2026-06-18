@@ -172,14 +172,7 @@ async fn backup_run_records_snapshot_and_restore_check_without_secrets() -> Test
     let restore_checked = mark_restore_check(&pool, run.backup_run_id, true, None).await?;
     assert_eq!(restore_checked.status, "restore_check_succeeded");
 
-    struct RunRow {
-        repository_hint: String,
-        manifest: serde_json::Value,
-        error_message: Option<String>,
-    }
-
-    let row = sqlx::query_as!(
-        RunRow,
+    let row = sqlx::query!(
         r#"
         SELECT repository_hint as "repository_hint!", manifest as "manifest!", error_message
         FROM backup_runs
@@ -194,15 +187,8 @@ async fn backup_run_records_snapshot_and_restore_check_without_secrets() -> Test
     assert!(row.error_message.is_none());
     assert!(!row.manifest.to_string().contains("RESTIC_PASSWORD"));
 
-    struct AuditRow {
-        action: String,
-        outcome: String,
-        metadata: serde_json::Value,
-    }
-
     let target_id_str = run.backup_run_id.to_string();
-    let audit_rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as!(
-        AuditRow,
+    let audit_rows: Vec<(String, String, serde_json::Value)> = sqlx::query!(
         r#"
         SELECT action, outcome, metadata
         FROM audit_events

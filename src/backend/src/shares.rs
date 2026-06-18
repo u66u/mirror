@@ -4,9 +4,9 @@
 //! Public share reads expose asset/derivative metadata, not owner EXIF/GPS.
 
 use sqlx::PgPool;
+use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
-use thiserror::Error;
 
 use crate::{
     auth::{OpaqueToken, TokenHash},
@@ -323,21 +323,19 @@ async fn active_share_row(pool: &PgPool, raw_token: &str) -> Result<ShareRow, Sh
     .fetch_optional(pool)
     .await
     .map_err(ShareError::Database)?
-    .map(
-        |row| ShareRow {
-            share_public_id: row.public_id,
-            asset_public_id: row.asset_public_id,
-            media_type: row.media_type,
-            thumbnail_format: Some(row.thumbnail_format),
-            thumbnail_width: Some(row.thumbnail_width),
-            thumbnail_height: Some(row.thumbnail_height),
-            preview_format: Some(row.preview_format),
-            preview_width: Some(row.preview_width),
-            preview_height: Some(row.preview_height),
-            allow_original_download: row.allow_original_download,
-            expires_at: row.expires_at,
-        },
-    )
+    .map(|row| ShareRow {
+        share_public_id: row.public_id,
+        asset_public_id: row.asset_public_id,
+        media_type: row.media_type,
+        thumbnail_format: Some(row.thumbnail_format),
+        thumbnail_width: Some(row.thumbnail_width),
+        thumbnail_height: Some(row.thumbnail_height),
+        preview_format: Some(row.preview_format),
+        preview_width: Some(row.preview_width),
+        preview_height: Some(row.preview_height),
+        allow_original_download: row.allow_original_download,
+        expires_at: row.expires_at,
+    })
     .ok_or(ShareError::NotFound)
 }
 

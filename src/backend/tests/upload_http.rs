@@ -67,10 +67,12 @@ async fn upload_part_route_accepts_four_mib_and_rejects_larger_without_artifacts
     let exact_response = test::call_service(&app, exact_request).await;
     assert_eq!(exact_response.status(), StatusCode::NO_CONTENT);
 
-    let exact_size: i64 =
-        sqlx::query_scalar!("SELECT size_bytes FROM upload_parts WHERE upload_id = $1", exact_upload.upload_id)
-            .fetch_one(&deps.pool)
-            .await?;
+    let exact_size: i64 = sqlx::query_scalar!(
+        "SELECT size_bytes FROM upload_parts WHERE upload_id = $1",
+        exact_upload.upload_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
     assert_eq!(exact_size, i64::try_from(UPLOAD_PART_SIZE_BYTES)?);
     let exact_key = StorageKey::staging_upload(exact_upload.upload_id, "part-00000000")?;
     assert!(deps.storage.exists(&exact_key).await?);
@@ -104,10 +106,12 @@ async fn upload_part_route_accepts_four_mib_and_rejects_larger_without_artifacts
         })
     );
 
-    let oversized_part_count: i64 =
-        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM upload_parts WHERE upload_id = $1"#, oversized_upload.upload_id)
-            .fetch_one(&deps.pool)
-            .await?;
+    let oversized_part_count: i64 = sqlx::query_scalar!(
+        r#"SELECT count(*) as "count!" FROM upload_parts WHERE upload_id = $1"#,
+        oversized_upload.upload_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
     assert_eq!(oversized_part_count, 0);
     let oversized_key = StorageKey::staging_upload(oversized_upload.upload_id, "part-00000000")?;
     assert!(!deps.storage.exists(&oversized_key).await?);
@@ -235,9 +239,10 @@ async fn create_upload_route_respects_persisted_rate_limit_bucket() -> TestResul
     let response = test::call_service(&app, request).await;
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let upload_count: i64 = sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM upload_sessions"#)
-        .fetch_one(&deps.pool)
-        .await?;
+    let upload_count: i64 =
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM upload_sessions"#)
+            .fetch_one(&deps.pool)
+            .await?;
     assert_eq!(upload_count, 0);
 
     Ok(())

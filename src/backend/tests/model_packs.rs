@@ -156,12 +156,15 @@ async fn model_pack_activation_requires_passed_self_test_and_is_one_active_per_k
     record_model_pack_self_test(&pool, second.model_pack_id, true, None).await?;
     activate_model_pack(&pool, second.model_pack_id).await?;
 
-    let statuses: Vec<(String, String)> = sqlx::query!(r#"
+    let statuses: Vec<(String, String)> = sqlx::query!(
+        r#"
         SELECT model_revision, status
         FROM model_packs
         WHERE kind = 'semantic_image_text'
         ORDER BY model_revision
-        "#).map(|r| (r.model_revision, r.status))
+        "#
+    )
+    .map(|r| (r.model_revision, r.status))
     .fetch_all(&pool)
     .await?;
     assert_eq!(
@@ -194,7 +197,8 @@ async fn model_reindex_queues_embedding_jobs_for_active_assets_only() -> TestRes
     assert_eq!(run.total_assets, 1);
     assert_eq!(run.queued_assets, 1);
     let jobs: Vec<(String, serde_json::Value)> =
-        sqlx::query!("SELECT kind, payload FROM jobs WHERE kind = 'embed_asset'").map(|r| (r.kind, r.payload))
+        sqlx::query!("SELECT kind, payload FROM jobs WHERE kind = 'embed_asset'")
+            .map(|r| (r.kind, r.payload))
             .fetch_all(&pool)
             .await?;
     assert_eq!(jobs.len(), 1);
@@ -215,10 +219,12 @@ async fn model_reindex_queues_embedding_jobs_for_active_assets_only() -> TestRes
         jobs[0].1["reindex_run_id"].as_str(),
         Some(run.reindex_run_id.to_string().as_str())
     );
-    let rows: i64 =
-        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM model_reindex_assets WHERE reindex_run_id = $1"#, run.reindex_run_id)
-            .fetch_one(&pool)
-            .await?;
+    let rows: i64 = sqlx::query_scalar!(
+        r#"SELECT count(*) as "count!" FROM model_reindex_assets WHERE reindex_run_id = $1"#,
+        run.reindex_run_id
+    )
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(rows, 1);
 
     let done =
@@ -281,7 +287,7 @@ async fn model_reindex_records_terminal_failures_without_double_counting() -> Te
         "#,
         run.reindex_run_id,
         failed_asset_id
-    )    
+    )
     .fetch_one(&pool)
     .await?;
     assert_eq!(stored_error.as_deref(), Some("embedding runtime failed"));

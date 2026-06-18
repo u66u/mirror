@@ -64,10 +64,12 @@ async fn share_route_hashes_token_serves_derivative_and_revokes() -> TestResult 
     let share_id = required_json_string(&created, "share_id")?;
     let token = required_json_string(&created, "token")?;
 
-    let stored_hash: Vec<u8> =
-        sqlx::query_scalar!("SELECT token_hash FROM asset_shares WHERE public_id::text = $1", share_id)
-            .fetch_one(&deps.pool)
-            .await?;
+    let stored_hash: Vec<u8> = sqlx::query_scalar!(
+        "SELECT token_hash FROM asset_shares WHERE public_id::text = $1",
+        share_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
     assert_eq!(
         stored_hash,
         TokenHash::from_raw(&token).as_bytes().as_slice()
@@ -103,9 +105,12 @@ async fn share_route_hashes_token_serves_derivative_and_revokes() -> TestResult 
     );
     assert_eq!(test::read_body(derivative_response).await, "thumbnail");
 
-    sqlx::query!("UPDATE assets SET trashed_at = now() WHERE public_id = $1", asset.public_id)
-        .execute(&deps.pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE assets SET trashed_at = now() WHERE public_id = $1",
+        asset.public_id
+    )
+    .execute(&deps.pool)
+    .await?;
     let after_trash = test::TestRequest::get()
         .uri(&format!("/shares/{token}"))
         .to_request();

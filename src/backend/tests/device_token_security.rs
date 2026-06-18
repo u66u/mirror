@@ -185,10 +185,12 @@ async fn device_token_can_be_tied_to_creating_session_after_password_check() -> 
     )
     .await?;
 
-    let created_by =
-        sqlx::query_scalar!("SELECT created_by_session_id FROM device_tokens WHERE id = $1", device.device_token_id)
-            .fetch_one(&pool)
-            .await?;
+    let created_by = sqlx::query_scalar!(
+        "SELECT created_by_session_id FROM device_tokens WHERE id = $1",
+        device.device_token_id
+    )
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(created_by, Some(session.session_id));
 
@@ -212,10 +214,12 @@ async fn device_token_authenticates_by_hash_and_rejects_wrong_or_revoked_token()
     .await?;
 
     let raw_token = created.token.expose().to_owned();
-    let stored_hash: Vec<u8> =
-        sqlx::query_scalar!("SELECT token_hash FROM device_tokens WHERE id = $1", created.device_token_id)
-            .fetch_one(&pool)
-            .await?;
+    let stored_hash: Vec<u8> = sqlx::query_scalar!(
+        "SELECT token_hash FROM device_tokens WHERE id = $1",
+        created.device_token_id
+    )
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(stored_hash.len(), 32);
     assert_ne!(stored_hash, raw_token.as_bytes());
