@@ -10,9 +10,19 @@ use uuid::Uuid;
 use crate::{
     assets::{self, PromotedUpload},
     http::{auth, error::ApiError},
+    rate_limit::{self, QuotaInput},
     state::AppState,
     uploads::{self, CreateUploadInput, UPLOAD_PART_SIZE_BYTES, UploadSessionView},
 };
+
+const UPLOAD_CREATE_ACTION: &str = "upload_create";
+const UPLOAD_PART_ACTION: &str = "upload_part";
+const UPLOAD_COMPLETE_ACTION: &str = "upload_complete";
+const UPLOAD_CREATE_MAX_PER_HOUR: i32 = 2_000;
+const UPLOAD_PART_MAX_PER_HOUR: i32 = 20_000;
+const UPLOAD_COMPLETE_MAX_PER_HOUR: i32 = 2_000;
+const UPLOAD_WINDOW: time::Duration = time::Duration::hours(1);
+const UPLOAD_BLOCK: time::Duration = time::Duration::hours(1);
 
 /// Create upload request body.
 #[derive(Debug, Deserialize)]
@@ -47,6 +57,14 @@ pub async fn create_upload_route(
 ) -> Result<HttpResponse, ApiError> {
     let (pool, _) = deps(&state)?;
     let current = auth::require_unsafe_owner(pool, &req).await?;
+    reject_blocked_upload(
+        &state,
+        pool,
+        current.owner_id(),
+        UPLOAD_CREATE_ACTION,
+        UPLOAD_CREATE_MAX_PER_HOUR,
+    )
+    .await?;
 
     let upload = uploads::create_upload(
         pool,
@@ -88,6 +106,14 @@ pub async fn put_part_route(
 ) -> Result<HttpResponse, ApiError> {
     let (pool, storage) = deps(&state)?;
     let current = auth::require_unsafe_owner(pool, &req).await?;
+    reject_blocked_upload(
+        &state,
+        pool,
+        current.owner_id(),
+        UPLOAD_PART_ACTION,
+        UPLOAD_PART_MAX_PER_HOUR,
+    )
+    .await?;
     let (upload_id, part_index) = path.into_inner();
     let body = body
         .to_bytes_limited(UPLOAD_PART_SIZE_BYTES)
@@ -124,6 +150,14 @@ pub async fn complete_upload_route(
 ) -> Result<HttpResponse, ApiError> {
     let (pool, storage) = deps(&state)?;
     let current = auth::require_unsafe_owner(pool, &req).await?;
+    reject_blocked_upload(
+        &state,
+        pool,
+        current.owner_id(),
+        UPLOAD_COMPLETE_ACTION,
+        UPLOAD_COMPLETE_MAX_PER_HOUR,
+    )
+    .await?;
     let upload_id = path.into_inner();
     let upload = uploads::complete_upload(pool, storage, current.owner_id(), upload_id).await?;
     let promoted =
@@ -161,4 +195,47 @@ fn deps(state: &AppState) -> Result<(&sqlx::PgPool, &crate::storage::ObjectStora
         ));
     };
     Ok((pool, storage))
+}
+
+async fn reject_blocked_upload(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    owner_id: i16,
+    action: &'static str,
+    max_per_hour: i32,
+) -> Result<(), ApiError> {
+    let key = owner_id.to_string();
+    let now = time::OffsetDateTime::now_utc();
+    if rate_limit::is_blocked(pool, &state.config.rate_limit_secret, action, &key, now)
+        .await
+        .map_err(|_| ApiError::Internal)?
+    {
+        return Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many upload requests",
+        ));
+    }
+
+    let blocked = rate_limit::record_quota_attempt(
+        pool,
+        &state.config.rate_limit_secret,
+        QuotaInput {
+            action,
+            key: &key,
+            now,
+            max_attempts: max_per_hour + 1,
+            window: UPLOAD_WINDOW,
+            block_for: UPLOAD_BLOCK,
+        },
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    if blocked {
+        Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many upload requests",
+        ))
+    } else {
+        Ok(())
+    }
 }

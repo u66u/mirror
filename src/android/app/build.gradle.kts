@@ -87,6 +87,7 @@ detekt {
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2026.05.00")
+    val coilVersion = "3.5.0"
     val roomVersion = "2.8.4"
     val workVersion = "2.11.2"
 
@@ -101,6 +102,8 @@ dependencies {
     implementation("androidx.room:room-ktx:$roomVersion")
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.work:work-runtime-ktx:$workVersion")
+    implementation("io.coil-kt.coil3:coil-compose:$coilVersion")
+    implementation("io.coil-kt.coil3:coil-network-okhttp:$coilVersion")
     implementation("io.ktor:ktor-client-content-negotiation:3.5.0")
     implementation("io.ktor:ktor-client-core:3.5.0")
     implementation("io.ktor:ktor-client-okhttp:3.5.0")

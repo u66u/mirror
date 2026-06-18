@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::{
     auth::{self, AuthenticatedSession, OwnerLoginInput},
-    http::error::ApiError,
+    http::{client_ip, error::ApiError},
+    rate_limit::{self, FailureInput},
     state::AppState,
 };
 
@@ -22,6 +23,10 @@ const SESSION_COOKIE: &str = "mirror_session";
 const CSRF_COOKIE: &str = "mirror_csrf";
 const CSRF_HEADER: &str = "x-csrf-token";
 const SESSION_MAX_AGE: Duration = Duration::days(30);
+const OWNER_PASSWORD_LOGIN_ACTION: &str = "owner_password_login";
+const OWNER_PASSWORD_LOGIN_MAX_FAILURES: i32 = 5;
+const OWNER_PASSWORD_LOGIN_WINDOW: Duration = Duration::minutes(15);
+const OWNER_PASSWORD_LOGIN_BLOCK: Duration = Duration::minutes(15);
 
 /// Owner login request body.
 #[derive(Debug, Deserialize)]
@@ -102,8 +107,10 @@ pub async fn login(
             "database is unavailable",
         ));
     };
+    let rate_limit_key = owner_password_login_key(&req, &state);
+    reject_blocked_owner_password_login(&state, pool, &rate_limit_key).await?;
 
-    let output = auth::login_owner(
+    let output = match auth::login_owner(
         pool,
         OwnerLoginInput {
             password: body.password.clone(),
@@ -111,7 +118,21 @@ pub async fn login(
             device_name: body.device_name.clone(),
         },
     )
-    .await?;
+    .await
+    {
+        Ok(output) => {
+            clear_owner_password_login_limit(&state, pool, &rate_limit_key).await?;
+            output
+        }
+        Err(auth::OwnerLoginError::InvalidCredentials) => {
+            record_owner_password_login_failure(&state, pool, &rate_limit_key).await?;
+            return Err(ApiError::Unauthorized(
+                "invalid_credentials",
+                "invalid credentials",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     Ok(HttpResponse::NoContent()
         .cookie(session_cookie(output.token.expose()))
@@ -132,16 +153,20 @@ pub async fn device_login(
             "database is unavailable",
         ));
     };
+    let rate_limit_key = owner_password_login_key(&req, &state);
+    reject_blocked_owner_password_login(&state, pool, &rate_limit_key).await?;
 
     if !auth::verify_owner_password(pool, &body.password)
         .await
         .map_err(|_| ApiError::Internal)?
     {
+        record_owner_password_login_failure(&state, pool, &rate_limit_key).await?;
         return Err(ApiError::Unauthorized(
             "invalid_credentials",
             "invalid credentials",
         ));
     }
+    clear_owner_password_login_limit(&state, pool, &rate_limit_key).await?;
 
     let output = auth::create_device_token(
         pool,
@@ -494,4 +519,78 @@ fn user_agent(req: &HttpRequest) -> Option<String> {
         .get("user-agent")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+async fn reject_blocked_owner_password_login(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), ApiError> {
+    if rate_limit::is_blocked(
+        pool,
+        &state.config.rate_limit_secret,
+        OWNER_PASSWORD_LOGIN_ACTION,
+        key,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    {
+        Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many failed login attempts",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn record_owner_password_login_failure(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), ApiError> {
+    if rate_limit::record_failure(
+        pool,
+        &state.config.rate_limit_secret,
+        FailureInput {
+            action: OWNER_PASSWORD_LOGIN_ACTION,
+            key,
+            now: OffsetDateTime::now_utc(),
+            max_attempts: OWNER_PASSWORD_LOGIN_MAX_FAILURES,
+            window: OWNER_PASSWORD_LOGIN_WINDOW,
+            block_for: OWNER_PASSWORD_LOGIN_BLOCK,
+        },
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    {
+        Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many failed login attempts",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn clear_owner_password_login_limit(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), ApiError> {
+    rate_limit::clear(
+        pool,
+        &state.config.rate_limit_secret,
+        OWNER_PASSWORD_LOGIN_ACTION,
+        key,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+fn owner_password_login_key(req: &HttpRequest, state: &AppState) -> String {
+    client_ip::client_ip(req, &state.config.trusted_proxies)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown-peer".to_owned())
 }

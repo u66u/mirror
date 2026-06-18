@@ -22,11 +22,14 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import java.io.IOException
 
@@ -55,6 +58,7 @@ interface MirrorApi {
 class KtorMirrorApi(
     private val client: HttpClient = createHttpClient(),
 ) : MirrorApi,
+    TimelineApi,
     UploadApi {
     override suspend fun login(
         endpoint: ServerEndpoint,
@@ -95,6 +99,32 @@ class KtorMirrorApi(
             ) {
                 requireSuccess(response)
             }
+        }
+
+    override suspend fun listAssets(
+        credential: DeviceCredential,
+        cursor: String?,
+        limit: Int,
+    ): AssetTimelinePage =
+        transport {
+            val response =
+                client.get("${credential.endpoint().baseUrl}/assets") {
+                    bearerAuth(credential.token)
+                    url {
+                        parameters.append("limit", limit.toString())
+                        cursor?.let { parameters.append("cursor", it) }
+                    }
+                }
+            requireSuccess(response)
+            val body = parseObject(response.bodyAsText())
+            AssetTimelinePage(
+                items =
+                    body["items"]
+                        ?.jsonArray
+                        ?.map { it.assetTimelineItem() }
+                        ?: throw invalidResponse(),
+                nextCursor = body.optionalString("next_cursor"),
+            )
         }
 
     override suspend fun createUpload(
@@ -223,6 +253,52 @@ class KtorMirrorApi(
     private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredString(key: String): String =
         get(key)?.jsonPrimitive?.content?.takeIf(String::isNotEmpty)
             ?: throw invalidResponse()
+
+    private fun Map<String, JsonElement>.requiredLong(key: String): Long =
+        get(key)?.jsonPrimitive?.long
+            ?: throw invalidResponse()
+
+    private fun Map<String, JsonElement>.requiredInt(key: String): Int =
+        get(key)?.jsonPrimitive?.int
+            ?: throw invalidResponse()
+
+    private fun Map<String, JsonElement>.optionalString(key: String): String? =
+        when (val value = get(key)) {
+            null,
+            JsonNull,
+            -> null
+            else -> value.jsonPrimitive.content
+        }
+
+    private fun JsonElement.assetTimelineItem(): AssetTimelineItem {
+        val body = jsonObject
+        return AssetTimelineItem(
+            assetId = body.requiredString("asset_id"),
+            createdAt = body.requiredString("created_at"),
+            favoriteAt = body.optionalString("favorite_at"),
+            originalBlake3 = body.requiredString("original_blake3"),
+            mediaType = body.requiredString("media_type"),
+            sizeBytes = body.requiredLong("size_bytes"),
+            originalFilename = body.optionalString("original_filename"),
+            thumbnail = body["thumbnail"].assetDerivativeOrNull(),
+            preview = body["preview"].assetDerivativeOrNull(),
+        )
+    }
+
+    private fun JsonElement?.assetDerivativeOrNull(): AssetDerivative? =
+        when (this) {
+            null,
+            JsonNull,
+            -> null
+            else -> {
+                val body = jsonObject
+                AssetDerivative(
+                    format = body.requiredString("format"),
+                    width = body.requiredInt("width"),
+                    height = body.requiredInt("height"),
+                )
+            }
+        }
 
     private fun DeviceCredential.endpoint(): ServerEndpoint =
         ServerEndpoint.parse(

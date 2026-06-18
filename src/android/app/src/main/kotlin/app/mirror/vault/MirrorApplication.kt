@@ -15,6 +15,7 @@ import app.mirror.vault.backup.work.BackupScheduler
 import app.mirror.vault.backup.work.MirrorWorkerFactory
 import app.mirror.vault.backup.work.workManagerConfiguration
 import app.mirror.vault.network.KtorMirrorApi
+import app.mirror.vault.timeline.TimelineRepository
 
 class MirrorApplication :
     Application(),
@@ -39,6 +40,10 @@ class MirrorApplication :
             mediaStore = mediaStore,
             scheduler = backupScheduler,
         )
+    }
+
+    val timelineRepository: TimelineRepository by lazy {
+        TimelineRepository(api = api)
     }
 
     private val backupRunner: BackupRunner by lazy {

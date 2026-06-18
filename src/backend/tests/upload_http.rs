@@ -5,11 +5,13 @@ use mirror_backend::{
     },
     config::Config,
     http,
+    rate_limit::{self, QuotaInput},
     state::AppState,
     storage::StorageKey,
     uploads::{CreateUploadInput, UPLOAD_PART_SIZE_BYTES, create_upload, put_part},
 };
 use serde_json::{Value, json};
+use time::{Duration, OffsetDateTime};
 
 mod support;
 use support::{TestResult, asset_count, job_count, jpeg_bytes, storage_test_deps};
@@ -171,6 +173,74 @@ async fn complete_upload_route_promotes_asset_and_enqueues_jobs() -> TestResult 
     assert!(body["promoted"]["asset_id"].is_string());
     assert_eq!(asset_count(&deps.pool).await?, 1);
     assert_eq!(job_count(&deps.pool).await?, 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn create_upload_route_respects_persisted_rate_limit_bucket() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let session = create_session(
+        &deps.pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("upload-rate-limit-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let config = Config::from_env();
+    assert!(
+        rate_limit::record_quota_attempt(
+            &deps.pool,
+            &config.rate_limit_secret,
+            QuotaInput {
+                action: "upload_create",
+                key: "1",
+                now: OffsetDateTime::now_utc(),
+                max_attempts: 1,
+                window: Duration::hours(1),
+                block_for: Duration::hours(1),
+            },
+        )
+        .await
+        .map_err(std::io::Error::other)?
+    );
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config,
+                db: Some(deps.pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(deps.storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+    let request = test::TestRequest::post()
+        .uri("/uploads")
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .set_json(json!({
+            "original_filename": "blocked.jpg",
+            "expected_size": jpeg_bytes().len(),
+            "expected_blake3": blake3::hash(&jpeg_bytes()).to_hex().to_string(),
+            "media_type": "image/jpeg",
+            "client_upload_key": null,
+        }))
+        .to_request();
+
+    let response = test::call_service(&app, request).await;
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let upload_count: i64 = sqlx::query_scalar("SELECT count(*) FROM upload_sessions")
+        .fetch_one(&deps.pool)
+        .await?;
+    assert_eq!(upload_count, 0);
 
     Ok(())
 }

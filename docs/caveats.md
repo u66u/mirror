@@ -33,12 +33,13 @@ Status values:
 
 ## C003: Trusted Proxy Headers
 
-- Status: Open
+- Status: Mitigated
 - Risk: High
 - Related tasks: T102, T105, T403
 - Caveat: Trusting `X-Forwarded-*` or `X-Real-IP` from arbitrary clients enables
   IP spoofing, bad secure-cookie behavior, and rate-limit bypass.
-- Mitigation: Trust forwarded headers only from configured proxy IP ranges.
+- Mitigation: Trust forwarded headers only from `MIRROR_TRUSTED_PROXIES` CIDRs.
+  Untrusted peers cannot influence client-IP extraction.
 
 ## C004: Process-Local Rate Limits Are Not Persistent
 
@@ -115,14 +116,15 @@ Status values:
 
 ## C011: Share Metadata Leakage
 
-- Status: Open
+- Status: Partially mitigated
 - Risk: High
 - Related tasks: T401
 - Caveat: Private share links can leak GPS/full EXIF, people labels, or
   referrers if pages are not carefully constrained.
 - Mitigation: Omit GPS/full EXIF and people labels by default; set
   `Referrer-Policy: no-referrer` and `X-Robots-Tag: noindex`; no third-party
-  scripts.
+  scripts. Backend share metadata/derivative routes now apply privacy headers
+  and omit owner-only fields; web share page remains pending.
 
 ## C012: Model Supply Chain
 

@@ -7,8 +7,10 @@ use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use serde::Serialize;
 
 use crate::{
-    assets::{AssetReadError, ListAssetsError, PromoteError},
+    assets::{AssetMutationError, AssetReadError, ListAssetsError, PromoteError},
     auth::{DeviceTokenError, OwnerLoginError, OwnerSetupError},
+    exports::ExportError,
+    shares::ShareError,
     uploads::UploadError,
 };
 
@@ -30,6 +32,8 @@ pub enum ApiError {
     PayloadTooLarge(&'static str, &'static str),
     /// Authentication or setup token failed.
     Unauthorized(&'static str, &'static str),
+    /// Request is temporarily blocked by rate limiting.
+    TooManyRequests(&'static str, &'static str),
     /// Requested state transition conflicts with persisted state.
     Conflict(&'static str, &'static str),
     /// Requested resource does not exist for the caller.
@@ -46,6 +50,7 @@ impl std::fmt::Display for ApiError {
             Self::BadRequest(_, message)
             | Self::PayloadTooLarge(_, message)
             | Self::Unauthorized(_, message)
+            | Self::TooManyRequests(_, message)
             | Self::Conflict(_, message)
             | Self::NotFound(_, message)
             | Self::ServiceUnavailable(_, message) => *message,
@@ -61,6 +66,7 @@ impl ResponseError for ApiError {
             Self::BadRequest(_, _) => StatusCode::BAD_REQUEST,
             Self::PayloadTooLarge(_, _) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unauthorized(_, _) => StatusCode::UNAUTHORIZED,
+            Self::TooManyRequests(_, _) => StatusCode::TOO_MANY_REQUESTS,
             Self::Conflict(_, _) => StatusCode::CONFLICT,
             Self::NotFound(_, _) => StatusCode::NOT_FOUND,
             Self::ServiceUnavailable(_, _) => StatusCode::SERVICE_UNAVAILABLE,
@@ -73,6 +79,7 @@ impl ResponseError for ApiError {
             Self::BadRequest(error, message)
             | Self::PayloadTooLarge(error, message)
             | Self::Unauthorized(error, message)
+            | Self::TooManyRequests(error, message)
             | Self::Conflict(error, message)
             | Self::NotFound(error, message)
             | Self::ServiceUnavailable(error, message) => (*error, *message),
@@ -183,6 +190,38 @@ impl From<AssetReadError> for ApiError {
                 Self::BadRequest("invalid_asset_request", "invalid asset request")
             }
             AssetReadError::Database(_) => Self::Internal,
+        }
+    }
+}
+
+impl From<AssetMutationError> for ApiError {
+    fn from(error: AssetMutationError) -> Self {
+        match error {
+            AssetMutationError::NotFound => Self::NotFound("asset_not_found", "asset not found"),
+            AssetMutationError::NotTrashed => {
+                Self::Conflict("asset_not_trashed", "asset is not in trash")
+            }
+            AssetMutationError::Database(_) => Self::Internal,
+        }
+    }
+}
+
+impl From<ShareError> for ApiError {
+    fn from(error: ShareError) -> Self {
+        match error {
+            ShareError::InvalidInput => Self::BadRequest("invalid_share", "invalid share"),
+            ShareError::NotFound => Self::NotFound("share_not_found", "share not found"),
+            ShareError::TokenGeneration | ShareError::Database(_) => Self::Internal,
+        }
+    }
+}
+
+impl From<ExportError> for ApiError {
+    fn from(error: ExportError) -> Self {
+        match error {
+            ExportError::NotFound => Self::NotFound("export_not_found", "export not found"),
+            ExportError::InvalidStorageKey => Self::Internal,
+            ExportError::Database(_) => Self::Internal,
         }
     }
 }

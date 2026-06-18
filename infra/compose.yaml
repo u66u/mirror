@@ -1,4 +1,60 @@
 services:
+  api:
+    build:
+      context: ..
+      dockerfile: src/backend/Dockerfile
+    image: mirror-backend:dev
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      MIRROR_BIND_ADDR: 0.0.0.0:8080
+      MIRROR_DATABASE_URL: postgres://mirror:mirror@postgres:5432/mirror_test
+      MIRROR_STORAGE_ROOT: /var/lib/mirror/storage
+      MIRROR_RATE_LIMIT_SECRET: dev-change-me
+    ports:
+      - "8080:8080"
+    tmpfs:
+      - /tmp:size=512m,mode=1777,noexec,nosuid,nodev
+    volumes:
+      - mirror-storage:/var/lib/mirror/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    cpus: 1.0
+    mem_limit: 768m
+    pids_limit: 256
+
+  worker:
+    build:
+      context: ..
+      dockerfile: src/backend/Dockerfile
+    image: mirror-backend:dev
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/usr/local/bin/mirror-worker"]
+    environment:
+      MIRROR_DATABASE_URL: postgres://mirror:mirror@postgres:5432/mirror_test
+      MIRROR_STORAGE_ROOT: /var/lib/mirror/storage
+      MIRROR_RATE_LIMIT_SECRET: dev-change-me
+    tmpfs:
+      - /tmp:size=1g,mode=1777,noexec,nosuid,nodev
+    volumes:
+      - mirror-storage:/var/lib/mirror/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    cpus: 2.0
+    mem_limit: 1536m
+    pids_limit: 256
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -16,4 +72,5 @@ services:
       - mirror-postgres-data:/var/lib/postgresql/data
 
 volumes:
+  mirror-storage:
   mirror-postgres-data:

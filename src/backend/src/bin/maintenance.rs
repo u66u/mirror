@@ -3,25 +3,39 @@
 use std::{collections::BTreeSet, env, io};
 
 use mirror_backend::{
+    backups::{
+        CreateBackupRunInput, backup_manifest_summary, create_backup_run, durable_storage_manifest,
+        mark_backup_failed, mark_backup_succeeded, mark_restore_check, restic_backup_plan,
+        run_restic_backup_plan,
+    },
     config::Config,
     db,
     integrity::{remediate_original_orphans, scan_original_storage},
     runtime::io_other,
     storage::{ObjectStorage, StorageKey},
 };
+use uuid::Uuid;
 
 const USAGE: &str = "\
-Usage: maintenance [--delete-orphan KEY ...] [--apply]
+Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--run-backup PG_DUMP_PATH] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID]
 
 Scans originals by default without modifying storage.
 --delete-orphan KEY  Select a currently reported orphan for remediation.
 --apply              Delete selected orphans after fresh database checks.
+--backup-plan PATH   Print restic command plan for durable backup inputs.
+--run-backup PATH    Run restic backup and persist backup_runs metadata.
+--repository-hint H  Redacted repository label stored with --run-backup.
+--restore-check ID   Scan restored DB/storage and update backup_runs status.
 ";
 
 #[derive(Debug)]
 struct Options {
     apply: bool,
     selected_keys: Vec<StorageKey>,
+    backup_plan_dump_path: Option<std::path::PathBuf>,
+    run_backup_dump_path: Option<std::path::PathBuf>,
+    repository_hint: Option<String>,
+    restore_check_backup_run_id: Option<Uuid>,
 }
 
 #[actix_web::main]
@@ -33,6 +47,14 @@ async fn main() -> io::Result<()> {
         return Ok(());
     };
     let config = Config::from_env();
+    if let Some(dump_path) = options.backup_plan_dump_path.as_ref() {
+        let plan = restic_backup_plan(&config.storage_root, dump_path).map_err(io_other)?;
+        println!("backup_program\t{}", plan.program);
+        println!("backup_args\t{}", plan.args.join("\t"));
+        println!("backup_required_env\t{}", plan.required_env.join("\t"));
+        return Ok(());
+    }
+
     let database_url = config.database_url.as_deref().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -41,7 +63,17 @@ async fn main() -> io::Result<()> {
     })?;
     let pool = db::connect(database_url).await.map_err(io_other)?;
     std::fs::create_dir_all(&config.storage_root)?;
+    ensure_backup_input_dirs(&config.storage_root)?;
     let storage = ObjectStorage::local(&config.storage_root).map_err(io_other)?;
+
+    if let Some(dump_path) = options.run_backup_dump_path.as_ref() {
+        run_backup(&pool, &storage, &config, dump_path, options.repository_hint).await?;
+        return Ok(());
+    }
+    if let Some(backup_run_id) = options.restore_check_backup_run_id {
+        run_restore_check(&pool, &storage, backup_run_id).await?;
+        return Ok(());
+    }
 
     let report = scan_original_storage(&pool, &storage)
         .await
@@ -102,6 +134,10 @@ async fn main() -> io::Result<()> {
 fn parse_args() -> Result<Option<Options>, CliError> {
     let mut apply = false;
     let mut selected_keys = Vec::new();
+    let mut backup_plan_dump_path = None;
+    let mut run_backup_dump_path = None;
+    let mut repository_hint = None;
+    let mut restore_check_backup_run_id = None;
     let mut args = env::args().skip(1);
 
     while let Some(argument) = args.next() {
@@ -116,6 +152,24 @@ fn parse_args() -> Result<Option<Options>, CliError> {
                 }
                 selected_keys.push(key);
             }
+            "--backup-plan" => {
+                let raw_path = args.next().ok_or(CliError::MissingBackupDumpPath)?;
+                backup_plan_dump_path = Some(std::path::PathBuf::from(raw_path));
+            }
+            "--run-backup" => {
+                let raw_path = args.next().ok_or(CliError::MissingBackupDumpPath)?;
+                run_backup_dump_path = Some(std::path::PathBuf::from(raw_path));
+            }
+            "--repository-hint" => {
+                repository_hint = Some(args.next().ok_or(CliError::MissingRepositoryHint)?);
+            }
+            "--restore-check" => {
+                let raw_id = args.next().ok_or(CliError::MissingRestoreCheckId)?;
+                restore_check_backup_run_id = Some(
+                    Uuid::parse_str(&raw_id)
+                        .map_err(|_| CliError::InvalidRestoreCheckId(raw_id))?,
+                );
+            }
             "--help" | "-h" => return Ok(None),
             _ => return Err(CliError::UnknownArgument(argument)),
         }
@@ -128,6 +182,10 @@ fn parse_args() -> Result<Option<Options>, CliError> {
     Ok(Some(Options {
         apply,
         selected_keys,
+        backup_plan_dump_path,
+        run_backup_dump_path,
+        repository_hint,
+        restore_check_backup_run_id,
     }))
 }
 
@@ -137,6 +195,10 @@ enum CliError {
     InvalidOriginalObjectKey(String),
     InvalidStorageKey(String),
     MissingOrphanKey,
+    MissingBackupDumpPath,
+    MissingRepositoryHint,
+    MissingRestoreCheckId,
+    InvalidRestoreCheckId(String),
     UnknownArgument(String),
 }
 
@@ -151,9 +213,92 @@ impl std::fmt::Display for CliError {
             }
             Self::InvalidStorageKey(key) => write!(formatter, "invalid storage key: {key}"),
             Self::MissingOrphanKey => formatter.write_str("--delete-orphan requires KEY"),
+            Self::MissingBackupDumpPath => formatter.write_str("--backup-plan requires PATH"),
+            Self::MissingRepositoryHint => formatter.write_str("--repository-hint requires HINT"),
+            Self::MissingRestoreCheckId => formatter.write_str("--restore-check requires ID"),
+            Self::InvalidRestoreCheckId(id) => write!(formatter, "invalid backup run ID: {id}"),
             Self::UnknownArgument(argument) => write!(formatter, "unknown argument: {argument}"),
         }
     }
 }
 
 impl std::error::Error for CliError {}
+
+async fn run_backup(
+    pool: &sqlx::PgPool,
+    storage: &ObjectStorage,
+    config: &Config,
+    dump_path: &std::path::Path,
+    repository_hint: Option<String>,
+) -> io::Result<()> {
+    let manifest = durable_storage_manifest(storage).await.map_err(io_other)?;
+    let run = create_backup_run(
+        pool,
+        CreateBackupRunInput {
+            repository_hint,
+            manifest: backup_manifest_summary(manifest.objects.len()),
+        },
+    )
+    .await
+    .map_err(io_other)?;
+    let plan = restic_backup_plan(&config.storage_root, dump_path).map_err(io_other)?;
+
+    match run_restic_backup_plan(&plan) {
+        Ok(output) => {
+            let updated = mark_backup_succeeded(pool, run.backup_run_id, &output.snapshot_id)
+                .await
+                .map_err(io_other)?;
+            println!(
+                "backup_run\t{}\t{}\t{}",
+                updated.backup_run_id,
+                updated.status,
+                updated.snapshot_id.unwrap_or_default()
+            );
+            Ok(())
+        }
+        Err(error) => {
+            let _ = mark_backup_failed(pool, run.backup_run_id, &error.to_string()).await;
+            Err(io_other(error))
+        }
+    }
+}
+
+fn ensure_backup_input_dirs(storage_root: &std::path::Path) -> io::Result<()> {
+    std::fs::create_dir_all(storage_root.join("originals").join("blake3"))?;
+    std::fs::create_dir_all(storage_root.join("derivatives"))?;
+    Ok(())
+}
+
+async fn run_restore_check(
+    pool: &sqlx::PgPool,
+    storage: &ObjectStorage,
+    backup_run_id: Uuid,
+) -> io::Result<()> {
+    let report = scan_original_storage(pool, storage)
+        .await
+        .map_err(io_other)?;
+    let succeeded = report.orphan_objects.is_empty() && report.missing_objects.is_empty();
+    let error_message = if succeeded {
+        None
+    } else {
+        Some(format!(
+            "restore check found missing={} orphan={}",
+            report.missing_objects.len(),
+            report.orphan_objects.len()
+        ))
+    };
+    let updated = mark_restore_check(pool, backup_run_id, succeeded, error_message.as_deref())
+        .await
+        .map_err(io_other)?;
+    println!(
+        "restore_check\t{}\t{}",
+        updated.backup_run_id, updated.status
+    );
+    if succeeded {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            error_message.unwrap_or_else(|| "restore check failed".to_owned()),
+        ))
+    }
+}

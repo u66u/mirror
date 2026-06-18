@@ -16,16 +16,34 @@ fn ffmpeg_video_processor_probes_and_generates_bounded_poster() -> TestResult {
     }
     let temp_dir = TempDir::new()?;
     let input = temp_dir.path().join("fixture.mp4");
+    let extensionless_input = temp_dir.path().join("fixture");
     create_video_fixture(&input)?;
+    std::fs::copy(&input, &extensionless_input)?;
     let processor = FfmpegVideoProcessor::new("ffprobe", "ffmpeg", Duration::from_secs(10));
 
     let info = processor.inspect(&input)?;
     let poster = processor.generate_poster(&input, 512)?;
+    let large_edge_poster = processor.generate_poster(&input, 2048)?;
+    let extensionless_poster = processor.generate_poster(&extensionless_input, 2048)?;
     let poster_info = RustImageProcessor.inspect(&poster, "image/webp")?;
+    let large_edge_poster_info = RustImageProcessor.inspect(&large_edge_poster, "image/webp")?;
+    let extensionless_poster_info =
+        RustImageProcessor.inspect(&extensionless_poster, "image/webp")?;
 
     assert_eq!((info.width, info.height), (64, 32));
     assert!(info.duration_ms.is_some_and(|duration| duration > 0));
     assert_eq!((poster_info.width, poster_info.height), (64, 32));
+    assert_eq!(
+        (large_edge_poster_info.width, large_edge_poster_info.height),
+        (64, 32)
+    );
+    assert_eq!(
+        (
+            extensionless_poster_info.width,
+            extensionless_poster_info.height
+        ),
+        (64, 32)
+    );
     assert!(poster.len() < 32 * 1024 * 1024);
     Ok(())
 }

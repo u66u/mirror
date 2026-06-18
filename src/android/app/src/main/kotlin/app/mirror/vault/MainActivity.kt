@@ -6,6 +6,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import app.mirror.vault.timeline.TimelineViewModel
+import app.mirror.vault.timeline.TimelineViewModelFactory
 import app.mirror.vault.ui.BackupViewModel
 import app.mirror.vault.ui.BackupViewModelFactory
 import app.mirror.vault.ui.LoginViewModel
@@ -25,12 +27,17 @@ class MainActivity : ComponentActivity() {
             repository = (application as MirrorApplication).backupRepository,
         )
     }
+    private val timelineViewModel: TimelineViewModel by viewModels {
+        TimelineViewModelFactory(
+            repository = (application as MirrorApplication).timelineRepository,
+        )
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            MirrorApp(viewModel, backupViewModel)
+            MirrorApp(viewModel, backupViewModel, timelineViewModel)
         }
     }
 

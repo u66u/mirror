@@ -7,7 +7,8 @@ mod keys;
 
 use std::path::Path;
 
-use futures_util::TryStreamExt;
+use bytes::Bytes;
+use futures_util::{Stream, TryStreamExt, stream};
 use opendal::{Operator, services::Fs};
 use tokio::io::AsyncWriteExt;
 
@@ -51,6 +52,27 @@ impl ObjectStorage {
             .await
             .map(|buffer| buffer.to_vec())
             .map_err(StorageError::OpenDal)
+    }
+
+    /// Streams an object as byte chunks without materializing the whole object.
+    pub async fn read_stream(
+        &self,
+        key: &StorageKey,
+    ) -> Result<impl Stream<Item = Result<Bytes, StorageError>> + Send + 'static, StorageError>
+    {
+        let reader = self
+            .operator
+            .reader(key.as_str())
+            .await
+            .map_err(StorageError::OpenDal)?;
+        let stream = reader
+            .into_stream(..)
+            .await
+            .map_err(StorageError::OpenDal)?
+            .map_err(StorageError::OpenDal)
+            .map_ok(|buffer| stream::iter(buffer.into_iter().map(Ok::<_, StorageError>)))
+            .try_flatten();
+        Ok(stream)
     }
 
     /// Streams an object into a new file while enforcing a byte limit.

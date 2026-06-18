@@ -15,6 +15,11 @@ impl StorageKey {
         Self("originals/blake3/".to_owned())
     }
 
+    /// Builds the prefix containing generated derivatives.
+    pub fn derivatives_prefix() -> Self {
+        Self("derivatives/".to_owned())
+    }
+
     /// Builds a staging key for an upload object.
     pub fn staging_upload(upload_id: Uuid, object_name: &str) -> Result<Self, StorageKeyError> {
         Self::new(format!("staging/uploads/{upload_id}/{object_name}"))

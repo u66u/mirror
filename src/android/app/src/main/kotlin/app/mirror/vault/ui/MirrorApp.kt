@@ -22,6 +22,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,6 +33,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.mirror.vault.timeline.TimelineUiState
+import app.mirror.vault.timeline.TimelineViewModel
 
 private val VaultBackground = Color(0xFFFAFAF8)
 private val VaultInk = Color(0xFF1A1D1B)
@@ -48,26 +51,38 @@ private data class ConnectedUiState(
     val loading: Boolean,
     val error: String?,
     val backup: BackupUiState,
+    val timeline: TimelineUiState,
 )
 
 private data class ConnectedActions(
     val logout: () -> Unit,
     val backup: BackupActions,
+    val timeline: TimelineActions,
 )
+
+private enum class ConnectedTab {
+    PHOTOS,
+    BACKUP,
+}
 
 @Composable
 fun MirrorApp(
     viewModel: LoginViewModel,
     backupViewModel: BackupViewModel,
+    timelineViewModel: TimelineViewModel,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val backupState by backupViewModel.state.collectAsStateWithLifecycle()
+    val timelineState by timelineViewModel.state.collectAsStateWithLifecycle()
     val permissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions(),
         ) {
             backupViewModel.refresh()
         }
+    LaunchedEffect(state.credential) {
+        timelineViewModel.setCredential(state.credential)
+    }
     MaterialTheme(
         colorScheme =
             MaterialTheme.colorScheme.copy(
@@ -81,6 +96,7 @@ fun MirrorApp(
         MirrorSurface(
             state = state,
             backupState = backupState,
+            timelineState = timelineState,
             defaultDeviceName = viewModel.defaultDeviceName,
             onLogin = viewModel::login,
             connectedActions =
@@ -97,15 +113,28 @@ fun MirrorApp(
                             setWifiOnly = backupViewModel::setWifiOnly,
                             runNow = backupViewModel::runNow,
                         ),
+                    timeline =
+                        TimelineActions(
+                            refresh = timelineViewModel::refresh,
+                            loadNext = timelineViewModel::loadNext,
+                            open = timelineViewModel::open,
+                            close = timelineViewModel::close,
+                            next = { timelineViewModel.select(1) },
+                            previous = { timelineViewModel.select(-1) },
+                            imageUrl = timelineViewModel::derivativeUrl,
+                            authorizationHeader = timelineViewModel::authorizationHeader,
+                        ),
                 ),
         )
     }
 }
 
 @Composable
+@Suppress("LongParameterList")
 private fun MirrorSurface(
     state: LoginUiState,
     backupState: BackupUiState,
+    timelineState: TimelineUiState,
     defaultDeviceName: String,
     onLogin: (String, Boolean, String, String) -> Unit,
     connectedActions: ConnectedActions,
@@ -129,6 +158,7 @@ private fun MirrorSurface(
                             loading = state.loading,
                             error = state.error,
                             backup = backupState,
+                            timeline = timelineState,
                         ),
                     actions = connectedActions,
                 )
@@ -284,6 +314,7 @@ private fun ConnectedScreen(
     state: ConnectedUiState,
     actions: ConnectedActions,
 ) {
+    var tab by remember { mutableStateOf(ConnectedTab.PHOTOS) }
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier =
@@ -306,11 +337,24 @@ private fun ConnectedScreen(
             }
         }
         HorizontalDivider()
-        BackupContent(
-            state = state.backup,
-            actions = actions.backup,
-            modifier = Modifier.weight(1f),
+        ConnectedTabs(
+            selected = tab,
+            onSelected = { tab = it },
         )
+        when (tab) {
+            ConnectedTab.PHOTOS ->
+                TimelineContent(
+                    state = state.timeline,
+                    actions = actions.timeline,
+                    modifier = Modifier.weight(1f),
+                )
+            ConnectedTab.BACKUP ->
+                BackupContent(
+                    state = state.backup,
+                    actions = actions.backup,
+                    modifier = Modifier.weight(1f),
+                )
+        }
         state.error?.let {
             Text(
                 text = it,
@@ -321,5 +365,44 @@ private fun ConnectedScreen(
                         .padding(horizontal = 20.dp, vertical = 12.dp),
             )
         }
+    }
+}
+
+@Composable
+private fun ConnectedTabs(
+    selected: ConnectedTab,
+    onSelected: (ConnectedTab) -> Unit,
+) {
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        TabButton(
+            label = "Photos",
+            selected = selected == ConnectedTab.PHOTOS,
+            onClick = { onSelected(ConnectedTab.PHOTOS) },
+        )
+        TabButton(
+            label = "Backup",
+            selected = selected == ConnectedTab.BACKUP,
+            onClick = { onSelected(ConnectedTab.BACKUP) },
+        )
+    }
+}
+
+@Composable
+private fun TabButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    TextButton(onClick = onClick) {
+        Text(
+            text = label,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+        )
     }
 }

@@ -30,3 +30,16 @@ fn same_raw_token_produces_same_lookup_hash() {
     assert_eq!(first, second);
     assert_ne!(first, other);
 }
+
+#[test]
+fn token_debug_output_is_redacted() -> TestResult {
+    let token = OpaqueToken::generate()?;
+    let raw = token.expose().to_owned();
+    let hash = token.hash();
+
+    assert!(format!("{token:?}").contains("[redacted]"));
+    assert!(!format!("{token:?}").contains(&raw));
+    assert!(format!("{hash:?}").contains("[redacted]"));
+
+    Ok(())
+}

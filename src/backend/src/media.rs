@@ -106,7 +106,9 @@ impl ImageProcessor for RustImageProcessor {
         kind: DerivativeKind,
     ) -> Result<GeneratedDerivative, MediaToolError> {
         let image = decode_image(bytes, media_type)?;
-        let resized = image.thumbnail(kind.max_edge(), kind.max_edge());
+        let (source_width, source_height) = image.dimensions();
+        let max_edge = kind.max_edge().min(source_width.max(source_height));
+        let resized = image.thumbnail(max_edge, max_edge);
         let (width, height) = resized.dimensions();
         let mut output = Cursor::new(Vec::new());
         resized
@@ -511,7 +513,11 @@ async fn generate_video_derivatives(
     let video_processor = video_processor.clone();
     let poster = tokio::task::spawn_blocking(move || {
         let _temp_dir = temp_dir;
-        video_processor.generate_poster(&input, DerivativeKind::Preview.max_edge())
+        let info = video_processor.inspect(&input)?;
+        let poster_edge = DerivativeKind::Preview
+            .max_edge()
+            .min(info.width.max(info.height));
+        video_processor.generate_poster(&input, poster_edge)
     })
     .await
     .map_err(|_| MediaError::ProcessingTaskFailed)?

@@ -6,16 +6,20 @@ use std::{
 };
 
 use mirror_backend::{
-    assets::{AssetReadError, ListAssetsError, PromoteError},
+    assets::{
+        AssetMutationError, AssetReadError, ListAssetsError, PromoteError, promote_verified_upload,
+    },
     auth::{
         DeviceTokenError, OwnerLoginError, OwnerSetupError, OwnerSetupInput, PasswordError,
         SessionError, SetupState, SetupTokenError, TokenError,
     },
+    backups::BackupError,
     db::{connect, run_migrations},
     jobs::JobError,
     media::{
         DerivativeKind, GeneratedDerivative, ImageInfo, ImageProcessor, MediaError, MediaToolError,
     },
+    shares::ShareError,
     storage::ObjectStorage,
     storage::{StorageError, StorageKeyError},
     uploads::{CreateUploadInput, UploadError, complete_upload, create_upload, put_part},
@@ -171,6 +175,24 @@ impl From<AssetReadError> for TestError {
     }
 }
 
+impl From<AssetMutationError> for TestError {
+    fn from(error: AssetMutationError) -> Self {
+        Self::new("asset mutation failed", error)
+    }
+}
+
+impl From<ShareError> for TestError {
+    fn from(error: ShareError) -> Self {
+        Self::new("share failed", error)
+    }
+}
+
+impl From<BackupError> for TestError {
+    fn from(error: BackupError) -> Self {
+        Self::new("backup failed", error)
+    }
+}
+
 impl From<JobError> for TestError {
     fn from(error: JobError) -> Self {
         Self::new("job failed", error)
@@ -254,7 +276,7 @@ pub async fn storage_test_deps() -> TestResult<StorageTestDeps> {
 
 #[allow(dead_code)] // T105/T202/T204: called through `fresh_owner_pool` in DB-backed test crates.
 pub async fn reset_owner(pool: &sqlx::PgPool) -> TestResult {
-    sqlx::query("TRUNCATE jobs, originals, owner_accounts CASCADE")
+    sqlx::query("TRUNCATE jobs, originals, owner_accounts, rate_limit_buckets CASCADE")
         .execute(pool)
         .await?;
 
@@ -314,6 +336,31 @@ pub async fn create_verified_upload(
     complete_upload(pool, storage, 1, upload.upload_id).await?;
 
     Ok(upload.upload_id)
+}
+
+#[allow(dead_code)] // T302/T401: timeline/share tests need both DB id and public API id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromotedAssetIds {
+    pub internal_id: Uuid,
+    pub public_id: Uuid,
+}
+
+#[allow(dead_code)] // T302/T401: DB/storage integration tests share the verified-promotion path.
+pub async fn create_promoted_asset(
+    deps: &StorageTestDeps,
+    filename: &str,
+) -> TestResult<PromotedAssetIds> {
+    let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, filename).await?;
+    let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
+    let internal_id = sqlx::query_scalar("SELECT id FROM assets WHERE public_id = $1")
+        .bind(promoted.asset_id)
+        .fetch_one(&deps.pool)
+        .await?;
+
+    Ok(PromotedAssetIds {
+        internal_id,
+        public_id: promoted.asset_id,
+    })
 }
 
 #[allow(dead_code)] // T301: external-tool and DB media tests share capability detection.

@@ -62,6 +62,32 @@ async fn upload_resume_and_complete_verify_size_hash_and_media_signature() -> Te
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn mp4_upload_accepts_ftyp_signature() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let bytes = b"\0\0\0\x18ftypisom\0\0\0\0isommp42".to_vec();
+    let created = create_upload(
+        &deps.pool,
+        CreateUploadInput {
+            owner_id: 1,
+            original_filename: "clip.mp4".to_owned(),
+            expected_size: i64::try_from(bytes.len())?,
+            expected_blake3: blake3::hash(&bytes).to_hex().to_string(),
+            media_type: "video/mp4".to_owned(),
+            client_upload_key: None,
+        },
+    )
+    .await?;
+
+    put_part(&deps.pool, &deps.storage, 1, created.upload_id, 0, bytes).await?;
+    let completed = complete_upload(&deps.pool, &deps.storage, 1, created.upload_id).await?;
+
+    assert_eq!(completed.status, UploadStatus::Verified);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn invalid_part_framing_creates_no_part_rows_or_storage_objects() -> TestResult {
     let deps = storage_test_deps().await?;
     let created = create_upload(

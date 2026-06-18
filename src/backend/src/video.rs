@@ -127,15 +127,16 @@ impl VideoProcessor for FfmpegVideoProcessor {
         if max_edge == 0 {
             return Err(VideoToolError::InvalidPosterEdge);
         }
-        let seek_ms = self
-            .inspect(input)?
+        let info = self.inspect(input)?;
+        let target_edge = max_edge.min(info.width.max(info.height));
+        let seek_ms = info
             .duration_ms
             .map(|duration| (duration / 10).min(3_000))
             .unwrap_or(0);
         let seek_seconds = format!("{:.3}", seek_ms as f64 / 1000.0);
         let output = input.with_extension("poster.webp");
         let filter = format!(
-            "scale='min({max_edge},iw)':'min({max_edge},ih)':force_original_aspect_ratio=decrease"
+            "scale=w='if(gte(iw,ih),min(iw,{target_edge}),-2)':h='if(gte(iw,ih),-2,min(ih,{target_edge}))'"
         );
         let mut command = Command::new(&self.ffmpeg_path);
         command.args([

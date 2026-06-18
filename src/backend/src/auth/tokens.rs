@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 /// Random URL-safe opaque token returned to clients once.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OpaqueToken(String);
 
 impl OpaqueToken {
@@ -34,7 +34,7 @@ impl OpaqueToken {
 }
 
 /// SHA-256 token digest for DB storage and lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct TokenHash([u8; 32]);
 
 impl TokenHash {
@@ -54,6 +54,18 @@ impl TokenHash {
     #[must_use]
     pub fn matches_raw(&self, token: &str) -> bool {
         bool::from(Self::from_raw(token).0.ct_eq(&self.0))
+    }
+}
+
+impl std::fmt::Debug for OpaqueToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OpaqueToken([redacted])")
+    }
+}
+
+impl std::fmt::Debug for TokenHash {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TokenHash([redacted])")
     }
 }
 

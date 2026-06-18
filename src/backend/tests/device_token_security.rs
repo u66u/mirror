@@ -107,6 +107,59 @@ async fn android_login_token_authorizes_then_stops_after_self_revocation() -> Te
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn repeated_owner_password_failures_rate_limit_device_login() -> TestResult {
+    let pool = fresh_owner_pool().await?;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(pool.clone()),
+                setup: auth::SetupState::Disabled,
+                storage: None,
+            }))
+            .configure(http::configure),
+    )
+    .await;
+
+    for attempt in 1..=5 {
+        let request = test::TestRequest::post()
+            .uri("/auth/device-login")
+            .insert_header(("x-forwarded-for", format!("198.51.100.{attempt}")))
+            .set_json(json!({
+                "name": "Pixel",
+                "password": "wrong horse battery staple"
+            }))
+            .to_request();
+        let status = test::call_service(&app, request).await.status();
+        if attempt < 5 {
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        } else {
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+
+    let correct_password = test::TestRequest::post()
+        .uri("/auth/device-login")
+        .insert_header(("x-forwarded-for", "198.51.100.250"))
+        .set_json(json!({
+            "name": "Pixel",
+            "password": "correct horse battery staple"
+        }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, correct_password).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let token_count: i64 = sqlx::query_scalar("SELECT count(*) FROM device_tokens")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(token_count, 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn device_token_can_be_tied_to_creating_session_after_password_check() -> TestResult {
     let pool = fresh_owner_pool().await?;
     assert!(!auth::verify_owner_password(&pool, "wrong horse battery staple").await?);

@@ -1,10 +1,13 @@
+use std::collections::BTreeSet;
+
 use actix_web::{App, cookie::Cookie, http::StatusCode, test, web};
 use mirror_backend::{
-    assets::{ListAssetsError, ListAssetsInput, list_assets, promote_verified_upload},
+    assets::{ListAssetsError, ListAssetsInput, list_assets, trash_asset},
     auth::{SessionCreateInput, SetupState, create_session},
     config::Config,
     http,
     media::generate_derivatives,
+    shares::{CreateShareInput, create_share},
     state::AppState,
 };
 use serde_json::Value;
@@ -12,8 +15,7 @@ use uuid::Uuid;
 
 mod support;
 use support::{
-    FakeImageProcessor, FakeVideoProcessor, StorageTestDeps, TestResult,
-    create_verified_jpeg_upload, storage_test_deps,
+    FakeImageProcessor, FakeVideoProcessor, TestResult, create_promoted_asset, storage_test_deps,
 };
 
 #[tokio::test]
@@ -92,7 +94,7 @@ async fn asset_timeline_rejects_invalid_limit_and_cursor() -> TestResult {
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn assets_route_returns_authenticated_owner_timeline() -> TestResult {
     let deps = storage_test_deps().await?;
-    let asset_id = create_promoted_asset(&deps, "route.jpg").await?;
+    let asset_id = create_promoted_asset(&deps, "route.jpg").await?.internal_id;
     generate_derivatives(
         &deps.pool,
         &deps.storage,
@@ -146,7 +148,9 @@ async fn assets_route_returns_authenticated_owner_timeline() -> TestResult {
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn derivative_route_returns_authenticated_derivative_bytes() -> TestResult {
     let deps = storage_test_deps().await?;
-    let asset_id = create_promoted_asset(&deps, "derivative.jpg").await?;
+    let asset_id = create_promoted_asset(&deps, "derivative.jpg")
+        .await?
+        .internal_id;
     generate_derivatives(
         &deps.pool,
         &deps.storage,
@@ -202,13 +206,262 @@ async fn derivative_route_returns_authenticated_derivative_bytes() -> TestResult
     Ok(())
 }
 
-async fn create_promoted_asset(deps: &StorageTestDeps, filename: &str) -> TestResult<Uuid> {
-    let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, filename).await?;
-    let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    let internal_asset_id = sqlx::query_scalar("SELECT id FROM assets WHERE public_id = $1")
-        .bind(promoted.asset_id)
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn trash_listing_pages_without_active_assets_or_duplicates() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let active = create_promoted_asset(&deps, "active.jpg").await?;
+    let first = create_promoted_asset(&deps, "trashed-first.jpg").await?;
+    let second = create_promoted_asset(&deps, "trashed-second.jpg").await?;
+    let third = create_promoted_asset(&deps, "trashed-third.jpg").await?;
+    trash_asset(&deps.pool, 1, first.public_id).await?;
+    trash_asset(&deps.pool, 1, second.public_id).await?;
+    trash_asset(&deps.pool, 1, third.public_id).await?;
+    let session = create_session(
+        &deps.pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("trash-list-route-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(deps.pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(deps.storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+    let session_cookie = Cookie::new("mirror_session", session.token.expose().to_owned());
+
+    let first_page = test::TestRequest::get()
+        .uri("/trash/assets?limit=2")
+        .cookie(session_cookie.clone())
+        .to_request();
+    let first_response = test::call_service(&app, first_page).await;
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body: Value = test::read_body_json(first_response).await;
+    assert_eq!(first_body["items"].as_array().map(Vec::len), Some(2));
+    let cursor = first_body["next_cursor"].as_str().unwrap_or_default();
+    assert!(!cursor.is_empty());
+
+    let second_page = test::TestRequest::get()
+        .uri(&format!("/trash/assets?limit=2&cursor={cursor}"))
+        .cookie(session_cookie)
+        .to_request();
+    let second_response = test::call_service(&app, second_page).await;
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body: Value = test::read_body_json(second_response).await;
+    assert_eq!(second_body["items"].as_array().map(Vec::len), Some(1));
+    assert!(second_body["next_cursor"].is_null());
+
+    let mut listed = BTreeSet::new();
+    for item in first_body["items"]
+        .as_array()
+        .into_iter()
+        .chain(second_body["items"].as_array())
+        .flatten()
+    {
+        assert!(!item["trashed_at"].is_null());
+        listed.insert(item["asset_id"].as_str().unwrap_or_default().to_owned());
+    }
+    assert_eq!(listed.len(), 3);
+    assert!(!listed.contains(&active.public_id.to_string()));
+    assert!(listed.contains(&first.public_id.to_string()));
+    assert!(listed.contains(&second.public_id.to_string()));
+    assert!(listed.contains(&third.public_id.to_string()));
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn trash_route_hides_timeline_and_derivatives_until_restore() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let asset_id = create_promoted_asset(&deps, "trash.jpg").await?.internal_id;
+    generate_derivatives(
+        &deps.pool,
+        &deps.storage,
+        &FakeImageProcessor,
+        &FakeVideoProcessor,
+        asset_id,
+    )
+    .await?;
+    let public_id: Uuid = sqlx::query_scalar("SELECT public_id FROM assets WHERE id = $1")
+        .bind(asset_id)
         .fetch_one(&deps.pool)
         .await?;
+    let session = create_session(
+        &deps.pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("trash-route-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(deps.pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(deps.storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+    let session_cookie = Cookie::new("mirror_session", session.token.expose().to_owned());
 
-    Ok(internal_asset_id)
+    let trash = test::TestRequest::delete()
+        .uri(&format!("/assets/{public_id}"))
+        .cookie(session_cookie.clone())
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, trash).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let timeline = test::TestRequest::get()
+        .uri("/assets?limit=10")
+        .cookie(session_cookie.clone())
+        .to_request();
+    let timeline_response = test::call_service(&app, timeline).await;
+    assert_eq!(timeline_response.status(), StatusCode::OK);
+    let timeline_body: Value = test::read_body_json(timeline_response).await;
+    assert_eq!(timeline_body["items"].as_array().map(Vec::len), Some(0));
+
+    let derivative = test::TestRequest::get()
+        .uri(&format!("/assets/{public_id}/derivatives/thumbnail"))
+        .cookie(session_cookie.clone())
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, derivative).await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let restore = test::TestRequest::post()
+        .uri(&format!("/assets/{public_id}/restore"))
+        .cookie(session_cookie.clone())
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, restore).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let restored = test::TestRequest::get()
+        .uri("/assets?limit=10")
+        .cookie(session_cookie)
+        .to_request();
+    let restored_response = test::call_service(&app, restored).await;
+    assert_eq!(restored_response.status(), StatusCode::OK);
+    let restored_body: Value = test::read_body_json(restored_response).await;
+    assert_eq!(restored_body["items"].as_array().map(Vec::len), Some(1));
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn purge_route_requires_trash_and_audits_permanent_removal() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let asset = create_promoted_asset(&deps, "purge.jpg").await?;
+    create_share(
+        &deps.pool,
+        CreateShareInput {
+            owner_id: 1,
+            asset_public_id: asset.public_id,
+            expires_in_seconds: Some(3600),
+            allow_original_download: false,
+        },
+    )
+    .await?;
+    let session = create_session(
+        &deps.pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("purge-route-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(deps.pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(deps.storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+    let session_cookie = Cookie::new("mirror_session", session.token.expose().to_owned());
+
+    let active_purge = test::TestRequest::delete()
+        .uri(&format!("/assets/{}/purge", asset.public_id))
+        .cookie(session_cookie.clone())
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, active_purge).await.status(),
+        StatusCode::CONFLICT
+    );
+
+    let trash = test::TestRequest::delete()
+        .uri(&format!("/assets/{}", asset.public_id))
+        .cookie(session_cookie.clone())
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, trash).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let purge = test::TestRequest::delete()
+        .uri(&format!("/assets/{}/purge", asset.public_id))
+        .cookie(session_cookie)
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, purge).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let asset_count: i64 = sqlx::query_scalar("SELECT count(*) FROM assets")
+        .fetch_one(&deps.pool)
+        .await?;
+    let original_count: i64 = sqlx::query_scalar("SELECT count(*) FROM originals")
+        .fetch_one(&deps.pool)
+        .await?;
+    let share_count: i64 = sqlx::query_scalar("SELECT count(*) FROM asset_shares")
+        .fetch_one(&deps.pool)
+        .await?;
+    let audit_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM audit_events
+        WHERE action = 'asset.purge'
+          AND outcome = 'success'
+          AND target_id = $1
+          AND metadata->>'original_removed' = 'true'
+        "#,
+    )
+    .bind(asset.public_id.to_string())
+    .fetch_one(&deps.pool)
+    .await?;
+
+    assert_eq!(asset_count, 0);
+    assert_eq!(original_count, 0);
+    assert_eq!(share_count, 0);
+    assert_eq!(audit_count, 1);
+
+    Ok(())
 }

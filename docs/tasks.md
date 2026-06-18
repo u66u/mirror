@@ -770,7 +770,7 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 
 ### T207: Enforce Upload Part Framing
 
-- Status: [~]
+- Status: [x]
 - Milestone: M2
 - Risk: High
 - Touched subsystems: backend, uploads, HTTP, Android contract
@@ -795,11 +795,15 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - Part index and deterministic part length are validated before storage or
     database writes.
   - Completion requires contiguous framed parts.
-  - Backend default gate passed; opt-in full database gate remains pending.
+  - `video/mp4` uploads are accepted only when the MP4 `ftyp` signature is
+    present; DB constraints allow the same media type through promotion.
+  - `make gate-backend` -> passed.
+  - `make test-db` -> passed against local Postgres after resetting stale test
+    schema state.
 
 ### T208: Original Storage Integrity Recovery
 
-- Status: [~]
+- Status: [x]
 - Milestone: M2
 - Risk: Critical
 - Touched subsystems: backend, storage, database, operations
@@ -824,7 +828,9 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     Postgres immediately before deletion.
   - Maintenance CLI is dry-run by default and requires explicit keys for
     `--apply`.
-  - Backend default gate passed; opt-in full database gate remains pending.
+  - `make gate-backend` -> passed.
+  - `make test-db` -> passed against local Postgres after resetting stale test
+    schema state.
 
 ## M3: Media And Timeline
 
@@ -870,6 +876,11 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Timeout-bounded `ffprobe`/`ffmpeg` handlers extract duration and
       rotation-correct display dimensions, then generate metadata-free WebP
       posters near 10% of playback.
+    - Video and still-image derivative generation no longer upscales tiny
+      originals; generated preview/thumbnail dimensions are capped by source
+      dimensions and requested max edge.
+    - MP4 upload support now spans app validation, DB constraints, original
+      promotion, metadata extraction, and video poster generation.
     - Worker heartbeats prevent live lease reclaim. CPU media work runs on the
       blocking pool; wall timeout records retry and exits the worker process so
       stuck parser threads cannot accumulate.
@@ -877,11 +888,24 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       source original BLAKE3.
     - V1 emits WebP only. AVIF is intentionally deferred to avoid format
       negotiation, duplicate derivative storage, and another codec test matrix.
+    - Backend container image uses Rust 1.93.0 for builds, ships API, worker,
+      and maintenance binaries, installs `ffmpeg`, and runs as UID/GID 10001.
+    - Compose defines non-root API and worker services with read-only root
+      filesystems, dropped capabilities, `no-new-privileges`, tmpfs scratch
+      directories, private storage volume mounts, CPU/memory limits, and PID
+      limits.
   - Commands:
-    - `make gate-backend` -> passed after video/timeout integration
-    - Previous `make test-db` baseline passed; newest integration remains
-      pending because Docker Desktop is stopped.
+    - `make gate-backend` -> passed after MP4/no-upscale integration.
+    - `make test-db` -> passed against local Postgres.
+    - `docker compose -f infra/compose.yaml config` -> passed.
+    - `docker build -f src/backend/Dockerfile -t mirror-backend:dev .` reached
+      dependency download with `rust:1.93.0-bookworm`, but Docker Desktop
+      failed resolving/downloading from Docker Hub CloudFront in this
+      environment.
   - Files touched:
+    - `Cargo.toml`
+    - `infra/compose.yaml`
+    - `src/backend/Dockerfile`
     - `src/backend/Cargo.toml`
     - `Cargo.lock`
     - `src/backend/src/lib.rs`
@@ -895,7 +919,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/backend/src/storage/keys.rs`
     - `src/backend/migrations/20260607000400_media_derivatives.up.sql`
     - `src/backend/migrations/20260607000400_media_derivatives.down.sql`
+    - `src/backend/migrations/20260617000100_video_mp4_uploads.up.sql`
+    - `src/backend/migrations/20260617000100_video_mp4_uploads.down.sql`
     - `src/backend/tests/media_worker.rs`
+    - `src/backend/tests/uploads.rs`
     - `src/backend/tests/worker_runtime.rs`
     - `src/backend/tests/storage_keys.rs`
     - `src/backend/tests/video_tools.rs`
@@ -908,7 +935,9 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Hand-built JPEG fixture verifies camera, capture time, GPS extraction,
       and that generated WebP derivatives do not preserve owner metadata.
     - External-tool tests verify real MP4 probing/poster generation, command
-      timeout kill, and rotation-correct display dimensions.
+      timeout kill, rotation-correct display dimensions, and no upscaling for
+      extensionless staged video inputs.
+    - Upload tests verify MP4 `ftyp` signature acceptance.
     - Storage test verifies oversized streamed staging removes its partial
       file.
     - Opt-in worker tests cover heartbeat lease retention and timeout retry.
@@ -923,8 +952,8 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       failing job.
     - Storage-key test rejects untrusted derivative generator segments.
   - Still pending:
-    - Run newest opt-in Postgres suite.
-    - Non-root container and deployment resource limits.
+    - Complete a backend image build/run once Docker Desktop registry DNS/proxy
+      is fixed.
     - Capability-tested HEIC/HEIF path.
 
 ### T302: Timeline API And Web/Android Timeline
@@ -968,10 +997,22 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Web tests live under `src/web/tests`, outside implementation source.
     - Vite 8 resolves the reported esbuild advisory; `npm audit` reports zero
       vulnerabilities.
+  - Android:
+    - `KtorMirrorApi` loads cursor-paginated `/assets` pages with Bearer auth.
+    - Compose timeline opens on the connected screen as a dense adaptive grid
+      with authenticated Coil thumbnail/preview loading, video markers,
+      automatic near-end page loading, manual load-more fallback, and a
+      full-screen preview dialog.
+    - Invalid stored endpoint data cannot crash Compose image rendering; bad
+      derivative URLs fall back to placeholders.
+    - Stale page responses from a previous credential cannot overwrite the
+      current timeline state.
   - Commands:
     - `make gate-backend` -> passed
     - `make gate-web` -> passed: typecheck, lint, seven Vitest tests,
       Playwright, and production build
+    - `make gate-android` -> passed: detekt, ktlint, unit tests, Android lint,
+      and debug APK build
     - Previous `make test-db` baseline passed; current integration remains
       pending while Docker Desktop is stopped.
   - Files touched:
@@ -989,6 +1030,16 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `src/web/playwright.config.ts`
     - `src/web/package.json`
     - `src/web/package-lock.json`
+    - `src/android/app/build.gradle.kts`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/MainActivity.kt`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/MirrorApplication.kt`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/network/MirrorApi.kt`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/network/TimelineApi.kt`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/timeline/TimelineRepository.kt`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/timeline/TimelineViewModel.kt`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/ui/MirrorApp.kt`
+    - `src/android/app/src/main/kotlin/app/mirror/vault/ui/TimelineContent.kt`
+    - `src/android/tests/app/mirror/vault/timeline/TimelineViewModelTest.kt`
     - `docs/tasks.md`
   - Tests:
     - Backend tests cover cursor paging without duplicates.
@@ -999,35 +1050,61 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Vitest covers cursor-page append and preview open/close behavior.
     - Playwright verifies 120-item DOM virtualization, second-page loading,
       preview rendering, and desktop/mobile layouts in system Chromium.
-  - Still pending:
-    - Android dense grid timeline.
+    - Android unit test covers page append, stale credential response
+      isolation, and render-safe invalid derivative URL fallback.
 
 ## M4: Safety, Sharing, Export, Backup
 
 ### T401: Private Shares
 
-- Status: [ ]
+- Status: [~]
 - Milestone: M4
 - Risk: High
 - Touched subsystems: backend, web, security, storage
 - Deliverables:
-  - Share-token creation, hashing, expiry, revocation.
-  - Share pages with privacy headers.
-  - Optional original-download policy.
+  - Backend share-token creation, hashing, expiry, revocation.
+  - Public backend share metadata and derivative routes with privacy headers.
+  - Optional original-download policy stored, with original-byte route deferred.
+  - Web share page.
 - Definition of done:
   - Revoked/expired links do not work.
   - Share pages omit GPS/full EXIF and people labels by default.
 - Required gates:
-  - share authorization tests
+  - backend share authorization/privacy tests
   - web share-page tests
 - Caveats/footguns:
   - Share pages must not include third-party scripts or leak referrers.
 - Completion evidence:
-  - Pending.
+  - Backend implemented:
+    - `asset_shares` migration with token hash, expiry, revocation, owner and
+      asset references.
+    - `shares` module for create/load/revoke and derivative lookup.
+    - Owner routes: `POST /assets/{asset_id}/shares`, `DELETE /shares/{share_id}`.
+    - Public routes: `GET /shares/{token}`,
+      `GET /shares/{token}/derivatives/{kind}`.
+    - Public responses set `Cache-Control: private, no-store`,
+      `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`, and
+      `X-Content-Type-Options: nosniff`.
+    - Shared public derivative policy avoids owner/share route drift.
+    - Share creation is owner-rate-limited before token minting, so rejected
+      requests do not leave usable unreturned raw tokens.
+  - Commands:
+    - `make gate-backend` -> passed.
+    - `make test-db` -> passed.
+  - Tests:
+    - `src/backend/tests/shares.rs` verifies raw tokens are not stored,
+      metadata omits owner-private fields, derivative bytes are served only via
+      valid share token, privacy headers are present, and revocation disables
+      the link.
+    - Share creation rate-limit test verifies the first rejected request returns
+      `429` and does not insert an extra share row.
+  - Still pending:
+    - Web share page and web route tests.
+    - Original-byte download route/auditing/range behavior if enabled later.
 
 ### T402: Trash, Export, Backup, Restore
 
-- Status: [ ]
+- Status: [~]
 - Milestone: M4
 - Risk: Critical
 - Touched subsystems: backend, storage, backups, security
@@ -1048,11 +1125,88 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     unrecoverable.
   - Trash and backup retention can interact in surprising ways.
 - Completion evidence:
-  - Pending.
+  - Backend partial:
+    - Added `assets.trashed_at` migration plus active/trash indexes.
+    - Added `DELETE /assets/{asset_id}` to move an owner asset to trash.
+    - Added `POST /assets/{asset_id}/restore` to restore a trashed owner asset.
+    - Added cursor-paginated `GET /trash/assets` for newest-trashed-first
+      owner trash listing.
+    - Active timeline and owner derivative reads exclude trashed assets.
+    - Share creation and existing public share reads exclude trashed assets.
+    - Trash is reversible and does not delete original or derivative objects.
+    - Added explicit `DELETE /assets/{asset_id}/purge` for already-trashed
+      assets only.
+    - Purge deletes the asset row, cascades metadata/derivatives/shares, deletes
+      the original database row only when no other asset references it, and
+      writes an `asset.purge` audit row in the same transaction.
+    - Purge does not delete content-addressed original bytes directly; any
+      unreferenced object cleanup remains explicit integrity remediation.
+    - Added authenticated `GET /exports/originals/manifest` for active-original
+      export metadata: asset ID, content hash, storage key, media type, byte
+      size, source filename, and creation timestamp.
+    - Added authenticated `GET /exports/originals/{asset_id}` to stream one
+      active original by manifest asset ID without materializing the whole
+      object in memory.
+    - Added authenticated `GET /exports/originals/archive.tar` to stream a
+      V1 tar export containing `manifest.json` plus active original bytes,
+      excluding trashed assets and avoiding whole-archive materialization.
+    - Archive tar support is intentionally limited to regular files with
+      simple generated paths; use a maintained tar crate instead of extending
+      this manual subset if V1 scope grows to long paths, directories,
+      compression, metadata preservation, symlinks, or broader archive
+      compatibility.
+    - Added durable storage backup manifest selection that includes only
+      content-addressed originals and generated derivatives, excluding staging,
+      temp, logs, and scratch by construction.
+    - Added restic backup command planning for explicit durable paths plus a DB
+      dump path, with repository/password supplied through environment variables
+      rather than argv.
+    - Added `maintenance --backup-plan PG_DUMP_PATH` dry-run output for the
+      restic program, args, and required secret environment variables.
+    - Added `maintenance --run-backup PG_DUMP_PATH --repository-hint HINT` to
+      create a `backup_runs` row, execute restic, persist the parsed snapshot
+      ID on success, and persist failure status on command failure.
+    - Added `maintenance --restore-check BACKUP_RUN_ID` to scan the currently
+      configured restored Postgres/storage pair, record restore-check status,
+      and fail the process when originals are missing or orphaned.
+  - Commands:
+    - `make gate-backend` -> passed.
+    - `make test-db` -> passed.
+  - Tests:
+    - Asset timeline integration test verifies trash hides an asset from
+      timeline and derivative routes, then restore returns it to the timeline.
+    - Trash listing integration test verifies cursor paging, no duplicates, and
+      no active asset leakage into trash results.
+    - Share integration test verifies an existing share returns `404` after its
+      asset is trashed.
+    - Purge integration test verifies active assets cannot be purged, trashed
+      assets can be purged, share rows cascade away, unreferenced original DB
+      rows are removed, and an audit row records permanent removal.
+    - Export manifest integration test verifies active originals are listed with
+      durable storage metadata and trashed assets are excluded.
+    - Export byte integration test verifies active original bytes stream with
+      content type/length headers and trashed originals return `404`.
+    - Export archive integration test verifies the streamed tar contains the
+      JSON manifest and active original bytes while excluding trashed assets.
+    - Backup manifest test verifies durable originals/derivatives are selected
+      and staged upload objects are excluded.
+    - Restic plan tests verify durable paths are explicit, broad storage-root
+      backup is not used, secret values are not represented in argv, and parent
+      relative paths are rejected.
+    - Maintenance CLI test verifies backup-plan output works without database
+      access and reports restic inputs/env requirements.
+    - Maintenance CLI DB test uses a fake restic executable to verify backup
+      execution records a succeeded run, parsed snapshot ID, redacted
+      repository hint, and secret-free manifest.
+    - Maintenance CLI restore-check test verifies a missing restored original
+      object marks the backup run `restore_check_failed` with mismatch counts.
+  - Still pending:
+    - Full restore drill against a freshly restored Postgres database and empty
+      storage root populated from restic.
 
 ### T403: Security And Rate Limits
 
-- Status: [ ]
+- Status: [~]
 - Milestone: M4
 - Risk: High
 - Touched subsystems: backend, security, infra
@@ -1072,7 +1226,81 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - Process-local limits are not persistent; only SQLx limits protect sensitive
     flows across restarts.
 - Completion evidence:
-  - Pending.
+  - Backend partial:
+    - Added `rate_limit` module backed by `rate_limit_buckets`.
+    - Owner password login attempts are keyed by request peer IP and stored as
+      keyed BLAKE3 hashes; raw IPs and credentials are not stored.
+    - `/auth/login` and `/auth/device-login` reject blocked buckets before
+      password verification, record failed password attempts, and clear the
+      bucket on successful authentication.
+    - `MIRROR_RATE_LIMIT_SECRET` supplies stable key material. If absent, local
+      dev uses a process-random fallback, which intentionally does not provide
+      restart-stable buckets.
+    - API returns stable `429 rate_limited` responses for blocked login flows.
+    - `Config` debug output redacts `MIRROR_DATABASE_URL` and
+      `MIRROR_RATE_LIMIT_SECRET` material.
+    - `MIRROR_TRUSTED_PROXIES` accepts comma-separated CIDRs. `X-Forwarded-For`
+      is trusted only when the immediate peer IP is inside those ranges.
+    - Forwarded client IP resolution walks the header chain right-to-left and
+      returns the nearest untrusted address, falling back to the socket peer.
+    - Owner password login rate limits use the trusted-proxy-aware client IP;
+      spoofed forwarded headers from untrusted peers do not bypass buckets.
+    - Share creation uses the same Postgres limiter with an owner-scoped key,
+      limiting public-link minting before tokens are generated.
+    - Upload creation, upload part writes, and upload completion use
+      owner-scoped Postgres quota buckets before session creation, body
+      staging, or hash verification/promotion.
+    - Original export manifest and original byte routes use owner-scoped
+      Postgres quota buckets before producing manifests or streaming bytes.
+    - `OpaqueToken` and `TokenHash` debug output is redacted so accidental
+      diagnostic formatting cannot expose session, CSRF, device, or share
+      tokens.
+  - Commands:
+    - `make gate-backend` -> passed.
+    - `make test-db` -> passed against local Postgres.
+  - Files touched:
+    - `src/backend/src/config.rs`
+    - `src/backend/src/http/auth.rs`
+    - `src/backend/src/http/client_ip.rs`
+    - `src/backend/src/http/error.rs`
+    - `src/backend/src/http/mod.rs`
+    - `src/backend/src/http/exports.rs`
+    - `src/backend/src/http/shares.rs`
+    - `src/backend/src/http/uploads.rs`
+    - `src/backend/src/auth/tokens.rs`
+    - `src/backend/src/lib.rs`
+    - `src/backend/src/rate_limit.rs`
+    - `src/backend/tests/client_ip.rs`
+    - `src/backend/tests/config_security.rs`
+    - `src/backend/tests/device_token_security.rs`
+    - `src/backend/tests/exports.rs`
+    - `src/backend/tests/support/mod.rs`
+    - `src/backend/tests/token_security.rs`
+    - `src/backend/tests/upload_http.rs`
+    - `docs/tasks.md`
+  - Tests:
+    - HTTP device-login test proves repeated failed owner-password attempts
+      return `429` and block a later correct password without issuing a device
+      token.
+    - Config security test proves secret-bearing config values are redacted
+      from debug output.
+    - Client-IP tests prove forwarded headers are ignored from untrusted peers
+      and honored from configured trusted proxy CIDRs.
+    - Device-login rate-limit test changes spoofed forwarded IPs across
+      attempts and still receives `429`, proving untrusted forwarded headers do
+      not bypass the limiter.
+    - Share route test verifies repeated share creation returns `429` before
+      creating another `asset_shares` row.
+    - Export manifest route test verifies repeated manifest reads return `429`
+      and store only hashed owner-scoped limiter keys.
+    - Upload-create route test verifies a persisted limiter bucket returns
+      `429` before inserting an upload session.
+    - Token security test verifies debug output redacts raw tokens and token
+      hashes.
+  - Still pending:
+    - Process-local limiter for cheap prefiltering if still needed.
+    - Rate limits for future upload/export/backup/restore/recovery flows as
+      those routes land.
 
 ## M5: Optional ML
 
