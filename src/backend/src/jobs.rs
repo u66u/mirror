@@ -135,8 +135,7 @@ pub async fn enqueue_in_tx(
     .bind(spec.priority)
     .bind(spec.run_after)
     .execute(&mut **tx)
-    .await
-    .map_err(JobError::Database)?;
+    .await?;
 
     Ok(())
 }
@@ -209,8 +208,7 @@ pub async fn lease_next_for_kinds(
     .bind(lease_expired_before)
     .bind(kind_names)
     .fetch_optional(pool)
-    .await
-    .map_err(JobError::Database)?;
+    .await?;
 
     row.map(|(id, kind, payload, attempts, max_attempts)| {
         Ok(LeasedJob {
@@ -238,8 +236,7 @@ pub async fn heartbeat(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<b
     .bind(job_id)
     .bind(worker_id)
     .execute(pool)
-    .await
-    .map_err(JobError::Database)?
+    .await?
     .rows_affected();
 
     Ok(updated == 1)
@@ -264,8 +261,7 @@ pub async fn complete(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<bo
     .bind(job_id)
     .bind(worker_id)
     .execute(pool)
-    .await
-    .map_err(JobError::Database)?
+    .await?
     .rows_affected();
 
     Ok(updated == 1)
@@ -299,7 +295,7 @@ pub async fn fail_with_outcome(
     worker_id: &str,
     message: &str,
 ) -> Result<Option<JobFailureOutcome>, JobError> {
-    let mut tx = pool.begin().await.map_err(JobError::Database)?;
+    let mut tx = pool.begin().await?;
 
     let Some((kind, payload, attempts, max_attempts)) =
         sqlx::query_as::<_, (String, Json<Value>, i32, i32)>(
@@ -315,8 +311,7 @@ pub async fn fail_with_outcome(
         .bind(job_id)
         .bind(worker_id)
         .fetch_optional(&mut *tx)
-        .await
-        .map_err(JobError::Database)?
+        .await?
     else {
         return Ok(None);
     };
@@ -358,12 +353,11 @@ pub async fn fail_with_outcome(
     .bind(run_after)
     .bind(Json(last_error))
     .execute(&mut *tx)
-    .await
-    .map_err(JobError::Database)?
+    .await?
     .rows_affected()
         == 1;
 
-    tx.commit().await.map_err(JobError::Database)?;
+    tx.commit().await?;
 
     Ok(Some(JobFailureOutcome {
         updated,

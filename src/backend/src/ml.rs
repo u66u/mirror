@@ -353,7 +353,7 @@ async fn commit_embed_asset_success(
     embedding: &ValidatedEmbedding,
     embedding_dimension: i32,
 ) -> Result<(), MlError> {
-    let mut tx = pool.begin().await.map_err(MlError::Database)?;
+    let mut tx = pool.begin().await?;
 
     semantic_index::upsert_asset_embedding_with_dimension_in_tx(
         &mut tx,
@@ -374,7 +374,7 @@ async fn commit_embed_asset_success(
     )
     .await?;
 
-    tx.commit().await.map_err(MlError::Database)?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -403,8 +403,7 @@ async fn record_reindex_asset_result_in_tx(
     .bind(succeeded)
     .bind(error_message)
     .fetch_optional(&mut **tx)
-    .await
-    .map_err(MlError::Database)?
+    .await?
     .unwrap_or(false);
 
     let exists = sqlx::query_scalar::<_, bool>(
@@ -419,8 +418,7 @@ async fn record_reindex_asset_result_in_tx(
     .bind(reindex_run_id)
     .bind(asset_id)
     .fetch_optional(&mut **tx)
-    .await
-    .map_err(MlError::Database)?
+    .await?
     .unwrap_or(false);
 
     if !exists {
@@ -456,8 +454,7 @@ async fn record_reindex_asset_result_in_tx(
         .bind(reindex_run_id)
         .bind(succeeded)
         .execute(&mut **tx)
-        .await
-        .map_err(MlError::Database)?;
+        .await?;
     }
 
     Ok(())
@@ -531,8 +528,7 @@ async fn load_embed_asset(
     .bind(payload.model_pack_id)
     .bind(payload.reindex_run_id)
     .fetch_optional(pool)
-    .await
-    .map_err(MlError::Database)?;
+    .await?;
 
     let Some((storage_key, media_type, embedding_dimension, distance_metric, manifest, status)) =
         row
@@ -568,8 +564,7 @@ async fn active_semantic_model_pack(pool: &PgPool) -> Result<ActiveSemanticModel
         "#,
     )
     .fetch_optional(pool)
-    .await
-    .map_err(MlError::Database)?;
+    .await?;
 
     let Some((model_pack_id, embedding_dimension, distance_metric, manifest)) = row else {
         return Err(MlError::NotFound);

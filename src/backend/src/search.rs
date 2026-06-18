@@ -104,8 +104,7 @@ pub async fn search_assets(
     .bind(format!("%{}%", escape_like(&query)))
     .bind(limit)
     .fetch_all(pool)
-    .await
-    .map_err(SearchError::Database)?;
+    .await?;
 
     Ok(AssetSearchPage {
         items: rows.into_iter().map(AssetTimelineItem::from).collect(),
@@ -176,8 +175,7 @@ pub async fn search_assets_by_public_ids(
     .bind(owner_id)
     .bind(asset_public_ids)
     .fetch_all(pool)
-    .await
-    .map_err(SearchError::Database)?;
+    .await?;
 
     Ok(AssetSearchPage {
         items: rows.into_iter().map(AssetTimelineItem::from).collect(),

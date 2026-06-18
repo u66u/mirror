@@ -125,8 +125,7 @@ pub async fn original_manifest(
     )
     .bind(input.owner_id)
     .fetch_all(pool)
-    .await
-    .map_err(ExportError::Database)?;
+    .await?;
 
     Ok(ExportManifest {
         generated_at: OffsetDateTime::now_utc(),
@@ -174,8 +173,7 @@ pub async fn original_blob(
     .bind(input.owner_id)
     .bind(input.asset_public_id)
     .fetch_optional(pool)
-    .await
-    .map_err(ExportError::Database)?
+    .await?
     .ok_or(ExportError::NotFound)?;
 
     Ok(ExportOriginal {

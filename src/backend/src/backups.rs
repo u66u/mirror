@@ -337,8 +337,7 @@ pub fn run_postgres_dump_plan(
     let output = Command::new(plan.program)
         .args(&plan.args)
         .env("PGDATABASE", database_url)
-        .output()
-        .map_err(BackupError::Command)?;
+        .output()?;
     if output.status.success() {
         Ok(())
     } else {
@@ -354,8 +353,7 @@ pub fn run_postgres_dump_plan(
 pub fn run_restic_backup_plan(plan: &ResticBackupPlan) -> Result<ResticBackupOutput, BackupError> {
     let output = Command::new(plan.program)
         .args(&plan.args)
-        .output()
-        .map_err(BackupError::Command)?;
+        .output()?;
     if !output.status.success() {
         return Err(BackupError::ResticFailed);
     }

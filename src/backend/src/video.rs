@@ -165,13 +165,11 @@ impl VideoProcessor for FfmpegVideoProcessor {
         command.arg(&output);
         run_command(&mut command, self.command_timeout, false)?;
 
-        let size = std::fs::metadata(&output)
-            .map_err(VideoToolError::Io)?
-            .len();
+        let size = std::fs::metadata(&output)?.len();
         if size == 0 || size > MAX_POSTER_BYTES {
             return Err(VideoToolError::PosterSizeOutOfRange);
         }
-        std::fs::read(output).map_err(VideoToolError::Io)
+        std::fs::read(output).map_err(From::from)
     }
 }
 
@@ -244,12 +242,12 @@ fn run_command(
     let started = Instant::now();
 
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(VideoToolError::Io)? {
+        if let Some(status) = child.try_wait()? {
             break status;
         }
         if started.elapsed() >= timeout {
-            child.kill().map_err(VideoToolError::Io)?;
-            child.wait().map_err(VideoToolError::Io)?;
+            child.kill()?;
+            child.wait()?;
             return Err(VideoToolError::TimedOut);
         }
         thread::sleep(PROCESS_POLL_INTERVAL.min(timeout));
@@ -269,8 +267,7 @@ fn read_bounded(mut file: impl Read, max_bytes: u64) -> Result<Vec<u8>, VideoToo
     let mut output = Vec::new();
     file.by_ref()
         .take(max_bytes + 1)
-        .read_to_end(&mut output)
-        .map_err(VideoToolError::Io)?;
+        .read_to_end(&mut output)?;
     if u64::try_from(output.len()).map_err(|_| VideoToolError::OutputTooLarge)? > max_bytes {
         return Err(VideoToolError::OutputTooLarge);
     }

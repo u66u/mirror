@@ -41,8 +41,7 @@ pub async fn is_blocked(
     .bind(key_hash.as_slice())
     .bind(now)
     .fetch_one(pool)
-    .await
-    .map_err(RateLimitError::Database)?;
+    .await?;
 
     Ok(blocked)
 }
@@ -156,8 +155,7 @@ async fn record_counted_attempt(
     .bind(block_until)
     .bind(window_expires_at)
     .fetch_one(pool)
-    .await
-    .map_err(RateLimitError::Database)?;
+    .await?;
 
     Ok(blocked_until.is_some_and(|until| until > input.now))
 }
@@ -180,8 +178,7 @@ pub async fn clear(
     .bind(action)
     .bind(key_hash.as_slice())
     .execute(pool)
-    .await
-    .map_err(RateLimitError::Database)?;
+    .await?;
     Ok(())
 }
 

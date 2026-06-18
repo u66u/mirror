@@ -133,8 +133,7 @@ pub async fn create_upload(
     .bind(&input.media_type)
     .bind(input.client_upload_key)
     .fetch_optional(pool)
-    .await
-    .map_err(UploadError::Database)?;
+    .await?;
 
     let upload_id = if let Some(upload_id) = inserted_upload_id {
         upload_id
@@ -153,8 +152,7 @@ pub async fn create_upload(
         .bind(input.owner_id)
         .bind(client_upload_key)
         .fetch_optional(pool)
-        .await
-        .map_err(UploadError::Database)?
+        .await?
         .ok_or(UploadError::InvalidInput)?;
 
         if existing.1 != input.original_filename
@@ -214,8 +212,7 @@ pub async fn put_part(
 
     storage
         .write(&key, bytes)
-        .await
-        .map_err(UploadError::Storage)?;
+        .await?;
 
     sqlx::query(
         r#"
@@ -235,8 +232,7 @@ pub async fn put_part(
     .bind(key.as_str())
     .bind(hash)
     .execute(pool)
-    .await
-    .map_err(UploadError::Database)?;
+    .await?;
 
     Ok(())
 }
@@ -280,7 +276,7 @@ pub async fn complete_upload(
 
     for part in parts {
         let key = StorageKey::new(part.storage_key).map_err(|_| UploadError::VerificationFailed)?;
-        let bytes = storage.read(&key).await.map_err(UploadError::Storage)?;
+        let bytes = storage.read(&key).await?;
         let bytes_len = i64::try_from(bytes.len()).map_err(|_| UploadError::VerificationFailed)?;
         if bytes_len != part.size_bytes
             || blake3::hash(&bytes).to_hex().as_str() != part.blake3_hash
@@ -318,8 +314,7 @@ pub async fn complete_upload(
     .bind(upload_id)
     .bind(owner_id)
     .execute(pool)
-    .await
-    .map_err(UploadError::Database)?;
+    .await?;
 
     get_upload(pool, owner_id, upload_id).await
 }
@@ -344,8 +339,7 @@ pub async fn cancel_upload(
     .bind(upload_id)
     .bind(owner_id)
     .execute(pool)
-    .await
-    .map_err(UploadError::Database)?;
+    .await?;
 
     if result.rows_affected() == 0 {
         return Err(UploadError::NotFound);
@@ -386,8 +380,7 @@ async fn load_upload(
     .bind(upload_id)
     .bind(owner_id)
     .fetch_optional(pool)
-    .await
-    .map_err(UploadError::Database)?
+    .await?
     .ok_or(UploadError::NotFound)?;
 
     Ok(UploadRow {
@@ -410,7 +403,6 @@ async fn committed_parts(pool: &PgPool, upload_id: Uuid) -> Result<Vec<i32>, Upl
     .bind(upload_id)
     .fetch_all(pool)
     .await
-    .map_err(UploadError::Database)
 }
 
 async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, UploadError> {
@@ -424,8 +416,7 @@ async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, Uploa
     )
     .bind(upload_id)
     .fetch_all(pool)
-    .await
-    .map_err(UploadError::Database)?;
+    .await?;
 
     Ok(rows
         .into_iter()

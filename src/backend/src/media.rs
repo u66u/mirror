@@ -113,8 +113,7 @@ impl ImageProcessor for RustImageProcessor {
         let (width, height) = resized.dimensions();
         let mut output = Cursor::new(Vec::new());
         resized
-            .write_to(&mut output, ImageFormat::WebP)
-            .map_err(MediaToolError::Image)?;
+            .write_to(&mut output, ImageFormat::WebP)?;
 
         Ok(GeneratedDerivative {
             bytes: output.into_inner(),
@@ -241,8 +240,7 @@ where
     .bind(i32::try_from(height).map_err(|_| MediaError::UnsupportedMediaType)?)
     .bind(Json(raw))
     .execute(pool)
-    .await
-    .map_err(MediaError::Database)?;
+    .await?;
 
     Ok(())
 }
@@ -265,9 +263,8 @@ async fn extract_image_metadata(
         Ok::<_, MediaToolError>((info, extract_owner_metadata(bytes)))
     })
     .await
-    .map_err(|_| MediaError::ProcessingTaskFailed)?
-    .map_err(MediaError::Tool)?;
-    let raw = json!({
+    .map_err(|_| MediaError::ProcessingTaskFailed)??;
+        let raw = json!({
         "width": info.width,
         "height": info.height,
         "extractor": METADATA_VERSION,
@@ -289,8 +286,7 @@ async fn extract_video_metadata(
         processor.inspect(&input)
     })
     .await
-    .map_err(|_| MediaError::ProcessingTaskFailed)?
-    .map_err(MediaError::VideoTool)?;
+    .map_err(|_| MediaError::ProcessingTaskFailed)??;
     let raw = json!({
         "width": info.width,
         "height": info.height,
@@ -421,11 +417,10 @@ where
         )
         .map_err(|_| MediaError::UnsupportedMediaType)?;
 
-        if !storage.exists(&key).await.map_err(MediaError::Storage)? {
+        if !storage.exists(&key).await? {
             storage
                 .write(&key, generated.bytes.clone())
-                .await
-                .map_err(MediaError::Storage)?;
+                .await?;
         }
 
         sqlx::query(
@@ -463,8 +458,7 @@ where
         .bind(i32::try_from(generated.height).map_err(|_| MediaError::UnsupportedMediaType)?)
         .bind(i64::try_from(generated.bytes.len()).map_err(|_| MediaError::UnsupportedMediaType)?)
         .execute(pool)
-        .await
-        .map_err(MediaError::Database)?;
+        .await?;
     }
 
     Ok(())
@@ -485,8 +479,7 @@ async fn generate_image_derivatives(
     let media_type = original.media_type.clone();
     tokio::task::spawn_blocking(move || generate_image_sizes(&processor, &bytes, &media_type))
         .await
-        .map_err(|_| MediaError::ProcessingTaskFailed)?
-        .map_err(MediaError::Tool)
+        .map_err(|_| MediaError::ProcessingTaskFailed)??
 }
 
 async fn generate_video_derivatives(
@@ -506,15 +499,13 @@ async fn generate_video_derivatives(
         video_processor.generate_poster(&input, poster_edge)
     })
     .await
-    .map_err(|_| MediaError::ProcessingTaskFailed)?
-    .map_err(MediaError::VideoTool)?;
+    .map_err(|_| MediaError::ProcessingTaskFailed)??;
     let image_processor = image_processor.clone();
     tokio::task::spawn_blocking(move || {
         generate_image_sizes(&image_processor, &poster, "image/webp")
     })
     .await
-    .map_err(|_| MediaError::ProcessingTaskFailed)?
-    .map_err(MediaError::Tool)
+    .map_err(|_| MediaError::ProcessingTaskFailed)??
 }
 
 fn generate_image_sizes(
@@ -563,8 +554,7 @@ async fn load_asset_original(pool: &PgPool, asset_id: Uuid) -> Result<AssetOrigi
     )
     .bind(asset_id)
     .fetch_optional(pool)
-    .await
-    .map_err(MediaError::Database)?
+    .await?
     .map(
         |(blake3_hash, storage_key, media_type, size_bytes)| AssetOriginal {
             blake3_hash,
@@ -608,8 +598,7 @@ async fn stage_video_original(
     }
     let temp_dir = tempfile::Builder::new()
         .prefix("mirror-media-")
-        .tempdir()
-        .map_err(MediaError::TemporaryStorage)?;
+        .tempdir()?;
     let input = temp_dir.path().join("original");
     let copied = storage
         .copy_to_path_bounded(
@@ -617,8 +606,7 @@ async fn stage_video_original(
             &input,
             MAX_VIDEO_SOURCE_BYTES as u64,
         )
-        .await
-        .map_err(MediaError::Storage)?;
+        .await?;
     if copied != u64::try_from(original.size_bytes).map_err(|_| MediaError::OriginalSizeMismatch)? {
         return Err(MediaError::OriginalSizeMismatch);
     }
@@ -648,5 +636,5 @@ fn decode_image(bytes: &[u8], media_type: &str) -> Result<image::DynamicImage, M
 
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(limits);
-    reader.decode().map_err(MediaToolError::Image)
+    reader.decode().map_err(From::from)
 }
