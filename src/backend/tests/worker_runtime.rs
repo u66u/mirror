@@ -1,14 +1,18 @@
-use std::time::Duration;
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 use mirror_backend::{
     assets::promote_verified_upload,
     jobs::{self, JobKind, JobSpec, enqueue_in_tx},
     media::RustImageProcessor,
-    ml::semantic_text_search,
+    ml::{
+        EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError, MlRuntime,
+        semantic_text_search,
+    },
     models::{
         activate_model_pack, install_model_pack, record_model_pack_self_test, start_model_reindex,
     },
     semantic_index::semantic_search,
+    storage::StorageKey,
     worker::{WorkerHandlers, WorkerPolicy, WorkerPolicyError, WorkerStep, run_once},
 };
 use serde_json::json;
@@ -17,14 +21,15 @@ use uuid::Uuid;
 
 mod support;
 use support::{
-    DelayedImageProcessor, FakeImageProcessor, FakeImageTextEmbedder, FakeVideoProcessor,
-    TestResult, create_verified_jpeg_upload, storage_test_deps, valid_model_pack_manifest,
+    DelayedImageProcessor, FakeImageProcessor, FakeVideoProcessor, TestResult,
+    create_verified_jpeg_upload, fake_ml_runtime, storage_test_deps, valid_model_pack_manifest,
 };
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn worker_runs_queued_media_jobs_to_completion() -> TestResult {
     let deps = storage_test_deps().await?;
+    let ml_runtime = fake_ml_runtime();
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "worker.jpg").await?;
     promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
 
@@ -34,7 +39,7 @@ async fn worker_runs_queued_media_jobs_to_completion() -> TestResult {
             storage: &deps.storage,
             image_processor: &FakeImageProcessor,
             video_processor: &FakeVideoProcessor,
-            embedder: &FakeImageTextEmbedder,
+            ml_runtime: &ml_runtime,
             job_kinds: &MEDIA_JOB_KINDS,
         },
         "worker-a",
@@ -47,7 +52,7 @@ async fn worker_runs_queued_media_jobs_to_completion() -> TestResult {
             storage: &deps.storage,
             image_processor: &FakeImageProcessor,
             video_processor: &FakeVideoProcessor,
-            embedder: &FakeImageTextEmbedder,
+            ml_runtime: &ml_runtime,
             job_kinds: &MEDIA_JOB_KINDS,
         },
         "worker-a",
@@ -68,6 +73,7 @@ async fn worker_runs_queued_media_jobs_to_completion() -> TestResult {
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn worker_records_handler_failure_as_dead_job_at_max_attempts() -> TestResult {
     let deps = storage_test_deps().await?;
+    let ml_runtime = fake_ml_runtime();
     let mut tx = deps.pool.begin().await?;
     enqueue_in_tx(
         &mut tx,
@@ -89,7 +95,7 @@ async fn worker_records_handler_failure_as_dead_job_at_max_attempts() -> TestRes
             storage: &deps.storage,
             image_processor: &RustImageProcessor,
             video_processor: &FakeVideoProcessor,
-            embedder: &FakeImageTextEmbedder,
+            ml_runtime: &ml_runtime,
             job_kinds: &MEDIA_JOB_KINDS,
         },
         "worker-a",
@@ -107,6 +113,7 @@ async fn worker_records_handler_failure_as_dead_job_at_max_attempts() -> TestRes
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn worker_times_out_slow_media_and_records_retry() -> TestResult {
     let deps = storage_test_deps().await?;
+    let ml_runtime = fake_ml_runtime();
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "timeout.jpg").await?;
     promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
     sqlx::query("DELETE FROM jobs WHERE kind = 'generate_derivatives'")
@@ -126,7 +133,7 @@ async fn worker_times_out_slow_media_and_records_retry() -> TestResult {
                 delay: Duration::from_millis(100),
             },
             video_processor: &FakeVideoProcessor,
-            embedder: &FakeImageTextEmbedder,
+            ml_runtime: &ml_runtime,
             job_kinds: &MEDIA_JOB_KINDS,
         },
         "worker-timeout",
@@ -155,6 +162,7 @@ async fn worker_heartbeat_prevents_slow_job_reclaim() -> TestResult {
         .await?;
     let pool = deps.pool.clone();
     let storage = deps.storage.clone();
+    let ml_runtime = fake_ml_runtime();
     let policy = WorkerPolicy::new(
         Duration::from_millis(80),
         Duration::from_secs(1),
@@ -169,7 +177,7 @@ async fn worker_heartbeat_prevents_slow_job_reclaim() -> TestResult {
                     delay: Duration::from_millis(150),
                 },
                 video_processor: &FakeVideoProcessor,
-                embedder: &FakeImageTextEmbedder,
+                ml_runtime: &ml_runtime,
                 job_kinds: &MEDIA_JOB_KINDS,
             },
             "worker-heartbeat",
@@ -192,6 +200,7 @@ async fn worker_heartbeat_prevents_slow_job_reclaim() -> TestResult {
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn worker_runs_embed_asset_job_to_semantic_index() -> TestResult {
     let deps = storage_test_deps().await?;
+    let ml_runtime = fake_ml_runtime();
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "embed.jpg").await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
     sqlx::query("DELETE FROM jobs").execute(&deps.pool).await?;
@@ -208,7 +217,7 @@ async fn worker_runs_embed_asset_job_to_semantic_index() -> TestResult {
             storage: &deps.storage,
             image_processor: &FakeImageProcessor,
             video_processor: &FakeVideoProcessor,
-            embedder: &FakeImageTextEmbedder,
+            ml_runtime: &ml_runtime,
             job_kinds: &ALL_JOB_KINDS,
         },
         "worker-embed",
@@ -230,8 +239,150 @@ async fn worker_runs_embed_asset_job_to_semantic_index() -> TestResult {
 
     assert_eq!(step, WorkerStep::Completed);
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].asset_id, promoted.asset_id);
+    assert_eq!(hits[0].asset_public_id, promoted.asset_id);
     assert_eq!(status, "succeeded");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn worker_dead_lettered_embed_job_records_reindex_failure() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let upload_id =
+        create_verified_jpeg_upload(&deps.pool, &deps.storage, "dead-embed.jpg").await?;
+    promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
+    sqlx::query("DELETE FROM jobs").execute(&deps.pool).await?;
+
+    let manifest = valid_model_pack_manifest();
+    let pack = install_model_pack(&deps.pool, manifest).await?;
+    record_model_pack_self_test(&deps.pool, pack.model_pack_id, true, None).await?;
+    activate_model_pack(&deps.pool, pack.model_pack_id).await?;
+    let run = start_model_reindex(&deps.pool, pack.model_pack_id).await?;
+    sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = 'embed_asset'")
+        .execute(&deps.pool)
+        .await?;
+    let ml_runtime = MlRuntime::new(Arc::new(FailingImageTextEmbedder), NonZeroUsize::MIN);
+
+    let step = run_once(
+        &deps.pool,
+        WorkerHandlers {
+            storage: &deps.storage,
+            image_processor: &FakeImageProcessor,
+            video_processor: &FakeVideoProcessor,
+            ml_runtime: &ml_runtime,
+            job_kinds: &ALL_JOB_KINDS,
+        },
+        "worker-dead-embed",
+        WorkerPolicy::production(),
+    )
+    .await?;
+    let (job_status, run_status, failed_assets): (String, String, i32) = sqlx::query_as(
+        r#"
+        SELECT j.status, rr.status, rr.failed_assets
+        FROM jobs j
+        CROSS JOIN model_reindex_runs rr
+        WHERE rr.id = $1
+          AND j.kind = 'embed_asset'
+        "#,
+    )
+    .bind(run.reindex_run_id)
+    .fetch_one(&deps.pool)
+    .await?;
+    let asset_error: Option<String> = sqlx::query_scalar(
+        "SELECT error_message FROM model_reindex_assets WHERE reindex_run_id = $1",
+    )
+    .bind(run.reindex_run_id)
+    .fetch_one(&deps.pool)
+    .await?;
+
+    assert_eq!(step, WorkerStep::Failed);
+    assert_eq!(job_status, "dead");
+    assert_eq!(run_status, "failed");
+    assert_eq!(failed_assets, 1);
+    assert_eq!(asset_error.as_deref(), Some("ml runtime unavailable"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn worker_records_oversized_embed_input_as_terminal_reindex_failure() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let bytes = vec![0xff; 9];
+    let size_bytes = i64::try_from(bytes.len())?;
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let storage_key = StorageKey::new(format!("originals/blake3/{hash}"))?;
+    let original_id = Uuid::now_v7();
+    let asset_id = Uuid::now_v7();
+    let public_id = Uuid::now_v7();
+    deps.storage.write(&storage_key, bytes).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO originals (id, blake3_hash, storage_key, size_bytes, media_type)
+        VALUES ($1, $2, $3, $4, 'image/jpeg')
+        "#,
+    )
+    .bind(original_id)
+    .bind(&hash)
+    .bind(storage_key.as_str())
+    .bind(size_bytes)
+    .execute(&deps.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO assets (id, public_id, owner_id, original_id)
+        VALUES ($1, $2, 1, $3)
+        "#,
+    )
+    .bind(asset_id)
+    .bind(public_id)
+    .bind(original_id)
+    .execute(&deps.pool)
+    .await?;
+
+    let manifest = valid_model_pack_manifest();
+    let pack = install_model_pack(&deps.pool, manifest).await?;
+    record_model_pack_self_test(&deps.pool, pack.model_pack_id, true, None).await?;
+    activate_model_pack(&deps.pool, pack.model_pack_id).await?;
+    let run = start_model_reindex(&deps.pool, pack.model_pack_id).await?;
+    let ml_runtime = MlRuntime::with_max_image_bytes(
+        Arc::new(support::FakeImageTextEmbedder),
+        NonZeroUsize::MIN,
+        8,
+    );
+
+    let step = run_once(
+        &deps.pool,
+        WorkerHandlers {
+            storage: &deps.storage,
+            image_processor: &FakeImageProcessor,
+            video_processor: &FakeVideoProcessor,
+            ml_runtime: &ml_runtime,
+            job_kinds: &ALL_JOB_KINDS,
+        },
+        "worker-large-embed",
+        WorkerPolicy::production(),
+    )
+    .await?;
+    let (job_status, run_status, asset_error): (String, String, Option<String>) = sqlx::query_as(
+        r#"
+        SELECT j.status, rr.status, ra.error_message
+        FROM jobs j
+        JOIN model_reindex_runs rr ON rr.id = $1
+        JOIN model_reindex_assets ra ON ra.reindex_run_id = rr.id
+        WHERE j.kind = 'embed_asset'
+        "#,
+    )
+    .bind(run.reindex_run_id)
+    .fetch_one(&deps.pool)
+    .await?;
+
+    assert_eq!(step, WorkerStep::Completed);
+    assert_eq!(job_status, "done");
+    assert_eq!(run_status, "failed");
+    assert_eq!(
+        asset_error.as_deref(),
+        Some("ml image exceeds embedding byte limit")
+    );
     Ok(())
 }
 
@@ -259,10 +410,11 @@ async fn semantic_text_search_embeds_query_with_active_model_pack() -> TestResul
     )
     .await?;
 
-    let hits = semantic_text_search(&deps.pool, &FakeImageTextEmbedder, 1, "cat", 10).await?;
+    let ml_runtime = fake_ml_runtime();
+    let hits = semantic_text_search(&deps.pool, &ml_runtime, 1, "cat", 10).await?;
 
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].asset_id, promoted.asset_id);
+    assert_eq!(hits[0].asset_public_id, promoted.asset_id);
     assert!(hits[0].score.is_finite());
     Ok(())
 }
@@ -305,3 +457,15 @@ const ALL_JOB_KINDS: [JobKind; 3] = [
     JobKind::GenerateDerivatives,
     JobKind::EmbedAsset,
 ];
+
+struct FailingImageTextEmbedder;
+
+impl ImageTextEmbedder for FailingImageTextEmbedder {
+    fn embed_image(&self, _request: EmbedImageRequest<'_>) -> Result<Vec<f32>, MlError> {
+        Err(MlError::RuntimeUnavailable)
+    }
+
+    fn embed_text(&self, _request: EmbedTextRequest<'_>) -> Result<Vec<f32>, MlError> {
+        Err(MlError::RuntimeUnavailable)
+    }
+}

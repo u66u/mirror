@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-use mirror_backend::config::{Config, RateLimitSecret};
+use mirror_backend::config::{Config, MlDevicePreference, RateLimitSecret};
 
 #[test]
 fn config_debug_redacts_secret_values() {
@@ -11,6 +11,8 @@ fn config_debug_redacts_secret_values() {
         storage_root: PathBuf::from("/vault"),
         rate_limit_secret: RateLimitSecret::from_secret("rate-secret"),
         trusted_proxies: Vec::new(),
+        ml_device: MlDevicePreference::GpuWithCpuFallback,
+        ml_max_image_bytes: 25 * 1024 * 1024,
     };
 
     let debug = format!("{config:?}");

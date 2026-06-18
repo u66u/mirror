@@ -1410,6 +1410,22 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       `embed_asset` job handling: load active image original, run embedder,
       validate vector, upsert semantic index row, and mark reindex progress
       succeeded.
+    - Added `MlRuntime` wrapper so synchronous image/text embedding runs on
+      Tokio's blocking pool behind a concurrency limit instead of blocking async
+      workers.
+    - Added explicit `MIRROR_ML_DEVICE` policy parsing with
+      GPU-with-CPU-fallback as the default operator intent; real runtime device
+      selection remains pending with the runtime embedder.
+    - Added configurable bounded object reads for embedding inputs
+      (`MIRROR_ML_MAX_IMAGE_BYTES`, default 25 MiB) and strict v1 still-image
+      media-type handling: JPEG/PNG only until GIF/WebP animation semantics are
+      explicit.
+    - Embed job payloads are cross-checked against reindex run/asset/model
+      rows, and final semantic-index plus reindex-progress writes happen in one
+      transaction.
+    - Queue failure reporting now returns a `JobFailureOutcome`; worker
+      dead-letter handling records retry-exhausted `embed_asset` jobs as failed
+      reindex assets.
   - Commands:
     - `make gate-backend` -> passed.
     - `make test-db` -> passed.
@@ -1426,6 +1442,8 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       reports.
     - Worker runtime DB test verifies an `embed_asset` job writes a semantic
       embedding and marks the reindex run succeeded.
+    - Worker runtime DB test verifies a retry-exhausted `embed_asset` job
+      records failed reindex progress when it dead-letters.
     - Model-pack file install test verifies checksum/size enforcement and
       durable `model-packs/` storage namespace writes.
     - Embedding output validation test rejects wrong dimensions, NaN, and
@@ -1495,6 +1513,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Added `semantic_index` module with Mirror-specific
       `upsert_asset_embedding`, `delete_asset_embeddings`, and
       `semantic_search` functions.
+    - Added semantic-search hardening migration that denormalizes owner,
+      public asset ID, created time, and trash state onto `asset_embeddings`,
+      keeps them synchronized from `assets`, and adds the active owner/model
+      btree filter index.
     - Semantic search validates model-pack task kind and embedding dimension,
       uses the model-pack distance metric (`cosine`, `dot`, or `l2`), filters
       out trashed assets, and returns public asset IDs ordered by a normalized
@@ -1508,6 +1530,11 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Added text-query semantic search boundary that embeds the owner query with
       the active self-tested semantic model pack and searches the existing
       asset embedding index.
+    - Added `/search?mode=semantic` for semantic text queries when an
+      image/text runtime is configured in app data; filename search remains the
+      default `/search` mode.
+    - Active semantic model-pack selection is deterministic even under data
+      corruption with more than one active row.
     - ML worker test path now proves image embeddings produced by the task-level
       embedder are persisted into pgvector and visible through semantic search.
     - Documented ANN decision: exact search for v1, HNSW before IVFFlat when
@@ -1528,6 +1555,15 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       and asset embedding deletion removes search hits.
     - Semantic index DB test verifies dot-product results return positive
       similarity scores instead of pgvector negative inner-product ranks.
+    - Semantic index DB test verifies the active model/owner filter index
+      exists for the exact pgvector search path.
+    - Semantic index DB test verifies indexed assets disappear from semantic
+      results after trash and reappear after restore through the denormalized
+      projection trigger.
+    - Semantic index DB test verifies wrong model kinds are rejected.
+    - Search route DB test verifies `/search?mode=semantic` uses the active
+      model pack and returns the ranked asset through the normal asset response
+      shape.
     - Worker runtime DB test verifies `embed_asset` creates a pgvector-backed
       search hit for the promoted asset and completes the reindex run.
     - Worker runtime DB test verifies text search uses the active model pack to
@@ -1536,6 +1572,8 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `infra/compose.yaml`
     - `src/backend/migrations/20260618000400_asset_embeddings.up.sql`
     - `src/backend/migrations/20260618000400_asset_embeddings.down.sql`
+    - `src/backend/migrations/20260618000500_semantic_search_hardening.up.sql`
+    - `src/backend/migrations/20260618000500_semantic_search_hardening.down.sql`
     - `src/backend/src/semantic_index.rs`
     - `src/backend/src/ml.rs`
     - `src/backend/src/worker.rs`

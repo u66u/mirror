@@ -164,9 +164,11 @@ Status values:
 - Caveat: pgvector approximate indexes apply filters after ANN scan. Owner,
   trash, and model-pack filters can reduce recall or return too few rows unless
   scan breadth/iterative scans/index shape are tuned.
-- Mitigation: Keep v1 semantic search exact. Before enabling ANN, add recall
-  fixtures with selective filters, prefer partial HNSW per active model pack and
-  dimension, match operator class to distance metric, and tune iterative scans.
+- Mitigation: Keep v1 semantic search exact. `asset_embeddings` denormalizes
+  owner/trash/model-pack filter fields for the SQL filter path. Before enabling
+  ANN, add recall fixtures with selective filters, prefer partial HNSW per
+  active model pack and dimension, match operator class to distance metric, and
+  tune iterative scans.
 
 ## C016: Dynamic Android Cleartext Scope
 

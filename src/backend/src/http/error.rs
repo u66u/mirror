@@ -10,7 +10,9 @@ use crate::{
     assets::{AssetMutationError, AssetReadError, ListAssetsError, PromoteError},
     auth::{DeviceTokenError, OwnerLoginError, OwnerSetupError},
     exports::ExportError,
+    ml::MlError,
     search::SearchError,
+    semantic_index::SemanticIndexError,
     shares::ShareError,
     uploads::UploadError,
 };
@@ -232,6 +234,30 @@ impl From<SearchError> for ApiError {
         match error {
             SearchError::InvalidInput => Self::BadRequest("invalid_search", "invalid search"),
             SearchError::Database(_) => Self::Internal,
+        }
+    }
+}
+
+impl From<MlError> for ApiError {
+    fn from(error: MlError) -> Self {
+        match error {
+            MlError::InvalidTextQuery
+            | MlError::SemanticIndex(SemanticIndexError::InvalidLimit) => {
+                Self::BadRequest("invalid_search", "invalid search")
+            }
+            MlError::NotFound | MlError::RuntimeUnavailable => Self::ServiceUnavailable(
+                "semantic_search_unavailable",
+                "semantic search is unavailable",
+            ),
+            MlError::UnsupportedJobKind
+            | MlError::InvalidJobPayload
+            | MlError::UnsupportedMediaType
+            | MlError::ImageTooLarge
+            | MlError::InvalidStorageKey(_)
+            | MlError::Storage(_)
+            | MlError::Model(_)
+            | MlError::SemanticIndex(_)
+            | MlError::Database(_) => Self::Internal,
         }
     }
 }

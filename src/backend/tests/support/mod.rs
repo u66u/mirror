@@ -1,7 +1,9 @@
 use std::{
     env, fmt,
+    num::NonZeroUsize,
     path::Path,
     process::{Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
@@ -19,7 +21,7 @@ use mirror_backend::{
     media::{
         DerivativeKind, GeneratedDerivative, ImageInfo, ImageProcessor, MediaError, MediaToolError,
     },
-    ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError},
+    ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError, MlRuntime},
     models::{ModelPackError, ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest},
     search::SearchError,
     semantic_index::SemanticIndexError,
@@ -616,4 +618,9 @@ impl ImageTextEmbedder for FakeImageTextEmbedder {
         values[0] = 1.0;
         Ok(values)
     }
+}
+
+#[allow(dead_code)] // T501: worker ML tests need a blocking-runtime wrapper.
+pub fn fake_ml_runtime() -> MlRuntime<FakeImageTextEmbedder> {
+    MlRuntime::new(Arc::new(FakeImageTextEmbedder), NonZeroUsize::MIN)
 }

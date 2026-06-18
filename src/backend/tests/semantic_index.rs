@@ -16,6 +16,20 @@ use support::{TestResult, fresh_owner_pool};
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
 async fn semantic_search_ranks_active_owner_assets_in_one_model_space() -> TestResult {
     let pool = fresh_owner_pool().await?;
+    let filter_index: String = sqlx::query_scalar(
+        r#"
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = current_schema()
+          AND tablename = 'asset_embeddings'
+          AND indexname = 'asset_embeddings_owner_model_active_idx'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(filter_index.contains("(model_pack_id, owner_id"));
+    assert!(filter_index.contains("WHERE (asset_trashed_at IS NULL)"));
+
     let manifest = semantic_manifest("cosine");
     let pack = install_model_pack(&pool, manifest.clone()).await?;
     record_model_pack_self_test(&pool, pack.model_pack_id, true, None).await?;
@@ -54,10 +68,12 @@ async fn semantic_search_ranks_active_owner_assets_in_one_model_space() -> TestR
     .await?;
 
     assert_eq!(
-        hits.iter().map(|hit| hit.asset_id).collect::<Vec<_>>(),
+        hits.iter()
+            .map(|hit| hit.asset_public_id)
+            .collect::<Vec<_>>(),
         vec![near.public_id, far.public_id]
     );
-    assert!(hits[0].score >= hits[1].score);
+    assert!(hits[0].score > hits[1].score);
 
     Ok(())
 }
@@ -97,7 +113,9 @@ async fn semantic_search_dot_metric_returns_positive_similarity_score() -> TestR
     .await?;
 
     assert_eq!(
-        hits.iter().map(|hit| hit.asset_id).collect::<Vec<_>>(),
+        hits.iter()
+            .map(|hit| hit.asset_public_id)
+            .collect::<Vec<_>>(),
         vec![near.public_id, far.public_id]
     );
     assert_eq!(hits[0].score, 2.0);
@@ -148,6 +166,64 @@ async fn semantic_index_rejects_wrong_dimensions_and_deletes_asset_embeddings() 
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
+async fn semantic_search_tracks_trash_and_restore_after_indexing() -> TestResult {
+    let pool = fresh_owner_pool().await?;
+    let manifest = semantic_manifest("cosine");
+    let pack = install_model_pack(&pool, manifest.clone()).await?;
+    record_model_pack_self_test(&pool, pack.model_pack_id, true, None).await?;
+    let asset = insert_semantic_asset(&pool, 1, false).await?;
+    let query = validate_embedding_output(&manifest, vec![1.0, 0.0, 0.0])?;
+
+    upsert_asset_embedding(&pool, asset.internal_id, pack.model_pack_id, &query).await?;
+    assert_eq!(
+        semantic_search(&pool, 1, pack.model_pack_id, &query, 10)
+            .await?
+            .len(),
+        1
+    );
+
+    sqlx::query("UPDATE assets SET trashed_at = now() WHERE id = $1")
+        .bind(asset.internal_id)
+        .execute(&pool)
+        .await?;
+    assert!(
+        semantic_search(&pool, 1, pack.model_pack_id, &query, 10)
+            .await?
+            .is_empty()
+    );
+
+    sqlx::query("UPDATE assets SET trashed_at = NULL WHERE id = $1")
+        .bind(asset.internal_id)
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        semantic_search(&pool, 1, pack.model_pack_id, &query, 10)
+            .await?
+            .len(),
+        1
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
+async fn semantic_search_rejects_wrong_model_kind() -> TestResult {
+    let pool = fresh_owner_pool().await?;
+    let manifest = face_manifest();
+    let pack = install_model_pack(&pool, manifest).await?;
+    let embedding = validate_embedding_output(&semantic_manifest("cosine"), vec![1.0, 0.0, 0.0])?;
+
+    assert!(matches!(
+        semantic_search(&pool, 1, pack.model_pack_id, &embedding, 10).await,
+        Err(SemanticIndexError::InvalidModelPack)
+    ));
+
+    Ok(())
+}
+
 #[derive(Debug)]
 struct SemanticAsset {
     internal_id: Uuid,
@@ -181,6 +257,14 @@ fn semantic_manifest_with_dimension(
             expected_output_sha256: "b".repeat(64),
         }],
     }
+}
+
+fn face_manifest() -> ModelPackManifest {
+    let mut manifest = semantic_manifest("cosine");
+    manifest.kind = "face_identity".to_owned();
+    manifest.model_key = "test-face".to_owned();
+    manifest.model_revision = format!("face-{}", Uuid::now_v7());
+    manifest
 }
 
 async fn insert_semantic_asset(

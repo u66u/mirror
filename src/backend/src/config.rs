@@ -23,6 +23,10 @@ pub struct Config {
     pub rate_limit_secret: RateLimitSecret,
     /// Proxy CIDRs allowed to supply forwarded client IP headers.
     pub trusted_proxies: Vec<IpNet>,
+    /// Preferred ML execution device for future runtime-backed workers.
+    pub ml_device: MlDevicePreference,
+    /// Maximum encoded image bytes read into the embedding runtime.
+    pub ml_max_image_bytes: usize,
 }
 
 impl fmt::Debug for Config {
@@ -38,7 +42,32 @@ impl fmt::Debug for Config {
             .field("storage_root", &self.storage_root)
             .field("rate_limit_secret", &self.rate_limit_secret)
             .field("trusted_proxies", &self.trusted_proxies)
+            .field("ml_device", &self.ml_device)
+            .field("ml_max_image_bytes", &self.ml_max_image_bytes)
             .finish()
+    }
+}
+
+/// Operator-selected ML execution device policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlDevicePreference {
+    /// Try GPU execution first and fall back to CPU if the runtime supports it.
+    GpuWithCpuFallback,
+    /// Use CPU execution only.
+    CpuOnly,
+    /// Require GPU execution and fail runtime startup if unavailable.
+    GpuOnly,
+}
+
+impl MlDevicePreference {
+    /// Stable environment/config representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GpuWithCpuFallback => "gpu_with_cpu_fallback",
+            Self::CpuOnly => "cpu_only",
+            Self::GpuOnly => "gpu_only",
+        }
     }
 }
 
@@ -101,6 +130,14 @@ impl Config {
             .ok()
             .map(|value| parse_trusted_proxies(&value))
             .unwrap_or_default();
+        let ml_device = env::var("MIRROR_ML_DEVICE")
+            .ok()
+            .and_then(|value| parse_ml_device_preference(&value))
+            .unwrap_or(MlDevicePreference::GpuWithCpuFallback);
+        let ml_max_image_bytes = env::var("MIRROR_ML_MAX_IMAGE_BYTES")
+            .ok()
+            .and_then(|value| parse_positive_usize(&value))
+            .unwrap_or(25 * 1024 * 1024);
 
         Self {
             bind_addr,
@@ -109,6 +146,8 @@ impl Config {
             storage_root,
             rate_limit_secret,
             trusted_proxies,
+            ml_device,
+            ml_max_image_bytes,
         }
     }
 }
@@ -129,4 +168,20 @@ fn parse_trusted_proxies(value: &str) -> Vec<IpNet> {
             }
         })
         .collect()
+}
+
+fn parse_ml_device_preference(value: &str) -> Option<MlDevicePreference> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "gpu_with_cpu_fallback" | "gpu-fallback" | "auto" => {
+            Some(MlDevicePreference::GpuWithCpuFallback)
+        }
+        "cpu_only" | "cpu" => Some(MlDevicePreference::CpuOnly),
+        "gpu_only" | "gpu" => Some(MlDevicePreference::GpuOnly),
+        _ => None,
+    }
+}
+
+fn parse_positive_usize(value: &str) -> Option<usize> {
+    let parsed = value.trim().parse().ok()?;
+    (parsed > 0).then_some(parsed)
 }

@@ -454,6 +454,9 @@ Semantic search:
 - ANN indexes should be partial per active model pack/revision and dimension
   when needed. Enable/tune pgvector iterative scans because filters are applied
   after ANN scans and can otherwise reduce recall.
+- `asset_embeddings` denormalizes owner, public asset ID, created time, and
+  trash state from `assets` so exact v1 search filters without joining before
+  vector ordering.
 - Because `asset_embeddings.embedding` is plain `vector`, future ANN indexes
   may need expression casts such as `embedding::vector(768)` plus partial
   `model_pack_id` predicates. Bulk reindex should reuse loaded model metadata

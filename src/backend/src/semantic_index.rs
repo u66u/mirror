@@ -5,7 +5,7 @@
 //! validated embeddings.
 
 use pgvector::Vector;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::models::{DistanceMetric, ModelPackKind, ValidatedEmbedding};
@@ -14,7 +14,7 @@ use crate::models::{DistanceMetric, ModelPackKind, ValidatedEmbedding};
 #[derive(Debug, Clone, PartialEq)]
 pub struct SemanticSearchHit {
     /// Public asset ID.
-    pub asset_id: Uuid,
+    pub asset_public_id: Uuid,
     /// Ranking score where higher is better for all supported metrics.
     pub score: f64,
 }
@@ -28,6 +28,8 @@ pub enum SemanticIndexError {
     DimensionMismatch,
     /// Query limit is outside the accepted range.
     InvalidLimit,
+    /// Asset is unavailable for indexing.
+    AssetUnavailable,
     /// Database failed.
     Database(sqlx::Error),
 }
@@ -38,13 +40,21 @@ impl std::fmt::Display for SemanticIndexError {
             Self::InvalidModelPack => "semantic model pack is invalid",
             Self::DimensionMismatch => "semantic embedding dimension mismatch",
             Self::InvalidLimit => "semantic search limit is invalid",
+            Self::AssetUnavailable => "semantic asset is unavailable",
             Self::Database(_) => "semantic index database error",
         };
         formatter.write_str(message)
     }
 }
 
-impl std::error::Error for SemanticIndexError {}
+impl std::error::Error for SemanticIndexError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<sqlx::Error> for SemanticIndexError {
     fn from(error: sqlx::Error) -> Self {
@@ -60,20 +70,22 @@ pub async fn upsert_asset_embedding(
     embedding: &ValidatedEmbedding,
 ) -> Result<(), SemanticIndexError> {
     let spec = semantic_model_spec(pool, model_pack_id).await?;
-    upsert_asset_embedding_with_dimension(
-        pool,
+    let mut tx = pool.begin().await?;
+    upsert_asset_embedding_with_dimension_in_tx(
+        &mut tx,
         asset_id,
         model_pack_id,
         embedding,
         spec.embedding_dimension,
     )
-    .await
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
-/// Inserts or replaces an asset embedding when caller already loaded the
-/// semantic model metadata in the same workflow.
-pub async fn upsert_asset_embedding_with_dimension(
-    pool: &PgPool,
+/// Transaction-compatible embedding upsert.
+pub async fn upsert_asset_embedding_with_dimension_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     asset_id: Uuid,
     model_pack_id: Uuid,
     embedding: &ValidatedEmbedding,
@@ -82,17 +94,35 @@ pub async fn upsert_asset_embedding_with_dimension(
     check_dimension(embedding, embedding_dimension)?;
     let vector = Vector::from(embedding.values().to_vec());
 
-    sqlx::query(
+    let affected = sqlx::query(
         r#"
         INSERT INTO asset_embeddings (
             asset_id,
             model_pack_id,
+            owner_id,
+            asset_public_id,
+            asset_created_at,
+            asset_trashed_at,
             embedding,
             embedding_dimension
         )
-        VALUES ($1, $2, $3, $4)
+        SELECT
+            a.id,
+            $2,
+            a.owner_id,
+            a.public_id,
+            a.created_at,
+            a.trashed_at,
+            $3,
+            $4
+        FROM assets a
+        WHERE a.id = $1
         ON CONFLICT (asset_id, model_pack_id)
         DO UPDATE SET
+            owner_id = EXCLUDED.owner_id,
+            asset_public_id = EXCLUDED.asset_public_id,
+            asset_created_at = EXCLUDED.asset_created_at,
+            asset_trashed_at = EXCLUDED.asset_trashed_at,
             embedding = EXCLUDED.embedding,
             embedding_dimension = EXCLUDED.embedding_dimension,
             updated_at = now()
@@ -102,8 +132,13 @@ pub async fn upsert_asset_embedding_with_dimension(
     .bind(model_pack_id)
     .bind(vector)
     .bind(embedding_dimension)
-    .execute(pool)
-    .await?;
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(SemanticIndexError::AssetUnavailable);
+    }
 
     Ok(())
 }
@@ -132,28 +167,29 @@ pub async fn semantic_search(
     if !(1..=200).contains(&limit) {
         return Err(SemanticIndexError::InvalidLimit);
     }
+
     let spec = semantic_model_spec(pool, model_pack_id).await?;
     check_dimension(query_embedding, spec.embedding_dimension)?;
+
     let vector = Vector::from(query_embedding.values().to_vec());
     let order = match spec.distance_metric {
         DistanceMetric::Cosine => "<=>",
         DistanceMetric::L2 => "<->",
         DistanceMetric::Dot => "<#>",
     };
-    // pgvector `<#>` returns negative inner product. Keep SQL ordering on the
-    // raw pgvector rank ascending, then convert to Mirror score after fetch.
+
     let sql = format!(
         r#"
-        SELECT assets.public_id, asset_embeddings.embedding {order} $3 AS raw_rank
+        SELECT asset_public_id, embedding {order} $3 AS raw_rank
         FROM asset_embeddings
-        JOIN assets ON assets.id = asset_embeddings.asset_id
-        WHERE asset_embeddings.model_pack_id = $1
-          AND assets.owner_id = $2
-          AND assets.trashed_at IS NULL
-        ORDER BY raw_rank ASC, assets.created_at DESC, assets.public_id ASC
+        WHERE model_pack_id = $1
+          AND owner_id = $2
+          AND asset_trashed_at IS NULL
+        ORDER BY raw_rank ASC, asset_created_at DESC, asset_public_id ASC
         LIMIT $4
         "#
     );
+
     let rows = sqlx::query_as::<_, (Uuid, f64)>(&sql)
         .bind(model_pack_id)
         .bind(owner_id)
@@ -164,8 +200,8 @@ pub async fn semantic_search(
 
     Ok(rows
         .into_iter()
-        .map(|(asset_id, raw_rank)| SemanticSearchHit {
-            asset_id,
+        .map(|(asset_public_id, raw_rank)| SemanticSearchHit {
+            asset_public_id,
             score: score_from_pgvector_rank(spec.distance_metric, raw_rank),
         })
         .collect())
@@ -191,25 +227,24 @@ async fn semantic_model_spec(
     .bind(model_pack_id)
     .fetch_optional(pool)
     .await?;
+
     let Some((kind, embedding_dimension, distance_metric)) = row else {
         return Err(SemanticIndexError::InvalidModelPack);
     };
+
     if kind != ModelPackKind::SemanticImageText.as_str() {
         return Err(SemanticIndexError::InvalidModelPack);
     }
+
+    if embedding_dimension <= 0 {
+        return Err(SemanticIndexError::InvalidModelPack);
+    }
+
     Ok(SemanticModelSpec {
         embedding_dimension,
-        distance_metric: parse_semantic_distance_metric(&distance_metric)?,
+        distance_metric: DistanceMetric::from_db_str(&distance_metric)
+            .ok_or(SemanticIndexError::InvalidModelPack)?,
     })
-}
-
-fn parse_semantic_distance_metric(value: &str) -> Result<DistanceMetric, SemanticIndexError> {
-    match value {
-        "cosine" => Ok(DistanceMetric::Cosine),
-        "dot" => Ok(DistanceMetric::Dot),
-        "l2" => Ok(DistanceMetric::L2),
-        _ => Err(SemanticIndexError::InvalidModelPack),
-    }
 }
 
 fn check_dimension(
@@ -225,7 +260,8 @@ fn check_dimension(
 
 fn score_from_pgvector_rank(distance_metric: DistanceMetric, raw_rank: f64) -> f64 {
     match distance_metric {
-        DistanceMetric::Cosine | DistanceMetric::L2 => -raw_rank,
+        DistanceMetric::Cosine => 1.0 - raw_rank,
+        DistanceMetric::L2 => -raw_rank,
         DistanceMetric::Dot => -raw_rank,
     }
 }

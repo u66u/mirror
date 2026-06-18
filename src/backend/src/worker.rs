@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use crate::{
     jobs::{self, JobError, JobKind},
     media::{self, ImageProcessor},
-    ml::{self, ImageTextEmbedder},
+    ml::{self, ImageTextEmbedder, MlRuntime},
     storage::ObjectStorage,
     video::VideoProcessor,
 };
@@ -132,7 +132,17 @@ impl std::fmt::Display for WorkerError {
     }
 }
 
-impl std::error::Error for WorkerError {}
+impl std::error::Error for WorkerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Jobs(error) => Some(error),
+            Self::Media(error) => Some(error),
+            Self::Ml(error) => Some(error),
+            Self::Policy(error) => Some(error),
+            Self::LeaseLost => None,
+        }
+    }
+}
 
 /// Handler dependencies for one worker process.
 pub struct WorkerHandlers<'a, I, V, E> {
@@ -142,8 +152,8 @@ pub struct WorkerHandlers<'a, I, V, E> {
     pub image_processor: &'a I,
     /// Video media processor.
     pub video_processor: &'a V,
-    /// Semantic image/text embedder.
-    pub embedder: &'a E,
+    /// Semantic image/text runtime.
+    pub ml_runtime: &'a MlRuntime<E>,
     /// Job kinds this worker is allowed to lease.
     pub job_kinds: &'a [JobKind],
 }
@@ -161,7 +171,7 @@ pub async fn run_once<I, V, E>(
 where
     I: ImageProcessor,
     V: VideoProcessor,
-    E: ImageTextEmbedder,
+    E: ImageTextEmbedder + Send + Sync + 'static,
 {
     let lease_timeout = time::Duration::try_from(policy.lease_timeout)
         .map_err(|_| WorkerError::Policy(WorkerPolicyError::LeaseTimeoutOutOfRange))?;
@@ -185,9 +195,11 @@ where
             )
             .await
             .map_err(WorkerError::Media),
-            JobKind::EmbedAsset => ml::run_ml_job(pool, handlers.storage, handlers.embedder, &job)
-                .await
-                .map_err(WorkerError::Ml),
+            JobKind::EmbedAsset => {
+                ml::run_ml_job(pool, handlers.storage, handlers.ml_runtime, &job)
+                    .await
+                    .map_err(WorkerError::Ml)
+            }
         }
     };
     tokio::pin!(handler);
@@ -216,12 +228,7 @@ where
 
     match handler_result {
         None => {
-            let failed = jobs::fail(pool, job.id, worker_id, "media job timed out")
-                .await
-                .map_err(WorkerError::Jobs)?;
-            if !failed {
-                return Err(WorkerError::LeaseLost);
-            }
+            fail_leased_job(pool, worker_id, &job, timeout_message(job.kind)).await?;
             Ok(WorkerStep::TimedOut)
         }
         Some(Ok(())) => {
@@ -234,13 +241,47 @@ where
             Ok(WorkerStep::Completed)
         }
         Some(Err(error)) => {
-            let failed = jobs::fail(pool, job.id, worker_id, &error.to_string())
-                .await
-                .map_err(WorkerError::Jobs)?;
-            if !failed {
-                return Err(WorkerError::LeaseLost);
-            }
+            fail_leased_job(pool, worker_id, &job, &handler_error_message(&error)).await?;
             Ok(WorkerStep::Failed)
         }
     }
+}
+
+fn handler_error_message(error: &WorkerError) -> String {
+    match error {
+        WorkerError::Media(error) => error.to_string(),
+        WorkerError::Ml(error) => error.to_string(),
+        _ => error.to_string(),
+    }
+}
+
+fn timeout_message(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::ExtractMetadata | JobKind::GenerateDerivatives => "media job timed out",
+        JobKind::EmbedAsset => "ml job timed out",
+    }
+}
+
+async fn fail_leased_job(
+    pool: &sqlx::PgPool,
+    worker_id: &str,
+    job: &jobs::LeasedJob,
+    message: &str,
+) -> Result<(), WorkerError> {
+    let outcome = jobs::fail_with_outcome(pool, job.id, worker_id, message)
+        .await
+        .map_err(WorkerError::Jobs)?
+        .ok_or(WorkerError::LeaseLost)?;
+
+    if !outcome.updated {
+        return Err(WorkerError::LeaseLost);
+    }
+
+    if outcome.dead && outcome.kind == JobKind::EmbedAsset {
+        ml::record_embed_asset_dead_letter_payload(pool, &outcome.payload, message)
+            .await
+            .map_err(WorkerError::Ml)?;
+    }
+
+    Ok(())
 }

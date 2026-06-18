@@ -73,6 +73,16 @@ impl DistanceMetric {
             Self::L2 => "l2",
         }
     }
+
+    /// Parses a database/manifest distance metric value.
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "cosine" => Some(Self::Cosine),
+            "dot" => Some(Self::Dot),
+            "l2" => Some(Self::L2),
+            _ => None,
+        }
+    }
 }
 
 /// Model-pack manifest accepted by Mirror.
@@ -728,12 +738,7 @@ fn parse_runtime(value: &str) -> Result<ModelRuntime, ModelPackError> {
 }
 
 fn parse_distance_metric(value: &str) -> Result<DistanceMetric, ModelPackError> {
-    match value {
-        "cosine" => Ok(DistanceMetric::Cosine),
-        "dot" => Ok(DistanceMetric::Dot),
-        "l2" => Ok(DistanceMetric::L2),
-        _ => Err(ModelPackError::InvalidManifest("distance_metric")),
-    }
+    DistanceMetric::from_db_str(value).ok_or(ModelPackError::InvalidManifest("distance_metric"))
 }
 
 fn require_text(value: &str, max_len: usize, field: &'static str) -> Result<(), ModelPackError> {

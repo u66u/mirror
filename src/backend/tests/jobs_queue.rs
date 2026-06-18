@@ -1,5 +1,5 @@
 use mirror_backend::jobs::{
-    JobKind, JobSpec, complete, enqueue_in_tx, fail, heartbeat, lease_next,
+    JobKind, JobSpec, complete, enqueue_in_tx, fail, fail_with_outcome, heartbeat, lease_next,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -151,7 +151,9 @@ async fn failure_dead_letters_after_max_attempts() -> TestResult {
             .map(|job| job.id),
         Some(job_id)
     );
-    assert!(fail(&pool, job_id, "worker-a", "fatal failure").await?);
+    let Some(outcome) = fail_with_outcome(&pool, job_id, "worker-a", "fatal failure").await? else {
+        return Err(std::io::Error::other("leased job should fail").into());
+    };
 
     let (status, message) = sqlx::query_as::<_, (String, String)>(
         "SELECT status, last_error->>'message' FROM jobs WHERE id = $1",
@@ -162,6 +164,12 @@ async fn failure_dead_letters_after_max_attempts() -> TestResult {
 
     assert_eq!(status, "dead");
     assert_eq!(message, "fatal failure");
+    assert!(outcome.updated);
+    assert!(outcome.dead);
+    assert_eq!(outcome.kind, JobKind::ExtractMetadata);
+    assert!(outcome.payload["asset_id"].as_str().is_some());
+    assert_eq!(outcome.attempts, 1);
+    assert_eq!(outcome.max_attempts, 1);
 
     Ok(())
 }

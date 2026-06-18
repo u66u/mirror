@@ -1,13 +1,13 @@
 //! Mirror background worker process.
 
-use std::{io, time::Duration as StdDuration};
+use std::{io, num::NonZeroUsize, sync::Arc, time::Duration as StdDuration};
 
 use mirror_backend::{
     config::Config,
     db,
     jobs::JobKind,
     media::RustImageProcessor,
-    ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError},
+    ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError, MlRuntime},
     runtime::io_other,
     storage::ObjectStorage,
     telemetry,
@@ -32,7 +32,11 @@ async fn main() -> io::Result<()> {
     let storage = ObjectStorage::local(&config.storage_root).map_err(io_other)?;
     let image_processor = RustImageProcessor;
     let video_processor = FfmpegVideoProcessor::production();
-    let embedder = DisabledEmbedder;
+    let ml_runtime = MlRuntime::with_max_image_bytes(
+        Arc::new(DisabledEmbedder),
+        NonZeroUsize::MIN,
+        config.ml_max_image_bytes,
+    );
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
 
     info!(%worker_id, "starting mirror worker");
@@ -43,7 +47,7 @@ async fn main() -> io::Result<()> {
                 storage: &storage,
                 image_processor: &image_processor,
                 video_processor: &video_processor,
-                embedder: &embedder,
+                ml_runtime: &ml_runtime,
                 job_kinds: &[JobKind::ExtractMetadata, JobKind::GenerateDerivatives],
             },
             &worker_id,

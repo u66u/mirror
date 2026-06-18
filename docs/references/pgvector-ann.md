@@ -13,9 +13,11 @@
 - Filtered ANN queries can return too few rows because filters are applied
   after the ANN scan. Before enabling ANN by default, add recall fixtures that
   include owner/trash/model-pack filters and tune iterative scans.
+- `asset_embeddings` denormalizes owner/trash/public-id/create-time fields so
+  exact v1 search filters without joining `assets`.
 - If exact search becomes too slow, first try one partial HNSW index per active
-  semantic model pack and dimension. Denormalize owner/trash state only if
-  measured filtered recall or latency still demands a maintained projection.
+  semantic model pack and dimension, keeping filter predicates aligned with the
+  denormalized projection.
 - `asset_embeddings.embedding` is plain `vector` so different model dimensions
   can coexist. Any future ANN index may need an expression cast such as
   `embedding::vector(768)` plus a partial `model_pack_id` predicate.

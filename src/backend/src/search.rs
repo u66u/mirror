@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::assets::{AssetDerivativeView, AssetTimelineItem};
 
-const DEFAULT_LIMIT: i64 = 60;
+/// Default search page size.
+pub const DEFAULT_LIMIT: i64 = 60;
 const MAX_LIMIT: i64 = 200;
 const MAX_QUERY_CHARS: usize = 128;
 
@@ -115,7 +116,79 @@ pub async fn search_assets(
     .map_err(SearchError::Database)?;
 
     Ok(AssetSearchPage {
-        items: rows.into_iter().map(search_item).collect(),
+        items: rows.into_iter().map(AssetTimelineItem::from).collect(),
+    })
+}
+
+/// Loads active owner assets by public ID in caller-provided rank order.
+pub async fn search_assets_by_public_ids(
+    pool: &PgPool,
+    owner_id: i16,
+    asset_public_ids: &[Uuid],
+) -> Result<AssetSearchPage, SearchError> {
+    if asset_public_ids.is_empty() {
+        return Ok(AssetSearchPage { items: Vec::new() });
+    }
+
+    let rows = sqlx::query_as::<_, SearchAssetRow>(
+        r#"
+        WITH requested(asset_public_id, ord) AS (
+            SELECT * FROM unnest($2::uuid[]) WITH ORDINALITY
+        )
+        SELECT
+            a.public_id,
+            a.created_at,
+            a.favorite_at,
+            o.blake3_hash,
+            o.media_type,
+            o.size_bytes,
+            s.original_filename,
+            t.format,
+            t.width,
+            t.height,
+            p.format,
+            p.width,
+            p.height
+        FROM requested r
+        JOIN assets a
+          ON a.public_id = r.asset_public_id
+         AND a.owner_id = $1
+         AND a.trashed_at IS NULL
+        JOIN originals o ON o.id = a.original_id
+        LEFT JOIN LATERAL (
+            SELECT original_filename
+            FROM asset_sources
+            WHERE asset_id = a.id
+            ORDER BY created_at ASC
+            LIMIT 1
+        ) s ON true
+        LEFT JOIN LATERAL (
+            SELECT format, width, height
+            FROM derivatives
+            WHERE asset_id = a.id
+              AND kind = 'thumbnail'
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) t ON true
+        LEFT JOIN LATERAL (
+            SELECT format, width, height
+            FROM derivatives
+            WHERE asset_id = a.id
+              AND kind = 'preview'
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) p ON true
+        ORDER BY r.ord ASC
+        "#,
+    )
+    .bind(owner_id)
+    .bind(asset_public_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(SearchError::Database)?;
+
+    Ok(AssetSearchPage {
+        items: rows.into_iter().map(AssetTimelineItem::from).collect(),
     })
 }
 
@@ -135,33 +208,35 @@ type SearchAssetRow = (
     Option<i32>,
 );
 
-fn search_item(row: SearchAssetRow) -> AssetTimelineItem {
-    let (
-        asset_id,
-        created_at,
-        favorite_at,
-        original_blake3,
-        media_type,
-        size_bytes,
-        original_filename,
-        thumbnail_format,
-        thumbnail_width,
-        thumbnail_height,
-        preview_format,
-        preview_width,
-        preview_height,
-    ) = row;
+impl From<SearchAssetRow> for AssetTimelineItem {
+    fn from(row: SearchAssetRow) -> Self {
+        let (
+            asset_id,
+            created_at,
+            favorite_at,
+            original_blake3,
+            media_type,
+            size_bytes,
+            original_filename,
+            thumbnail_format,
+            thumbnail_width,
+            thumbnail_height,
+            preview_format,
+            preview_width,
+            preview_height,
+        ) = row;
 
-    AssetTimelineItem {
-        asset_id,
-        created_at,
-        favorite_at,
-        original_blake3,
-        media_type,
-        size_bytes,
-        original_filename,
-        thumbnail: derivative_view(thumbnail_format, thumbnail_width, thumbnail_height),
-        preview: derivative_view(preview_format, preview_width, preview_height),
+        Self {
+            asset_id,
+            created_at,
+            favorite_at,
+            original_blake3,
+            media_type,
+            size_bytes,
+            original_filename,
+            thumbnail: derivative_view(thumbnail_format, thumbnail_width, thumbnail_height),
+            preview: derivative_view(preview_format, preview_width, preview_height),
+        }
     }
 }
 
@@ -187,8 +262,9 @@ fn search_query(query: &str) -> Result<String, SearchError> {
 }
 
 fn search_limit(limit: Option<i64>) -> Result<i64, SearchError> {
-    match limit.unwrap_or(DEFAULT_LIMIT) {
-        1..=MAX_LIMIT => Ok(limit.unwrap_or(DEFAULT_LIMIT)),
+    let limit = limit.unwrap_or(DEFAULT_LIMIT);
+    match limit {
+        1..=MAX_LIMIT => Ok(limit),
         _ => Err(SearchError::InvalidInput),
     }
 }

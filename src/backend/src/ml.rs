@@ -4,20 +4,121 @@
 //! Mirror side effects: load original, validate output, store embedding, update
 //! reindex progress.
 
+use std::{num::NonZeroUsize, sync::Arc};
+
 use serde_json::Value;
-use sqlx::types::Json;
+use sqlx::{PgPool, Postgres, Transaction, types::Json};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::{
     jobs::{JobKind, LeasedJob},
     models::{
-        ModelPackError, ModelPackManifest, record_reindex_asset_result, validate_embedding_output,
+        ModelPackError, ModelPackKind, ModelPackManifest, ValidatedEmbedding,
+        record_reindex_asset_result, validate_embedding_output, validate_model_pack_manifest,
     },
     semantic_index::{self, SemanticIndexError},
     storage::{ObjectStorage, StorageError, StorageKey, StorageKeyError},
 };
 
 const MAX_TEXT_QUERY_CHARS: usize = 512;
+const MAX_TEXT_QUERY_BYTES: usize = MAX_TEXT_QUERY_CHARS * 4;
+
+const MAX_REINDEX_ERROR_MESSAGE_CHARS: usize = 1_000;
+
+/// Shared ML runtime wrapper.
+///
+/// `ImageTextEmbedder` implementations are synchronous because many ML runtimes
+/// expose blocking APIs. This wrapper moves those calls onto Tokio's blocking
+/// pool and bounds concurrent inference.
+#[derive(Clone)]
+pub struct MlRuntime<E: ?Sized> {
+    embedder: Arc<E>,
+    permits: Arc<Semaphore>,
+    max_image_bytes: usize,
+}
+
+/// Runtime handle suitable for Actix app data.
+pub type SharedImageTextRuntime = MlRuntime<dyn ImageTextEmbedder + Send + Sync>;
+
+impl<E: ?Sized> MlRuntime<E> {
+    /// Creates a runtime wrapper with bounded concurrent embedding calls.
+    pub fn new(embedder: Arc<E>, max_concurrent_embeddings: NonZeroUsize) -> Self {
+        Self::with_max_image_bytes(embedder, max_concurrent_embeddings, 25 * 1024 * 1024)
+    }
+
+    /// Creates a runtime wrapper with a caller-selected encoded image byte cap.
+    pub fn with_max_image_bytes(
+        embedder: Arc<E>,
+        max_concurrent_embeddings: NonZeroUsize,
+        max_image_bytes: usize,
+    ) -> Self {
+        Self {
+            embedder,
+            permits: Arc::new(Semaphore::new(max_concurrent_embeddings.get())),
+            max_image_bytes: max_image_bytes.max(1),
+        }
+    }
+}
+
+impl<E> MlRuntime<E>
+where
+    E: ImageTextEmbedder + Send + Sync + 'static + ?Sized,
+{
+    async fn embed_image(
+        &self,
+        bytes: Vec<u8>,
+        media_type: String,
+        manifest: ModelPackManifest,
+    ) -> Result<Vec<f32>, MlError> {
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| MlError::RuntimeUnavailable)?;
+
+        let embedder = self.embedder.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+
+            embedder.embed_image(EmbedImageRequest {
+                bytes: &bytes,
+                media_type: &media_type,
+                manifest: &manifest,
+            })
+        })
+        .await
+        .map_err(|_| MlError::RuntimeUnavailable)?
+    }
+
+    async fn embed_text(
+        &self,
+        text: String,
+        manifest: ModelPackManifest,
+    ) -> Result<Vec<f32>, MlError> {
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| MlError::RuntimeUnavailable)?;
+
+        let embedder = self.embedder.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+
+            embedder.embed_text(EmbedTextRequest {
+                text: &text,
+                manifest: &manifest,
+            })
+        })
+        .await
+        .map_err(|_| MlError::RuntimeUnavailable)?
+    }
+}
 
 /// Image embedding request passed to the configured runtime.
 pub struct EmbedImageRequest<'a> {
@@ -55,12 +156,14 @@ pub enum MlError {
     InvalidJobPayload,
     /// Text query is empty or too large.
     InvalidTextQuery,
-    /// Asset or model pack no longer exists.
+    /// Asset, reindex row, or model pack no longer exists.
     NotFound,
-    /// V1 worker only embeds still images.
+    /// V1 worker only embeds explicitly supported still-image formats.
     UnsupportedMediaType,
-    /// Worker started without a configured embedding runtime.
+    /// Worker started without a configured embedding runtime, or runtime task panicked.
     RuntimeUnavailable,
+    /// Encoded original exceeds the embedding runtime boundary.
+    ImageTooLarge,
     /// Original storage key is invalid.
     InvalidStorageKey(StorageKeyError),
     /// Object storage failed.
@@ -73,15 +176,36 @@ pub enum MlError {
     Database(sqlx::Error),
 }
 
+impl MlError {
+    /// Returns whether the queue should retry this error.
+    ///
+    /// Permanent asset-level errors are converted into reindex failures by
+    /// `run_ml_job`, so the queue should normally only see retryable errors.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::RuntimeUnavailable
+                | Self::Storage(_)
+                | Self::Database(_)
+                | Self::SemanticIndex(SemanticIndexError::Database(_))
+                | Self::Model(ModelPackError::Database(_))
+                | Self::Model(ModelPackError::Storage(_))
+                | Self::Model(ModelPackError::Io(_))
+        )
+    }
+}
+
 impl std::fmt::Display for MlError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             Self::UnsupportedJobKind => "unsupported ml job kind",
             Self::InvalidJobPayload => "invalid ml job payload",
             Self::InvalidTextQuery => "invalid ml text query",
-            Self::NotFound => "ml asset or model pack not found",
+            Self::NotFound => "ml asset, reindex row, or model pack not found",
             Self::UnsupportedMediaType => "unsupported ml media type",
             Self::RuntimeUnavailable => "ml runtime unavailable",
+            Self::ImageTooLarge => "ml image exceeds embedding byte limit",
             Self::InvalidStorageKey(_) => "invalid ml storage key",
             Self::Storage(_) => "ml storage error",
             Self::Model(_) => "ml model error",
@@ -92,7 +216,17 @@ impl std::fmt::Display for MlError {
     }
 }
 
-impl std::error::Error for MlError {}
+impl std::error::Error for MlError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+            Self::Model(error) => Some(error),
+            Self::SemanticIndex(error) => Some(error),
+            Self::Database(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<ModelPackError> for MlError {
     fn from(error: ModelPackError) -> Self {
@@ -106,72 +240,270 @@ impl From<SemanticIndexError> for MlError {
     }
 }
 
+impl From<StorageError> for MlError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<StorageKeyError> for MlError {
+    fn from(error: StorageKeyError) -> Self {
+        Self::InvalidStorageKey(error)
+    }
+}
+
 /// Runs one ML job side effect.
+///
+/// Permanent asset-level failures are recorded as terminal reindex failures and
+/// then returned as `Ok(())`, so the queue can mark the job complete instead of
+/// retrying unsupported/corrupt inputs forever.
+///
+/// Transient failures are returned as `Err` so the queue can retry. Once the job
+/// dead-letters, the worker loop should call `record_embed_asset_dead_letter_payload`.
 pub async fn run_ml_job<E>(
-    pool: &sqlx::PgPool,
+    pool: &PgPool,
     storage: &ObjectStorage,
-    embedder: &E,
+    runtime: &MlRuntime<E>,
     job: &LeasedJob,
 ) -> Result<(), MlError>
 where
-    E: ImageTextEmbedder,
+    E: ImageTextEmbedder + Send + Sync + 'static + ?Sized,
 {
     if job.kind != JobKind::EmbedAsset {
         return Err(MlError::UnsupportedJobKind);
     }
 
     let payload = EmbedAssetPayload::from_json(&job.payload)?;
-    let asset = load_embed_asset(pool, payload.asset_id, payload.model_pack_id).await?;
-    if !matches!(
-        asset.media_type.as_str(),
-        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
-    ) {
-        return Err(MlError::UnsupportedMediaType);
-    }
 
-    let bytes = storage
-        .read(&asset.storage_key()?)
-        .await
-        .map_err(MlError::Storage)?;
-    let values = embedder.embed_image(EmbedImageRequest {
-        bytes: &bytes,
-        media_type: &asset.media_type,
-        manifest: &asset.manifest,
-    })?;
-    let embedding = validate_embedding_output(&asset.manifest, values)?;
-    semantic_index::upsert_asset_embedding_with_dimension(
+    match run_embed_asset_job(pool, storage, runtime, &payload).await {
+        Ok(()) => Ok(()),
+        Err(error) if is_terminal_reindex_failure(&error) => {
+            let message = reindex_error_message(&error);
+            record_reindex_asset_result(
+                pool,
+                payload.reindex_run_id,
+                payload.asset_id,
+                false,
+                Some(&message),
+            )
+            .await?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Records a dead-lettered embed job as a failed reindex asset.
+///
+/// Call this from the worker loop after `jobs::fail_with_outcome` returns a
+/// dead outcome for an `EmbedAsset` job.
+pub async fn record_embed_asset_dead_letter_payload(
+    pool: &PgPool,
+    payload: &Value,
+    message: &str,
+) -> Result<(), MlError> {
+    let payload = EmbedAssetPayload::from_json(payload)?;
+    let message = truncate_chars(message, MAX_REINDEX_ERROR_MESSAGE_CHARS);
+
+    record_reindex_asset_result(
         pool,
+        payload.reindex_run_id,
         payload.asset_id,
-        payload.model_pack_id,
-        &embedding,
-        asset.manifest.embedding_dimension,
+        false,
+        Some(&message),
     )
     .await?;
-    record_reindex_asset_result(pool, payload.reindex_run_id, payload.asset_id, true, None).await?;
+
     Ok(())
+}
+
+/// Convenience wrapper for dead-lettering a leased embed job.
+pub async fn record_embed_asset_dead_letter(
+    pool: &PgPool,
+    job: &LeasedJob,
+    message: &str,
+) -> Result<bool, MlError> {
+    if job.kind != JobKind::EmbedAsset {
+        return Ok(false);
+    }
+
+    record_embed_asset_dead_letter_payload(pool, &job.payload, message).await?;
+    Ok(true)
 }
 
 /// Embeds an owner text query and searches active assets through pgvector.
 pub async fn semantic_text_search<E>(
-    pool: &sqlx::PgPool,
-    embedder: &E,
+    pool: &PgPool,
+    runtime: &MlRuntime<E>,
     owner_id: i16,
     query: &str,
     limit: i64,
 ) -> Result<Vec<semantic_index::SemanticSearchHit>, MlError>
 where
-    E: ImageTextEmbedder,
+    E: ImageTextEmbedder + Send + Sync + 'static + ?Sized,
 {
-    let query = valid_text_query(query)?;
+    let query = valid_text_query(query)?.to_owned();
     let pack = active_semantic_model_pack(pool).await?;
-    let values = embedder.embed_text(EmbedTextRequest {
-        text: query,
-        manifest: &pack.manifest,
-    })?;
+
+    let values = runtime.embed_text(query, pack.manifest.clone()).await?;
     let embedding = validate_embedding_output(&pack.manifest, values)?;
+
     semantic_index::semantic_search(pool, owner_id, pack.model_pack_id, &embedding, limit)
         .await
         .map_err(MlError::SemanticIndex)
+}
+
+async fn run_embed_asset_job<E>(
+    pool: &PgPool,
+    storage: &ObjectStorage,
+    runtime: &MlRuntime<E>,
+    payload: &EmbedAssetPayload,
+) -> Result<(), MlError>
+where
+    E: ImageTextEmbedder + Send + Sync + 'static + ?Sized,
+{
+    let Some(asset) = load_embed_asset(pool, payload).await? else {
+        return Ok(());
+    };
+
+    if !is_supported_still_image_media_type(&asset.media_type) {
+        return Err(MlError::UnsupportedMediaType);
+    }
+
+    let storage_key = asset.storage_key()?;
+    let bytes = storage
+        .read_bounded(&storage_key, runtime.max_image_bytes)
+        .await
+        .map_err(|error| match error {
+            StorageError::ObjectTooLarge => MlError::ImageTooLarge,
+            error => MlError::Storage(error),
+        })?;
+
+    let values = runtime
+        .embed_image(bytes, asset.media_type.clone(), asset.manifest.clone())
+        .await?;
+
+    let embedding = validate_embedding_output(&asset.manifest, values)?;
+
+    commit_embed_asset_success(pool, payload, &embedding, asset.embedding_dimension).await?;
+
+    Ok(())
+}
+
+async fn commit_embed_asset_success(
+    pool: &PgPool,
+    payload: &EmbedAssetPayload,
+    embedding: &ValidatedEmbedding,
+    embedding_dimension: i32,
+) -> Result<(), MlError> {
+    let mut tx = pool.begin().await.map_err(MlError::Database)?;
+
+    semantic_index::upsert_asset_embedding_with_dimension_in_tx(
+        &mut tx,
+        payload.asset_id,
+        payload.model_pack_id,
+        embedding,
+        embedding_dimension,
+    )
+    .await
+    .map_err(MlError::SemanticIndex)?;
+
+    record_reindex_asset_result_in_tx(
+        &mut tx,
+        payload.reindex_run_id,
+        payload.asset_id,
+        true,
+        None,
+    )
+    .await?;
+
+    tx.commit().await.map_err(MlError::Database)?;
+    Ok(())
+}
+
+async fn record_reindex_asset_result_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    reindex_run_id: Uuid,
+    asset_id: Uuid,
+    succeeded: bool,
+    error_message: Option<&str>,
+) -> Result<(), MlError> {
+    let changed = sqlx::query_scalar::<_, bool>(
+        r#"
+        UPDATE model_reindex_assets
+        SET
+            status = CASE WHEN $3 THEN 'done' ELSE 'failed' END,
+            error_message = CASE WHEN $3 THEN NULL ELSE $4 END,
+            updated_at = now()
+        WHERE reindex_run_id = $1
+          AND asset_id = $2
+          AND status = 'queued'
+        RETURNING true
+        "#,
+    )
+    .bind(reindex_run_id)
+    .bind(asset_id)
+    .bind(succeeded)
+    .bind(error_message)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(MlError::Database)?
+    .unwrap_or(false);
+
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT true
+        FROM model_reindex_assets
+        WHERE reindex_run_id = $1
+          AND asset_id = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(reindex_run_id)
+    .bind(asset_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(MlError::Database)?
+    .unwrap_or(false);
+
+    if !exists {
+        return Err(MlError::NotFound);
+    }
+
+    if changed {
+        sqlx::query(
+            r#"
+            UPDATE model_reindex_runs
+            SET
+                processed_assets = processed_assets + CASE WHEN $2 THEN 1 ELSE 0 END,
+                failed_assets = failed_assets + CASE WHEN $2 THEN 0 ELSE 1 END,
+                status = CASE
+                    WHEN processed_assets + failed_assets + 1 >= total_assets
+                         AND failed_assets + CASE WHEN $2 THEN 0 ELSE 1 END = 0
+                    THEN 'succeeded'
+                    WHEN processed_assets + failed_assets + 1 >= total_assets
+                    THEN 'failed'
+                    WHEN status = 'queued'
+                    THEN 'running'
+                    ELSE status
+                END,
+                completed_at = CASE
+                    WHEN processed_assets + failed_assets + 1 >= total_assets
+                    THEN now()
+                    ELSE completed_at
+                END,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(reindex_run_id)
+        .bind(succeeded)
+        .execute(&mut **tx)
+        .await
+        .map_err(MlError::Database)?;
+    }
+
+    Ok(())
 }
 
 struct EmbedAssetPayload {
@@ -199,6 +531,7 @@ struct EmbedAsset {
     storage_key: String,
     media_type: String,
     manifest: ModelPackManifest,
+    embedding_dimension: i32,
 }
 
 impl EmbedAsset {
@@ -208,56 +541,112 @@ impl EmbedAsset {
 }
 
 async fn load_embed_asset(
-    pool: &sqlx::PgPool,
-    asset_id: Uuid,
-    model_pack_id: Uuid,
-) -> Result<EmbedAsset, MlError> {
-    let row = sqlx::query_as::<_, (String, String, Json<ModelPackManifest>)>(
+    pool: &PgPool,
+    payload: &EmbedAssetPayload,
+) -> Result<Option<EmbedAsset>, MlError> {
+    let row = sqlx::query_as::<_, (String, String, i32, String, Json<ModelPackManifest>, String)>(
         r#"
-        SELECT o.storage_key, o.media_type, mp.manifest
-        FROM assets a
-        JOIN originals o ON o.id = a.original_id
-        JOIN model_packs mp ON mp.id = $2
-        WHERE a.id = $1
+        SELECT
+            o.storage_key,
+            o.media_type,
+            mp.embedding_dimension,
+            mp.distance_metric,
+            mp.manifest,
+            ra.status
+        FROM model_reindex_runs rr
+        JOIN model_reindex_assets ra
+          ON ra.reindex_run_id = rr.id
+         AND ra.asset_id = $1
+        JOIN model_packs mp
+          ON mp.id = rr.model_pack_id
+         AND mp.id = $2
+        JOIN assets a
+          ON a.id = ra.asset_id
+        JOIN originals o
+          ON o.id = a.original_id
+        WHERE rr.id = $3
           AND a.trashed_at IS NULL
           AND mp.kind = 'semantic_image_text'
+          AND mp.self_test_status = 'passed'
         "#,
     )
-    .bind(asset_id)
-    .bind(model_pack_id)
+    .bind(payload.asset_id)
+    .bind(payload.model_pack_id)
+    .bind(payload.reindex_run_id)
     .fetch_optional(pool)
     .await
     .map_err(MlError::Database)?;
 
-    row.map(|(storage_key, media_type, manifest)| EmbedAsset {
+    let Some((storage_key, media_type, embedding_dimension, distance_metric, manifest, status)) =
+        row
+    else {
+        return Err(MlError::NotFound);
+    };
+
+    if status != "queued" {
+        return Ok(None);
+    }
+
+    let manifest = manifest.0;
+    validate_semantic_model_pack_row(&manifest, embedding_dimension, &distance_metric)?;
+
+    Ok(Some(EmbedAsset {
         storage_key,
         media_type,
-        manifest: manifest.0,
-    })
-    .ok_or(MlError::NotFound)
+        manifest,
+        embedding_dimension,
+    }))
 }
 
-async fn active_semantic_model_pack(
-    pool: &sqlx::PgPool,
-) -> Result<ActiveSemanticModelPack, MlError> {
-    let row = sqlx::query_as::<_, (Uuid, Json<ModelPackManifest>)>(
+async fn active_semantic_model_pack(pool: &PgPool) -> Result<ActiveSemanticModelPack, MlError> {
+    let row = sqlx::query_as::<_, (Uuid, i32, String, Json<ModelPackManifest>)>(
         r#"
-        SELECT id, manifest
+        SELECT id, embedding_dimension, distance_metric, manifest
         FROM model_packs
         WHERE kind = 'semantic_image_text'
           AND status = 'active'
           AND self_test_status = 'passed'
+        ORDER BY activated_at DESC NULLS LAST, updated_at DESC, id ASC
+        LIMIT 1
         "#,
     )
     .fetch_optional(pool)
     .await
     .map_err(MlError::Database)?;
 
-    row.map(|(model_pack_id, manifest)| ActiveSemanticModelPack {
+    let Some((model_pack_id, embedding_dimension, distance_metric, manifest)) = row else {
+        return Err(MlError::NotFound);
+    };
+
+    let manifest = manifest.0;
+    validate_semantic_model_pack_row(&manifest, embedding_dimension, &distance_metric)?;
+
+    Ok(ActiveSemanticModelPack {
         model_pack_id,
-        manifest: manifest.0,
+        manifest,
     })
-    .ok_or(MlError::NotFound)
+}
+
+fn validate_semantic_model_pack_row(
+    manifest: &ModelPackManifest,
+    embedding_dimension: i32,
+    distance_metric: &str,
+) -> Result<(), MlError> {
+    let validated = validate_model_pack_manifest(manifest)?;
+
+    if validated.kind != ModelPackKind::SemanticImageText {
+        return Err(ModelPackError::InvalidManifest("kind").into());
+    }
+
+    if manifest.embedding_dimension != embedding_dimension {
+        return Err(ModelPackError::InvalidManifest("embedding_dimension").into());
+    }
+
+    if manifest.distance_metric != distance_metric {
+        return Err(ModelPackError::InvalidManifest("distance_metric").into());
+    }
+
+    Ok(())
 }
 
 fn uuid_field(value: &Value, field: &str) -> Result<Uuid, MlError> {
@@ -270,9 +659,65 @@ fn uuid_field(value: &Value, field: &str) -> Result<Uuid, MlError> {
 
 fn valid_text_query(query: &str) -> Result<&str, MlError> {
     let trimmed = query.trim();
-    if trimmed.is_empty() || trimmed.chars().count() > MAX_TEXT_QUERY_CHARS {
+
+    if trimmed.is_empty()
+        || trimmed.len() > MAX_TEXT_QUERY_BYTES
+        || trimmed.chars().count() > MAX_TEXT_QUERY_CHARS
+    {
         Err(MlError::InvalidTextQuery)
     } else {
         Ok(trimmed)
     }
+}
+
+fn is_supported_still_image_media_type(media_type: &str) -> bool {
+    // Keep this strict. GIF and WebP can be animated; enable them only after
+    // the runtime explicitly rejects animated variants or defines first-frame
+    // embedding semantics.
+    matches!(media_type, "image/jpeg" | "image/png")
+}
+
+fn is_terminal_reindex_failure(error: &MlError) -> bool {
+    match error {
+        MlError::NotFound
+        | MlError::UnsupportedMediaType
+        | MlError::ImageTooLarge
+        | MlError::InvalidStorageKey(_) => true,
+
+        MlError::Model(
+            ModelPackError::InvalidManifest(_)
+            | ModelPackError::NotFound
+            | ModelPackError::InvalidEmbedding(_)
+            | ModelPackError::SelfTestRequired
+            | ModelPackError::InvalidFilePath
+            | ModelPackError::FileVerificationFailed
+            | ModelPackError::StorageKey(_),
+        ) => true,
+
+        MlError::Model(ModelPackError::Storage(StorageError::ObjectTooLarge)) => true,
+
+        MlError::SemanticIndex(
+            SemanticIndexError::InvalidModelPack
+            | SemanticIndexError::DimensionMismatch
+            | SemanticIndexError::InvalidLimit
+            | SemanticIndexError::AssetUnavailable,
+        ) => true,
+
+        MlError::UnsupportedJobKind
+        | MlError::InvalidJobPayload
+        | MlError::InvalidTextQuery
+        | MlError::RuntimeUnavailable
+        | MlError::Storage(_)
+        | MlError::Model(_)
+        | MlError::SemanticIndex(SemanticIndexError::Database(_))
+        | MlError::Database(_) => false,
+    }
+}
+
+fn reindex_error_message(error: &MlError) -> String {
+    truncate_chars(&error.to_string(), MAX_REINDEX_ERROR_MESSAGE_CHARS)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }

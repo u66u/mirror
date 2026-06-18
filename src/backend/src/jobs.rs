@@ -83,6 +83,25 @@ pub struct LeasedJob {
     pub max_attempts: i32,
 }
 
+/// Result of recording a leased job failure.
+#[derive(Debug, PartialEq)]
+pub struct JobFailureOutcome {
+    /// Whether the leased job row was updated.
+    pub updated: bool,
+    /// Whether the job reached its terminal dead-letter state.
+    pub dead: bool,
+    /// Job row ID.
+    pub job_id: Uuid,
+    /// Handler kind.
+    pub kind: JobKind,
+    /// Structured handler input.
+    pub payload: Value,
+    /// Number of attempts that have started.
+    pub attempts: i32,
+    /// Maximum attempts before dead-lettering.
+    pub max_attempts: i32,
+}
+
 /// Job operation failure.
 #[derive(Debug)]
 pub enum JobError {
@@ -102,7 +121,14 @@ impl std::fmt::Display for JobError {
     }
 }
 
-impl std::error::Error for JobError {}
+impl std::error::Error for JobError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Enqueues a job in the caller's transaction.
 ///
@@ -163,7 +189,9 @@ pub async fn lease_next_for_kinds(
     if kinds.is_empty() {
         return Ok(None);
     }
+
     let kind_names: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
+
     let row = sqlx::query_as::<_, (Uuid, String, Json<Value>, i32, i32)>(
         r#"
         UPDATE jobs
@@ -261,34 +289,56 @@ pub async fn complete(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<bo
 
 /// Records a leased job failure and either retries it or dead-letters it.
 ///
-/// Retry delay is exponential from the started attempt count, capped at one
-/// hour. The failure payload is structured for future admin diagnostics.
+/// This preserves the old boolean API. New worker loops should prefer
+/// `fail_with_outcome` so feature modules can react to dead-lettering.
 pub async fn fail(
     pool: &PgPool,
     job_id: Uuid,
     worker_id: &str,
     message: &str,
 ) -> Result<bool, JobError> {
-    let mut tx = pool.begin().await.map_err(JobError::Database)?;
-    let Some((attempts, max_attempts)) = sqlx::query_as::<_, (i32, i32)>(
-        r#"
-        SELECT attempts, max_attempts
-        FROM jobs
-        WHERE id = $1
-          AND status = 'leased'
-          AND lease_owner = $2
-        FOR UPDATE
-        "#,
+    Ok(
+        match fail_with_outcome(pool, job_id, worker_id, message).await? {
+            Some(outcome) => outcome.updated,
+            None => false,
+        },
     )
-    .bind(job_id)
-    .bind(worker_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(JobError::Database)?
+}
+
+/// Records a leased job failure and returns whether it dead-lettered.
+///
+/// Retry delay is exponential from the started attempt count, capped at one
+/// hour. The failure payload is structured for future admin diagnostics.
+pub async fn fail_with_outcome(
+    pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
+    message: &str,
+) -> Result<Option<JobFailureOutcome>, JobError> {
+    let mut tx = pool.begin().await.map_err(JobError::Database)?;
+
+    let Some((kind, payload, attempts, max_attempts)) =
+        sqlx::query_as::<_, (String, Json<Value>, i32, i32)>(
+            r#"
+            SELECT kind, payload, attempts, max_attempts
+            FROM jobs
+            WHERE id = $1
+              AND status = 'leased'
+              AND lease_owner = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(JobError::Database)?
     else {
-        return Ok(false);
+        return Ok(None);
     };
 
+    let kind = JobKind::from_str(&kind)?;
+    let payload = payload.0;
     let dead = attempts >= max_attempts;
     let next_status = if dead { "dead" } else { "queued" };
     let run_after = if dead {
@@ -299,9 +349,10 @@ pub async fn fail(
     let last_error = json!({
         "message": message,
         "attempts": attempts,
+        "dead": dead,
     });
 
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
         UPDATE jobs
         SET
@@ -324,10 +375,21 @@ pub async fn fail(
     .bind(Json(last_error))
     .execute(&mut *tx)
     .await
-    .map_err(JobError::Database)?;
+    .map_err(JobError::Database)?
+    .rows_affected()
+        == 1;
 
     tx.commit().await.map_err(JobError::Database)?;
-    Ok(true)
+
+    Ok(Some(JobFailureOutcome {
+        updated,
+        dead,
+        job_id,
+        kind,
+        payload,
+        attempts,
+        max_attempts,
+    }))
 }
 
 fn retry_backoff(attempts: i32) -> Duration {

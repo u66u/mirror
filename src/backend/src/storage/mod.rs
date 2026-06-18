@@ -54,6 +54,33 @@ impl ObjectStorage {
             .map_err(StorageError::OpenDal)
     }
 
+    /// Reads an object into memory while enforcing a byte limit.
+    pub async fn read_bounded(
+        &self,
+        key: &StorageKey,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, StorageError> {
+        let stream = self.read_stream(key).await?;
+        futures_util::pin_mut!(stream);
+
+        let mut output = Vec::new();
+
+        while let Some(chunk) = stream.try_next().await? {
+            let next_len = output
+                .len()
+                .checked_add(chunk.len())
+                .ok_or(StorageError::ObjectTooLarge)?;
+
+            if next_len > max_bytes {
+                return Err(StorageError::ObjectTooLarge);
+            }
+
+            output.extend_from_slice(&chunk);
+        }
+
+        Ok(output)
+    }
+
     /// Streams an object as byte chunks without materializing the whole object.
     pub async fn read_stream(
         &self,
@@ -210,4 +237,12 @@ impl std::fmt::Display for StorageError {
     }
 }
 
-impl std::error::Error for StorageError {}
+impl std::error::Error for StorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::OpenDal(error) => Some(error),
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
