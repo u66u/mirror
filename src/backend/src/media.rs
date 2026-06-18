@@ -112,8 +112,7 @@ impl ImageProcessor for RustImageProcessor {
         let resized = image.thumbnail(max_edge, max_edge);
         let (width, height) = resized.dimensions();
         let mut output = Cursor::new(Vec::new());
-        resized
-            .write_to(&mut output, ImageFormat::WebP)?;
+        resized.write_to(&mut output, ImageFormat::WebP)?;
 
         Ok(GeneratedDerivative {
             bytes: output.into_inner(),
@@ -222,7 +221,7 @@ where
         MediaKind::Video => extract_video_metadata(storage, video_processor, &original).await?,
     };
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO asset_metadata (asset_id, width, height, raw)
         VALUES ($1, $2, $3, $4)
@@ -234,11 +233,11 @@ where
             extracted_at = now(),
             updated_at = now()
         "#,
+        asset_id,
+        i32::try_from(width).map_err(|_| MediaError::UnsupportedMediaType)?,
+        i32::try_from(height).map_err(|_| MediaError::UnsupportedMediaType)?,
+        Json(raw) as _
     )
-    .bind(asset_id)
-    .bind(i32::try_from(width).map_err(|_| MediaError::UnsupportedMediaType)?)
-    .bind(i32::try_from(height).map_err(|_| MediaError::UnsupportedMediaType)?)
-    .bind(Json(raw))
     .execute(pool)
     .await?;
 
@@ -264,7 +263,7 @@ async fn extract_image_metadata(
     })
     .await
     .map_err(|_| MediaError::ProcessingTaskFailed)??;
-        let raw = json!({
+    let raw = json!({
         "width": info.width,
         "height": info.height,
         "extractor": METADATA_VERSION,
@@ -418,12 +417,10 @@ where
         .map_err(|_| MediaError::UnsupportedMediaType)?;
 
         if !storage.exists(&key).await? {
-            storage
-                .write(&key, generated.bytes.clone())
-                .await?;
+            storage.write(&key, generated.bytes.clone()).await?;
         }
 
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO derivatives (
                 id,
@@ -446,17 +443,17 @@ where
                 height = EXCLUDED.height,
                 size_bytes = EXCLUDED.size_bytes
             "#,
+            Uuid::now_v7(),
+            asset_id,
+            "thumbnail",
+            "webp",
+            "1",
+            original.blake3_hash,
+            key.as_str(),
+            generated.width as i32,
+            generated.height as i32,
+            generated.bytes.len() as i64,
         )
-        .bind(Uuid::now_v7())
-        .bind(asset_id)
-        .bind(kind.as_str())
-        .bind(generated.format)
-        .bind(generator_version)
-        .bind(&original.blake3_hash)
-        .bind(key.as_str())
-        .bind(i32::try_from(generated.width).map_err(|_| MediaError::UnsupportedMediaType)?)
-        .bind(i32::try_from(generated.height).map_err(|_| MediaError::UnsupportedMediaType)?)
-        .bind(i64::try_from(generated.bytes.len()).map_err(|_| MediaError::UnsupportedMediaType)?)
         .execute(pool)
         .await?;
     }
@@ -477,9 +474,11 @@ async fn generate_image_derivatives(
     ensure_loaded_size(original, bytes.len())?;
     let processor = processor.clone();
     let media_type = original.media_type.clone();
-    tokio::task::spawn_blocking(move || generate_image_sizes(&processor, &bytes, &media_type))
-        .await
-        .map_err(|_| MediaError::ProcessingTaskFailed)??
+    Ok(
+        tokio::task::spawn_blocking(move || generate_image_sizes(&processor, &bytes, &media_type))
+            .await
+            .map_err(|_| MediaError::ProcessingTaskFailed)??,
+    )
 }
 
 async fn generate_video_derivatives(
@@ -501,11 +500,11 @@ async fn generate_video_derivatives(
     .await
     .map_err(|_| MediaError::ProcessingTaskFailed)??;
     let image_processor = image_processor.clone();
-    tokio::task::spawn_blocking(move || {
+    Ok(tokio::task::spawn_blocking(move || {
         generate_image_sizes(&image_processor, &poster, "image/webp")
     })
     .await
-    .map_err(|_| MediaError::ProcessingTaskFailed)??
+    .map_err(|_| MediaError::ProcessingTaskFailed)??)
 }
 
 fn generate_image_sizes(
@@ -544,25 +543,23 @@ enum MediaKind {
 }
 
 async fn load_asset_original(pool: &PgPool, asset_id: Uuid) -> Result<AssetOriginal, MediaError> {
-    sqlx::query_as::<_, (String, String, String, i64)>(
+    sqlx::query!(
         r#"
         SELECT o.blake3_hash, o.storage_key, o.media_type, o.size_bytes
         FROM assets a
         JOIN originals o ON o.id = a.original_id
         WHERE a.id = $1
         "#,
+        asset_id
     )
-    .bind(asset_id)
     .fetch_optional(pool)
     .await?
-    .map(
-        |(blake3_hash, storage_key, media_type, size_bytes)| AssetOriginal {
-            blake3_hash,
-            storage_key,
-            media_type,
-            size_bytes,
-        },
-    )
+    .map(|row| AssetOriginal {
+        blake3_hash: row.blake3_hash,
+        storage_key: row.storage_key,
+        media_type: row.media_type,
+        size_bytes: row.size_bytes,
+    })
     .ok_or(MediaError::AssetNotFound)
 }
 
@@ -598,7 +595,8 @@ async fn stage_video_original(
     }
     let temp_dir = tempfile::Builder::new()
         .prefix("mirror-media-")
-        .tempdir()?;
+        .tempdir()
+        .map_err(MediaError::TemporaryStorage)?;
     let input = temp_dir.path().join("original");
     let copied = storage
         .copy_to_path_bounded(

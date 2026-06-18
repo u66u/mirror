@@ -341,7 +341,7 @@ pub async fn storage_test_deps() -> TestResult<StorageTestDeps> {
 
 #[allow(dead_code)] // T105/T202/T204: called through `fresh_owner_pool` in DB-backed test crates.
 pub async fn reset_owner(pool: &sqlx::PgPool) -> TestResult {
-    sqlx::query(
+    sqlx::query!(
         "TRUNCATE jobs, originals, owner_accounts, rate_limit_buckets, model_packs CASCADE",
     )
     .execute(pool)
@@ -419,8 +419,7 @@ pub async fn create_promoted_asset(
 ) -> TestResult<PromotedAssetIds> {
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, filename).await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    let internal_id = sqlx::query_scalar("SELECT id FROM assets WHERE public_id = $1")
-        .bind(promoted.asset_id)
+    let internal_id = sqlx::query_scalar!("SELECT id FROM assets WHERE public_id = $1", promoted.asset_id)
         .fetch_one(&deps.pool)
         .await?;
 
@@ -491,21 +490,21 @@ pub fn write_executable_script(path: &Path, body: &str) -> TestResult {
 
 #[allow(dead_code)] // T204/T302: shared row assertion for asset-producing integration tests.
 pub async fn asset_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar("SELECT count(*) FROM assets")
+    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM assets"#)
         .fetch_one(pool)
         .await?)
 }
 
 #[allow(dead_code)] // T204/T301: shared row assertion for enqueue/worker integration tests.
 pub async fn job_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar("SELECT count(*) FROM jobs")
+    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM jobs"#)
         .fetch_one(pool)
         .await?)
 }
 
 #[allow(dead_code)] // T204: shared row assertion for promotion integration tests.
 pub async fn original_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar("SELECT count(*) FROM originals")
+    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM originals"#)
         .fetch_one(pool)
         .await?)
 }

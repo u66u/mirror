@@ -10,8 +10,8 @@ use std::path::Path;
 use bytes::Bytes;
 use futures_util::{Stream, TryStreamExt, stream};
 use opendal::{Operator, services::Fs};
-use tokio::io::AsyncWriteExt;
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 
 pub use keys::{StorageKey, StorageKeyError};
 

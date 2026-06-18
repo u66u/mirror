@@ -4,9 +4,9 @@
 //! IP handling must eventually pass through trusted-proxy validation.
 
 use sqlx::PgPool;
+use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use thiserror::Error;
 
 use crate::auth::{OpaqueToken, TokenHash};
 
@@ -82,7 +82,7 @@ pub async fn create_session(
     let csrf_token_hash = csrf_token.hash();
     let session_id = Uuid::now_v7();
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO sessions (
             id,
@@ -95,13 +95,13 @@ pub async fn create_session(
         )
         VALUES ($1, $2, $3, $4, now() + interval '30 days', $5, $6)
         "#,
+        session_id,
+        input.owner_id,
+        token_hash.as_bytes().as_slice(),
+        csrf_token_hash.as_bytes().as_slice(),
+        input.user_agent,
+        input.device_name
     )
-    .bind(session_id)
-    .bind(input.owner_id)
-    .bind(token_hash.as_bytes().as_slice())
-    .bind(csrf_token_hash.as_bytes().as_slice())
-    .bind(input.user_agent)
-    .bind(input.device_name)
     .execute(pool)
     .await
     .map_err(SessionError::Database)?;
@@ -119,7 +119,7 @@ pub async fn authenticate_session(
     raw_token: &str,
 ) -> Result<Option<AuthenticatedSession>, SessionError> {
     let token_hash = TokenHash::from_raw(raw_token);
-    let session = sqlx::query_as::<_, (Uuid, i16)>(
+    let session = sqlx::query!(
         r#"
         UPDATE sessions
         SET last_seen_at = now()
@@ -128,29 +128,28 @@ pub async fn authenticate_session(
           AND expires_at > now()
         RETURNING id, owner_id
         "#,
+        token_hash.as_bytes().as_slice()
     )
-    .bind(token_hash.as_bytes().as_slice())
     .fetch_optional(pool)
-    .await
-    .map_err(SessionError::Database)?;
+    .await?;
 
-    Ok(session.map(|(session_id, owner_id)| AuthenticatedSession {
-        session_id,
-        owner_id,
+    Ok(session.map(|row| AuthenticatedSession {
+        session_id: row.id,
+        owner_id: row.owner_id,
     }))
 }
 
 /// Revokes a session. Idempotent for nonexistent/already-revoked sessions.
 pub async fn revoke_session(pool: &PgPool, session_id: Uuid) -> Result<(), SessionError> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE sessions
         SET revoked_at = COALESCE(revoked_at, now()),
             revocation_reason = COALESCE(revocation_reason, 'logout')
         WHERE id = $1
         "#,
+        session_id
     )
-    .bind(session_id)
     .execute(pool)
     .await
     .map_err(SessionError::Database)?;
@@ -164,17 +163,7 @@ pub async fn list_sessions(
     owner_id: i16,
     current_session_id: Uuid,
 ) -> Result<Vec<SessionInfo>, SessionError> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            Option<String>,
-            Option<String>,
-            OffsetDateTime,
-            Option<OffsetDateTime>,
-            OffsetDateTime,
-        ),
-    >(
+    let rows = sqlx::query!(
         r#"
         SELECT id, device_name, user_agent, created_at, last_seen_at, expires_at
         FROM sessions
@@ -183,27 +172,22 @@ pub async fn list_sessions(
           AND expires_at > now()
         ORDER BY COALESCE(last_seen_at, created_at) DESC
         "#,
+        owner_id
     )
-    .bind(owner_id)
     .fetch_all(pool)
-    .await
-    .map_err(SessionError::Database)?;
+    .await?;
 
     Ok(rows
         .into_iter()
-        .map(
-            |(session_id, device_name, user_agent, created_at, last_seen_at, expires_at)| {
-                SessionInfo {
-                    session_id,
-                    device_name,
-                    user_agent,
-                    created_at,
-                    last_seen_at,
-                    expires_at,
-                    is_current: session_id == current_session_id,
-                }
-            },
-        )
+        .map(|row| SessionInfo {
+            session_id: row.id,
+            device_name: row.device_name,
+            user_agent: row.user_agent,
+            created_at: row.created_at,
+            last_seen_at: row.last_seen_at,
+            expires_at: row.expires_at,
+            is_current: row.id == current_session_id,
+        })
         .collect())
 }
 
@@ -214,7 +198,7 @@ pub async fn verify_session_csrf(
     raw_csrf_token: &str,
 ) -> Result<bool, SessionError> {
     let csrf_hash = TokenHash::from_raw(raw_csrf_token);
-    sqlx::query_scalar::<_, bool>(
+    let valid = sqlx::query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -225,10 +209,11 @@ pub async fn verify_session_csrf(
               AND expires_at > now()
         )
         "#,
+        session_id,
+        csrf_hash.as_bytes().as_slice()
     )
-    .bind(session_id)
-    .bind(csrf_hash.as_bytes().as_slice())
     .fetch_one(pool)
-    .await
-    .map_err(SessionError::Database)
+    .await?;
+
+    Ok(valid.unwrap_or(false))
 }

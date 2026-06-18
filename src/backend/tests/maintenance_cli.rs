@@ -151,14 +151,12 @@ printf '%s\n' 'dump' > "$out"
     assert!(!stdout.contains(&test_database_url));
     assert_eq!(std::fs::read_to_string(&dump_path)?, "dump\n");
 
-    let row: (String, Option<String>, serde_json::Value) = sqlx::query_as(
-        r#"
+    let row: (String, Option<String>, serde_json::Value) = sqlx::query_as(r#"
         SELECT status, snapshot_id, manifest
         FROM backup_runs
         ORDER BY created_at DESC
         LIMIT 1
-        "#,
-    )
+        "#)
     .fetch_one(&pool)
     .await?;
     assert_eq!(row.0, "succeeded");
@@ -178,16 +176,16 @@ async fn maintenance_restore_check_marks_failed_when_original_object_missing() -
     let bytes = b"missing-after-restore";
     let hash = blake3::hash(bytes).to_hex().to_string();
     let key = StorageKey::original_blake3(&hash)?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO originals (id, blake3_hash, storage_key, size_bytes, media_type)
         VALUES ($1, $2, $3, $4, 'image/jpeg')
         "#,
+        Uuid::now_v7(),
+        hash,
+        key.as_str(),
+        i64::try_from(bytes.len())?
     )
-    .bind(Uuid::now_v7())
-    .bind(&hash)
-    .bind(key.as_str())
-    .bind(i64::try_from(bytes.len())?)
     .execute(&pool)
     .await?;
     let run = create_backup_run(

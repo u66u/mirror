@@ -16,6 +16,7 @@ use sqlx::{PgPool, types::Json};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::paths::clean_path;
 use crate::storage::{ObjectStorage, StorageError, StorageKey};
 
 /// Durable storage object manifest for backup tooling.
@@ -98,6 +99,18 @@ pub enum BackupRunStatus {
 }
 
 impl BackupRunStatus {
+    fn try_from_str(s: &str) -> Option<Self> {
+        match s {
+            "planned" => Some(Self::Planned),
+            "running" => Some(Self::Running),
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "restore_check_succeeded" => Some(Self::RestoreCheckSucceeded),
+            "restore_check_failed" => Some(Self::RestoreCheckFailed),
+            _ => None,
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Planned => "planned",
@@ -172,7 +185,7 @@ pub async fn create_backup_run(
     input: CreateBackupRunInput,
 ) -> Result<BackupRun, BackupError> {
     let id = Uuid::now_v7();
-    let row = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+    let row = sqlx::query!(
         r#"
         INSERT INTO backup_runs (
             id,
@@ -184,17 +197,20 @@ pub async fn create_backup_run(
         VALUES ($1, 'restic', 'planned', $2, $3)
         RETURNING id, status, snapshot_id
         "#,
+        id,
+        input.repository_hint,
+        sqlx::types::Json(&input.manifest) as _
     )
-    .bind(id)
-    .bind(input.repository_hint)
-    .bind(Json(input.manifest))
     .fetch_one(pool)
     .await?;
 
+    let status_str = BackupRunStatus::try_from_str(row.status.as_str())
+        .ok_or_else(|| BackupError::InvalidStorageKey("status".into()))?;
+
     Ok(BackupRun {
-        backup_run_id: row.0,
-        status: row.1,
-        snapshot_id: row.2,
+        backup_run_id: row.id,
+        status: status_str.as_str().to_string(),
+        snapshot_id: row.snapshot_id,
     })
 }
 
@@ -253,8 +269,8 @@ pub fn restic_backup_plan(
     storage_root: &Path,
     postgres_dump_path: &Path,
 ) -> Result<ResticBackupPlan, BackupError> {
-    let storage_root = clean_path(storage_root)?;
-    let postgres_dump_path = clean_path(postgres_dump_path)?;
+    let storage_root = clean_backup_path(storage_root)?;
+    let postgres_dump_path = clean_backup_path(postgres_dump_path)?;
     Ok(ResticBackupPlan {
         program: "restic",
         args: vec![
@@ -281,7 +297,7 @@ pub fn restic_restore_plan(
     restore_target: &Path,
 ) -> Result<ResticRestorePlan, BackupError> {
     let snapshot_id = clean_snapshot_id(snapshot_id)?;
-    let restore_target = clean_path(restore_target)?;
+    let restore_target = clean_backup_path(restore_target)?;
     Ok(ResticRestorePlan {
         program: "restic",
         args: vec![
@@ -299,7 +315,7 @@ pub fn restic_restore_plan(
 /// The destination database URL is supplied through `PGDATABASE` at execution
 /// time so it is not exposed through process argv.
 pub fn postgres_restore_plan(dump_path: &Path) -> Result<PostgresRestorePlan, BackupError> {
-    let dump_path = clean_path(dump_path)?;
+    let dump_path = clean_backup_path(dump_path)?;
     Ok(PostgresRestorePlan {
         program: "pg_restore",
         args: vec![
@@ -317,7 +333,7 @@ pub fn postgres_restore_plan(dump_path: &Path) -> Result<PostgresRestorePlan, Ba
 /// The database URL is supplied through `PGDATABASE` at execution time so it is
 /// not exposed through process argv.
 pub fn postgres_dump_plan(dump_path: &Path) -> Result<PostgresDumpPlan, BackupError> {
-    let dump_path = clean_path(dump_path)?;
+    let dump_path = clean_backup_path(dump_path)?;
     Ok(PostgresDumpPlan {
         program: "pg_dump",
         args: vec![
@@ -337,7 +353,8 @@ pub fn run_postgres_dump_plan(
     let output = Command::new(plan.program)
         .args(&plan.args)
         .env("PGDATABASE", database_url)
-        .output()?;
+        .output()
+        .map_err(BackupError::Command)?;
     if output.status.success() {
         Ok(())
     } else {
@@ -353,7 +370,8 @@ pub fn run_postgres_dump_plan(
 pub fn run_restic_backup_plan(plan: &ResticBackupPlan) -> Result<ResticBackupOutput, BackupError> {
     let output = Command::new(plan.program)
         .args(&plan.args)
-        .output()?;
+        .output()
+        .map_err(BackupError::Command)?;
     if !output.status.success() {
         return Err(BackupError::ResticFailed);
     }
@@ -406,7 +424,7 @@ async fn update_backup_run(
     error_message: Option<&str>,
 ) -> Result<BackupRun, BackupError> {
     let mut tx = pool.begin().await?;
-    let row = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+    let row = sqlx::query!(
         r#"
         UPDATE backup_runs
         SET
@@ -422,14 +440,24 @@ async fn update_backup_run(
         WHERE id = $1
         RETURNING id, status, snapshot_id
         "#,
+        backup_run_id,
+        status.as_str(),
+        snapshot_id,
+        error_message
     )
-    .bind(backup_run_id)
-    .bind(status.as_str())
-    .bind(snapshot_id)
-    .bind(error_message)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query(
+
+    let action = backup_audit_action(status);
+    let outcome = backup_audit_outcome(status);
+    let target_id = backup_run_id.to_string();
+    let meta = Json(json!({
+        "status": status.as_str(),
+        "snapshot_recorded": snapshot_id.is_some(),
+        "error_recorded": error_message.is_some(),
+    }));
+
+    sqlx::query!(
         r#"
         INSERT INTO audit_events (
             actor_kind,
@@ -448,23 +476,19 @@ async fn update_backup_run(
             $4
         )
         "#,
+        action,
+        outcome,
+        target_id,
+        meta as _
     )
-    .bind(backup_audit_action(status))
-    .bind(backup_audit_outcome(status))
-    .bind(backup_run_id.to_string())
-    .bind(Json(json!({
-        "status": status.as_str(),
-        "snapshot_recorded": snapshot_id.is_some(),
-        "error_recorded": error_message.is_some(),
-    })))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
 
     Ok(BackupRun {
-        backup_run_id: row.0,
-        status: row.1,
-        snapshot_id: row.2,
+        backup_run_id: row.id,
+        status: row.status,
+        snapshot_id: row.snapshot_id,
     })
 }
 
@@ -497,19 +521,8 @@ pub fn backup_manifest_summary(object_count: usize) -> Value {
     })
 }
 
-fn clean_path(path: &Path) -> Result<PathBuf, BackupError> {
-    if path.as_os_str().is_empty() {
-        return Err(BackupError::InvalidPath);
-    }
-    if path.components().any(|component| {
-        matches!(
-            component,
-            std::path::Component::ParentDir | std::path::Component::CurDir
-        )
-    }) {
-        return Err(BackupError::InvalidPath);
-    }
-    Ok(path.to_path_buf())
+fn clean_backup_path(path: &Path) -> Result<PathBuf, BackupError> {
+    clean_path(path).map_err(|_| BackupError::InvalidPath)
 }
 
 fn clean_snapshot_id(snapshot_id: &str) -> Result<&str, BackupError> {

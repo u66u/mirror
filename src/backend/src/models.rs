@@ -17,10 +17,12 @@ use sqlx::{PgPool, types::Json};
 use uuid::Uuid;
 
 use crate::jobs::{self, JobKind, JobSpec};
+use crate::paths::validate_relative_str;
 use crate::storage::{ObjectStorage, StorageKey, StorageKeyError};
 
 /// Supported model task kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ModelPackKind {
     /// Shared image/text embedding space for semantic search.
     SemanticImageText,
@@ -39,7 +41,8 @@ impl ModelPackKind {
 }
 
 /// Supported model runtimes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ModelRuntime {
     /// ONNX Runtime through the ML worker.
     Onnx,
@@ -55,7 +58,8 @@ impl ModelRuntime {
 }
 
 /// Vector distance metric emitted by the model pack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum DistanceMetric {
     /// Cosine distance.
     Cosine,
@@ -236,7 +240,7 @@ pub async fn install_model_pack(
     let id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
 
-    let row = sqlx::query_as::<_, (Uuid, String, String)>(
+    let row = sqlx::query!(
         r#"
         INSERT INTO model_packs (
             id,
@@ -252,39 +256,39 @@ pub async fn install_model_pack(
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id, status, self_test_status
         "#,
+        id,
+        validated.kind as ModelPackKind,
+        validated.runtime as ModelRuntime,
+        manifest.model_key,
+        manifest.model_revision,
+        manifest.license,
+        manifest.embedding_dimension,
+        std::option::Option::<DistanceMetric>::from(validated.distance_metric) as _,
+        sqlx::types::Json(&manifest) as _
     )
-    .bind(id)
-    .bind(validated.kind.as_str())
-    .bind(validated.runtime.as_str())
-    .bind(&manifest.model_key)
-    .bind(&manifest.model_revision)
-    .bind(&manifest.license)
-    .bind(manifest.embedding_dimension)
-    .bind(validated.distance_metric.as_str())
-    .bind(Json(manifest_json))
     .fetch_one(&mut *tx)
     .await?;
 
     for file in manifest.files {
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO model_pack_files (model_pack_id, path, sha256, size_bytes)
             VALUES ($1, $2, $3, $4)
             "#,
+            id,
+            file.path,
+            file.sha256,
+            file.size_bytes
         )
-        .bind(id)
-        .bind(file.path)
-        .bind(file.sha256)
-        .bind(file.size_bytes)
         .execute(&mut *tx)
         .await?;
     }
 
     tx.commit().await?;
     Ok(InstalledModelPack {
-        model_pack_id: row.0,
-        status: row.1,
-        self_test_status: row.2,
+        model_pack_id: row.id,
+        status: row.status,
+        self_test_status: row.self_test_status,
     })
 }
 
@@ -347,7 +351,7 @@ pub async fn record_model_pack_self_test(
     passed: bool,
     error_message: Option<&str>,
 ) -> Result<InstalledModelPack, ModelPackError> {
-    let row = sqlx::query_as::<_, (Uuid, String, String)>(
+    let row = sqlx::query!(
         r#"
         UPDATE model_packs
         SET
@@ -357,10 +361,10 @@ pub async fn record_model_pack_self_test(
         WHERE id = $1
         RETURNING id, status, self_test_status
         "#,
+        model_pack_id,
+        passed,
+        error_message
     )
-    .bind(model_pack_id)
-    .bind(passed)
-    .bind(error_message)
     .fetch_optional(pool)
     .await?;
 
@@ -368,9 +372,9 @@ pub async fn record_model_pack_self_test(
         return Err(ModelPackError::NotFound);
     };
     Ok(InstalledModelPack {
-        model_pack_id: row.0,
-        status: row.1,
-        self_test_status: row.2,
+        model_pack_id: row.id,
+        status: row.status,
+        self_test_status: row.self_test_status,
     })
 }
 
@@ -381,52 +385,52 @@ pub async fn activate_model_pack(
     model_pack_id: Uuid,
 ) -> Result<InstalledModelPack, ModelPackError> {
     let mut tx = pool.begin().await?;
-    let row = sqlx::query_as::<_, (String, String)>(
+    let row = sqlx::query!(
         r#"
         SELECT kind, self_test_status
         FROM model_packs
         WHERE id = $1
         FOR UPDATE
         "#,
+        model_pack_id
     )
-    .bind(model_pack_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((kind, self_test_status)) = row else {
+    let Some(row) = row else {
         return Err(ModelPackError::NotFound);
     };
-    if self_test_status != "passed" {
+    if row.self_test_status != "passed" {
         return Err(ModelPackError::SelfTestRequired);
     }
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE model_packs
         SET status = 'installed', activated_at = NULL, updated_at = now()
         WHERE kind = $1 AND status = 'active'
         "#,
+        row.kind
     )
-    .bind(&kind)
     .execute(&mut *tx)
     .await?;
 
-    let row = sqlx::query_as::<_, (Uuid, String, String)>(
+    let updated_row = sqlx::query!(
         r#"
         UPDATE model_packs
         SET status = 'active', activated_at = now(), updated_at = now()
         WHERE id = $1
         RETURNING id, status, self_test_status
         "#,
+        model_pack_id
     )
-    .bind(model_pack_id)
     .fetch_one(&mut *tx)
     .await?;
 
     tx.commit().await?;
     Ok(InstalledModelPack {
-        model_pack_id: row.0,
-        status: row.1,
-        self_test_status: row.2,
+        model_pack_id: updated_row.id,
+        status: updated_row.status,
+        self_test_status: updated_row.self_test_status,
     })
 }
 
@@ -436,31 +440,28 @@ pub async fn start_model_reindex(
     model_pack_id: Uuid,
 ) -> Result<ModelReindexRun, ModelPackError> {
     let mut tx = pool.begin().await?;
-    let row = sqlx::query_as::<_, (String, String)>(
+    let row = sqlx::query!(
         r#"
-        SELECT kind, self_test_status
+        SELECT kind
         FROM model_packs
         WHERE id = $1
         FOR UPDATE
         "#,
+        model_pack_id
     )
-    .bind(model_pack_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((kind, self_test_status)) = row else {
+    let Some(row) = row else {
         return Err(ModelPackError::NotFound);
     };
-    if self_test_status != "passed" {
-        return Err(ModelPackError::SelfTestRequired);
-    }
 
-    let asset_ids: Vec<Uuid> = sqlx::query_scalar(
+    let asset_ids: Vec<Uuid> = sqlx::query_scalar!(
         r#"
         SELECT id
         FROM assets
         WHERE trashed_at IS NULL
         ORDER BY created_at ASC, id ASC
-        "#,
+        "#
     )
     .fetch_all(&mut *tx)
     .await?;
@@ -473,7 +474,7 @@ pub async fn start_model_reindex(
     };
     let run_id = Uuid::now_v7();
 
-    let row = sqlx::query_as::<_, (Uuid, Uuid, String, i32, i32, i32, i32)>(
+    let row = sqlx::query!(
         r#"
         INSERT INTO model_reindex_runs (
             id,
@@ -487,24 +488,24 @@ pub async fn start_model_reindex(
         VALUES ($1, $2, $3, $4, $5, $5, CASE WHEN $4 = 'succeeded' THEN now() ELSE NULL END)
         RETURNING id, model_pack_id, status, total_assets, queued_assets, processed_assets, failed_assets
         "#,
+        run_id,
+        model_pack_id,
+        row.kind,
+        status,
+        total_assets
     )
-    .bind(run_id)
-    .bind(model_pack_id)
-    .bind(&kind)
-    .bind(status)
-    .bind(total_assets)
     .fetch_one(&mut *tx)
     .await?;
 
     for asset_id in asset_ids {
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO model_reindex_assets (reindex_run_id, asset_id)
             VALUES ($1, $2)
             "#,
+            run_id,
+            asset_id
         )
-        .bind(run_id)
-        .bind(asset_id)
         .execute(&mut *tx)
         .await?;
         jobs::enqueue_in_tx(
@@ -524,13 +525,13 @@ pub async fn start_model_reindex(
 
     tx.commit().await?;
     Ok(ModelReindexRun {
-        reindex_run_id: row.0,
-        model_pack_id: row.1,
-        status: row.2,
-        total_assets: row.3,
-        queued_assets: row.4,
-        processed_assets: row.5,
-        failed_assets: row.6,
+        reindex_run_id: row.id,
+        model_pack_id: row.model_pack_id,
+        status: row.status,
+        total_assets: row.total_assets,
+        queued_assets: row.queued_assets,
+        processed_assets: row.processed_assets,
+        failed_assets: row.failed_assets,
     })
 }
 
@@ -546,7 +547,7 @@ pub async fn record_reindex_asset_result(
     error_message: Option<&str>,
 ) -> Result<ModelReindexRun, ModelPackError> {
     let mut tx = pool.begin().await?;
-    let changed = sqlx::query_scalar::<_, bool>(
+    let changed = sqlx::query_scalar!(
         r#"
         UPDATE model_reindex_assets
         SET
@@ -556,19 +557,19 @@ pub async fn record_reindex_asset_result(
         WHERE reindex_run_id = $1
           AND asset_id = $2
           AND status = 'queued'
-        RETURNING true
+        RETURNING true as "b!"
         "#,
+        reindex_run_id,
+        asset_id,
+        succeeded,
+        error_message
     )
-    .bind(reindex_run_id)
-    .bind(asset_id)
-    .bind(succeeded)
-    .bind(error_message)
     .fetch_optional(&mut *tx)
     .await?
     .unwrap_or(false);
 
     if changed {
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE model_reindex_runs
             SET
@@ -592,21 +593,21 @@ pub async fn record_reindex_asset_result(
                 updated_at = now()
             WHERE id = $1
             "#,
+            reindex_run_id,
+            succeeded
         )
-        .bind(reindex_run_id)
-        .bind(succeeded)
         .execute(&mut *tx)
         .await?;
     }
 
-    let row = sqlx::query_as::<_, (Uuid, Uuid, String, i32, i32, i32, i32)>(
+    let row = sqlx::query!(
         r#"
         SELECT id, model_pack_id, status, total_assets, queued_assets, processed_assets, failed_assets
         FROM model_reindex_runs
         WHERE id = $1
         "#,
+        reindex_run_id
     )
-    .bind(reindex_run_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
@@ -614,13 +615,13 @@ pub async fn record_reindex_asset_result(
     };
     tx.commit().await?;
     Ok(ModelReindexRun {
-        reindex_run_id: row.0,
-        model_pack_id: row.1,
-        status: row.2,
-        total_assets: row.3,
-        queued_assets: row.4,
-        processed_assets: row.5,
-        failed_assets: row.6,
+        reindex_run_id: row.id,
+        model_pack_id: row.model_pack_id,
+        status: row.status,
+        total_assets: row.total_assets,
+        queued_assets: row.queued_assets,
+        processed_assets: row.processed_assets,
+        failed_assets: row.failed_assets,
     })
 }
 
@@ -711,18 +712,7 @@ fn require_text(value: &str, max_len: usize, field: &'static str) -> Result<(), 
 }
 
 fn validate_pack_path(value: &str, field: &'static str) -> Result<(), ModelPackError> {
-    if value.is_empty()
-        || value.len() > 300
-        || value.starts_with('/')
-        || value.contains('\\')
-        || value
-            .split('/')
-            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
-    {
-        Err(ModelPackError::InvalidManifest(field))
-    } else {
-        Ok(())
-    }
+    validate_relative_str(value, 300).map_err(|_| ModelPackError::InvalidManifest(field))
 }
 
 fn validate_sha256(value: &str, field: &'static str) -> Result<(), ModelPackError> {

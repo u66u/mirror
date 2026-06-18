@@ -4,8 +4,8 @@
 //! enter `rate_limit_buckets`.
 
 use sqlx::PgPool;
-use time::{Duration, OffsetDateTime};
 use thiserror::Error;
+use time::{Duration, OffsetDateTime};
 
 use crate::config::RateLimitSecret;
 
@@ -26,7 +26,7 @@ pub async fn is_blocked(
     now: OffsetDateTime,
 ) -> Result<bool, RateLimitError> {
     let key_hash = key_hash(secret, action, key);
-    let blocked = sqlx::query_scalar::<_, bool>(
+    let blocked = sqlx::query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -36,14 +36,14 @@ pub async fn is_blocked(
               AND blocked_until > $3
         )
         "#,
+        action,
+        key_hash.as_slice(),
+        now
     )
-    .bind(action)
-    .bind(key_hash.as_slice())
-    .bind(now)
     .fetch_one(pool)
     .await?;
 
-    Ok(blocked)
+    Ok(blocked.unwrap_or(false))
 }
 
 /// Records one failed sensitive action and returns whether it is now blocked.
@@ -96,7 +96,7 @@ async fn record_counted_attempt(
     let key_hash = key_hash(secret, input.action, input.key);
     let window_expires_at = input.now + input.window;
     let block_until = input.now + input.block_for;
-    let blocked_until = sqlx::query_scalar::<_, Option<OffsetDateTime>>(
+    let blocked_until = sqlx::query_scalar!(
         r#"
         WITH upserted AS (
             INSERT INTO rate_limit_buckets (
@@ -115,7 +115,7 @@ async fn record_counted_attempt(
                 'blake3-keyed',
                 1,
                 $3,
-                CASE WHEN $4 <= 1 THEN $5 ELSE NULL END,
+                CASE WHEN $4 <= 1 THEN $5::timestamptz ELSE NULL END,
                 $6,
                 $3
             )
@@ -147,13 +147,13 @@ async fn record_counted_attempt(
         )
         SELECT blocked_until FROM upserted
         "#,
+        input.action,
+        key_hash.as_slice(),
+        input.now,
+        input.max_attempts,
+        block_until,
+        window_expires_at
     )
-    .bind(input.action)
-    .bind(key_hash.as_slice())
-    .bind(input.now)
-    .bind(input.max_attempts)
-    .bind(block_until)
-    .bind(window_expires_at)
     .fetch_one(pool)
     .await?;
 
@@ -168,15 +168,15 @@ pub async fn clear(
     key: &str,
 ) -> Result<(), RateLimitError> {
     let key_hash = key_hash(secret, action, key);
-    sqlx::query(
+    sqlx::query!(
         r#"
         DELETE FROM rate_limit_buckets
         WHERE action = $1
           AND key_hash = $2
         "#,
+        action,
+        key_hash.as_slice()
     )
-    .bind(action)
-    .bind(key_hash.as_slice())
     .execute(pool)
     .await?;
     Ok(())

@@ -85,7 +85,7 @@ async fn worker_records_handler_failure_as_dead_job_at_max_attempts() -> TestRes
     )
     .await?;
     tx.commit().await?;
-    sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE idempotency_key = 'missing-asset'")
+    sqlx::query!("UPDATE jobs SET max_attempts = 1 WHERE idempotency_key = 'missing-asset'")
         .execute(&deps.pool)
         .await?;
 
@@ -116,7 +116,7 @@ async fn worker_times_out_slow_media_and_records_retry() -> TestResult {
     let ml_runtime = fake_ml_runtime();
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "timeout.jpg").await?;
     promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    sqlx::query("DELETE FROM jobs WHERE kind = 'generate_derivatives'")
+    sqlx::query!("DELETE FROM jobs WHERE kind = 'generate_derivatives'")
         .execute(&deps.pool)
         .await?;
     let policy = WorkerPolicy::new(
@@ -140,10 +140,10 @@ async fn worker_times_out_slow_media_and_records_retry() -> TestResult {
         policy,
     )
     .await?;
-    let (status, message) =
-        sqlx::query_as::<_, (String, String)>("SELECT status, last_error->>'message' FROM jobs")
-            .fetch_one(&deps.pool)
-            .await?;
+    let (status, message) = sqlx::query!("SELECT status, last_error->>'message' as msg FROM jobs")
+        .map(|r| (r.status, r.msg.unwrap_or_default()))
+        .fetch_one(&deps.pool)
+        .await?;
 
     assert_eq!(step, WorkerStep::TimedOut);
     assert_eq!(status, "queued");
@@ -157,7 +157,7 @@ async fn worker_heartbeat_prevents_slow_job_reclaim() -> TestResult {
     let deps = storage_test_deps().await?;
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "heartbeat.jpg").await?;
     promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    sqlx::query("DELETE FROM jobs WHERE kind = 'generate_derivatives'")
+    sqlx::query!("DELETE FROM jobs WHERE kind = 'generate_derivatives'")
         .execute(&deps.pool)
         .await?;
     let pool = deps.pool.clone();
@@ -203,7 +203,7 @@ async fn worker_runs_embed_asset_job_to_semantic_index() -> TestResult {
     let ml_runtime = fake_ml_runtime();
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "embed.jpg").await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    sqlx::query("DELETE FROM jobs").execute(&deps.pool).await?;
+    sqlx::query!("DELETE FROM jobs").execute(&deps.pool).await?;
 
     let manifest = valid_model_pack_manifest();
     let pack = install_model_pack(&deps.pool, manifest.clone()).await?;
@@ -232,10 +232,12 @@ async fn worker_runs_embed_asset_job_to_semantic_index() -> TestResult {
         10,
     )
     .await?;
-    let status: String = sqlx::query_scalar("SELECT status FROM model_reindex_runs WHERE id = $1")
-        .bind(run.reindex_run_id)
-        .fetch_one(&deps.pool)
-        .await?;
+    let status: String = sqlx::query_scalar!(
+        "SELECT status FROM model_reindex_runs WHERE id = $1",
+        run.reindex_run_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
 
     assert_eq!(step, WorkerStep::Completed);
     assert_eq!(hits.len(), 1);
@@ -251,14 +253,14 @@ async fn worker_dead_lettered_embed_job_records_reindex_failure() -> TestResult 
     let upload_id =
         create_verified_jpeg_upload(&deps.pool, &deps.storage, "dead-embed.jpg").await?;
     promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    sqlx::query("DELETE FROM jobs").execute(&deps.pool).await?;
+    sqlx::query!("DELETE FROM jobs").execute(&deps.pool).await?;
 
     let manifest = valid_model_pack_manifest();
     let pack = install_model_pack(&deps.pool, manifest).await?;
     record_model_pack_self_test(&deps.pool, pack.model_pack_id, true, None).await?;
     activate_model_pack(&deps.pool, pack.model_pack_id).await?;
     let run = start_model_reindex(&deps.pool, pack.model_pack_id).await?;
-    sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = 'embed_asset'")
+    sqlx::query!("UPDATE jobs SET max_attempts = 1 WHERE kind = 'embed_asset'")
         .execute(&deps.pool)
         .await?;
     let ml_runtime = MlRuntime::new(Arc::new(FailingImageTextEmbedder), NonZeroUsize::MIN);
@@ -276,16 +278,23 @@ async fn worker_dead_lettered_embed_job_records_reindex_failure() -> TestResult 
         WorkerPolicy::production(),
     )
     .await?;
-    let (job_status, run_status, failed_assets): (String, String, i32) = sqlx::query_as(
+    let (job_status, run_status, failed_assets): (String, String, i32) = sqlx::query!(
         r#"
-        SELECT j.status, rr.status, rr.failed_assets
+        SELECT j.status as job_status, rr.status as run_status, rr.failed_assets
         FROM jobs j
         CROSS JOIN model_reindex_runs rr
         WHERE rr.id = $1
           AND j.kind = 'embed_asset'
         "#,
+        run.reindex_run_id
     )
-    .bind(run.reindex_run_id)
+    .map(|r| {
+        (
+            r.job_status,
+            r.run_status,
+            r.failed_assets,
+        )
+    })
     .fetch_one(&deps.pool)
     .await?;
     let asset_error: Option<String> = sqlx::query_scalar(
@@ -315,27 +324,27 @@ async fn worker_records_oversized_embed_input_as_terminal_reindex_failure() -> T
     let asset_id = Uuid::now_v7();
     let public_id = Uuid::now_v7();
     deps.storage.write(&storage_key, bytes).await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO originals (id, blake3_hash, storage_key, size_bytes, media_type)
         VALUES ($1, $2, $3, $4, 'image/jpeg')
         "#,
+        original_id,
+        hash,
+        storage_key.as_str(),
+        size_bytes
     )
-    .bind(original_id)
-    .bind(&hash)
-    .bind(storage_key.as_str())
-    .bind(size_bytes)
     .execute(&deps.pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO assets (id, public_id, owner_id, original_id)
         VALUES ($1, $2, 1, $3)
         "#,
+        asset_id,
+        public_id,
+        original_id
     )
-    .bind(asset_id)
-    .bind(public_id)
-    .bind(original_id)
     .execute(&deps.pool)
     .await?;
 
@@ -363,16 +372,17 @@ async fn worker_records_oversized_embed_input_as_terminal_reindex_failure() -> T
         WorkerPolicy::production(),
     )
     .await?;
-    let (job_status, run_status, asset_error): (String, String, Option<String>) = sqlx::query_as(
+    let (job_status, run_status, asset_error): (String, String, Option<String>) = sqlx::query!(
         r#"
-        SELECT j.status, rr.status, ra.error_message
+        SELECT j.status as job_status, rr.status as run_status, ra.error_message
         FROM jobs j
         JOIN model_reindex_runs rr ON rr.id = $1
         JOIN model_reindex_assets ra ON ra.reindex_run_id = rr.id
         WHERE j.kind = 'embed_asset'
         "#,
+        run.reindex_run_id
     )
-    .bind(run.reindex_run_id)
+    .map(|r| (r.job_status, r.run_status, r.error_message))
     .fetch_one(&deps.pool)
     .await?;
 
@@ -397,10 +407,12 @@ async fn semantic_text_search_embeds_query_with_active_model_pack() -> TestResul
     let upload_id =
         create_verified_jpeg_upload(&deps.pool, &deps.storage, "text-search.jpg").await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    let internal_id: Uuid = sqlx::query_scalar("SELECT id FROM assets WHERE public_id = $1")
-        .bind(promoted.asset_id)
-        .fetch_one(&deps.pool)
-        .await?;
+    let internal_id: Uuid = sqlx::query_scalar!(
+        "SELECT id FROM assets WHERE public_id = $1",
+        promoted.asset_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
 
     mirror_backend::semantic_index::upsert_asset_embedding(
         &deps.pool,
@@ -440,13 +452,13 @@ async fn job_count_by_status(pool: &sqlx::PgPool, status: &str) -> TestResult<i6
 }
 
 async fn metadata_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar("SELECT count(*) FROM asset_metadata")
+    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM asset_metadata "#)
         .fetch_one(pool)
         .await?)
 }
 
 async fn derivative_count(pool: &sqlx::PgPool) -> TestResult<i64> {
-    Ok(sqlx::query_scalar("SELECT count(*) FROM derivatives")
+    Ok(sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM derivatives"#)
         .fetch_one(pool)
         .await?)
 }

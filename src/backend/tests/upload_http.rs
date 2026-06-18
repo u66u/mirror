@@ -106,8 +106,7 @@ async fn upload_part_route_accepts_four_mib_and_rejects_larger_without_artifacts
     );
 
     let oversized_part_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM upload_parts WHERE upload_id = $1")
-            .bind(oversized_upload.upload_id)
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM upload_parts WHERE upload_id = $1"#, oversized_upload.upload_id)
             .fetch_one(&deps.pool)
             .await?;
     assert_eq!(oversized_part_count, 0);
@@ -237,7 +236,7 @@ async fn create_upload_route_respects_persisted_rate_limit_bucket() -> TestResul
     let response = test::call_service(&app, request).await;
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let upload_count: i64 = sqlx::query_scalar("SELECT count(*) FROM upload_sessions")
+    let upload_count: i64 = sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM upload_sessions"#)
         .fetch_one(&deps.pool)
         .await?;
     assert_eq!(upload_count, 0);

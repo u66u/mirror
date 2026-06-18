@@ -111,8 +111,7 @@ async fn expired_lease_can_be_reclaimed_and_failure_retries() -> TestResult {
             .map(|job| job.id),
         Some(job_id)
     );
-    sqlx::query("UPDATE jobs SET heartbeat_at = now() - interval '2 hours' WHERE id = $1")
-        .bind(job_id)
+    sqlx::query!("UPDATE jobs SET heartbeat_at = now() - interval '2 hours' WHERE id = $1", job_id)
         .execute(&pool)
         .await?;
 
@@ -140,8 +139,7 @@ async fn failure_dead_letters_after_max_attempts() -> TestResult {
         ),
     )
     .await?;
-    sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE id = $1")
-        .bind(job_id)
+    sqlx::query!("UPDATE jobs SET max_attempts = 1 WHERE id = $1", job_id)
         .execute(&pool)
         .await?;
 
@@ -155,10 +153,7 @@ async fn failure_dead_letters_after_max_attempts() -> TestResult {
         return Err(std::io::Error::other("leased job should fail").into());
     };
 
-    let (status, message) = sqlx::query_as::<_, (String, String)>(
-        "SELECT status, last_error->>'message' FROM jobs WHERE id = $1",
-    )
-    .bind(job_id)
+    let (status, message) = sqlx::query!("SELECT status, last_error->>'message' as msg FROM jobs WHERE id = $1", job_id).map(|row| (row.status, row.msg.unwrap_or_default()))
     .fetch_one(&pool)
     .await?;
 
@@ -188,8 +183,7 @@ async fn enqueue_job(pool: &sqlx::PgPool, spec: JobSpec) -> TestResult<Uuid> {
 }
 
 async fn job_status(pool: &sqlx::PgPool, job_id: Uuid) -> TestResult<String> {
-    Ok(sqlx::query_scalar("SELECT status FROM jobs WHERE id = $1")
-        .bind(job_id)
+    Ok(sqlx::query_scalar!("SELECT status FROM jobs WHERE id = $1", job_id)
         .fetch_one(pool)
         .await?)
 }

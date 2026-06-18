@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod media;
 pub mod ml;
 pub mod models;
+pub mod paths;
 mod public_derivatives;
 pub mod rate_limit;
 pub mod runtime;

@@ -6,12 +6,13 @@
 
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction, types::Json};
+use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
-use thiserror::Error;
 
 /// Job kinds currently emitted by backend feature modules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum JobKind {
     /// Extract owner-visible metadata from an original.
     ExtractMetadata,
@@ -28,15 +29,6 @@ impl JobKind {
             Self::ExtractMetadata => "extract_metadata",
             Self::GenerateDerivatives => "generate_derivatives",
             Self::EmbedAsset => "embed_asset",
-        }
-    }
-
-    fn from_str(value: &str) -> Result<Self, JobError> {
-        match value {
-            "extract_metadata" => Ok(Self::ExtractMetadata),
-            "generate_derivatives" => Ok(Self::GenerateDerivatives),
-            "embed_asset" => Ok(Self::EmbedAsset),
-            _ => Err(JobError::InvalidKind(value.to_owned())),
         }
     }
 }
@@ -121,19 +113,19 @@ pub async fn enqueue_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     spec: JobSpec,
 ) -> Result<(), JobError> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO jobs (id, kind, payload, idempotency_key, priority, run_after)
         VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, now()))
         ON CONFLICT (idempotency_key) DO NOTHING
         "#,
+        Uuid::now_v7(),
+        spec.kind as _,
+        Json(spec.payload) as _,
+        spec.idempotency_key,
+        spec.priority,
+        spec.run_after
     )
-    .bind(Uuid::now_v7())
-    .bind(spec.kind.as_str())
-    .bind(Json(spec.payload))
-    .bind(spec.idempotency_key)
-    .bind(spec.priority)
-    .bind(spec.run_after)
     .execute(&mut **tx)
     .await?;
 
@@ -173,9 +165,7 @@ pub async fn lease_next_for_kinds(
         return Ok(None);
     }
 
-    let kind_names: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
-
-    let row = sqlx::query_as::<_, (Uuid, String, Json<Value>, i32, i32)>(
+    let row = sqlx::query!(
         r#"
         UPDATE jobs
         SET
@@ -201,22 +191,22 @@ pub async fn lease_next_for_kinds(
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
-        RETURNING id, kind, payload, attempts, max_attempts
+        RETURNING id, kind AS "kind: JobKind", payload AS "payload: Json<Value>", attempts, max_attempts
         "#,
+        worker_id,
+        lease_expired_before,
+        &kinds as _
     )
-    .bind(worker_id)
-    .bind(lease_expired_before)
-    .bind(kind_names)
     .fetch_optional(pool)
     .await?;
 
-    row.map(|(id, kind, payload, attempts, max_attempts)| {
+    row.map(|row| {
         Ok(LeasedJob {
-            id,
-            kind: JobKind::from_str(&kind)?,
-            payload: payload.0,
-            attempts,
-            max_attempts,
+            id: row.id,
+            kind: row.kind,
+            payload: row.payload.0,
+            attempts: row.attempts,
+            max_attempts: row.max_attempts,
         })
     })
     .transpose()
@@ -224,7 +214,7 @@ pub async fn lease_next_for_kinds(
 
 /// Records that a worker still owns a leased job.
 pub async fn heartbeat(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<bool, JobError> {
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         r#"
         UPDATE jobs
         SET heartbeat_at = now(), updated_at = now()
@@ -232,9 +222,9 @@ pub async fn heartbeat(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<b
           AND status = 'leased'
           AND lease_owner = $2
         "#,
+        job_id,
+        worker_id
     )
-    .bind(job_id)
-    .bind(worker_id)
     .execute(pool)
     .await?
     .rows_affected();
@@ -244,7 +234,7 @@ pub async fn heartbeat(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<b
 
 /// Marks a leased job complete.
 pub async fn complete(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<bool, JobError> {
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         r#"
         UPDATE jobs
         SET
@@ -257,9 +247,9 @@ pub async fn complete(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<bo
           AND status = 'leased'
           AND lease_owner = $2
         "#,
+        job_id,
+        worker_id
     )
-    .bind(job_id)
-    .bind(worker_id)
     .execute(pool)
     .await?
     .rows_affected();
@@ -297,26 +287,30 @@ pub async fn fail_with_outcome(
 ) -> Result<Option<JobFailureOutcome>, JobError> {
     let mut tx = pool.begin().await?;
 
-    let Some((kind, payload, attempts, max_attempts)) =
-        sqlx::query_as::<_, (String, Json<Value>, i32, i32)>(
-            r#"
-            SELECT kind, payload, attempts, max_attempts
-            FROM jobs
-            WHERE id = $1
-              AND status = 'leased'
-              AND lease_owner = $2
-            FOR UPDATE
-            "#,
-        )
-        .bind(job_id)
-        .bind(worker_id)
-        .fetch_optional(&mut *tx)
-        .await?
-    else {
+    let row = sqlx::query!(
+        r#"
+        SELECT kind AS "kind: JobKind", payload AS "payload: Json<Value>", attempts, max_attempts
+        FROM jobs
+        WHERE id = $1
+          AND status = 'leased'
+          AND lease_owner = $2
+        FOR UPDATE
+        "#,
+        job_id,
+        worker_id
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(row) = row else {
         return Ok(None);
     };
 
-    let kind = JobKind::from_str(&kind)?;
+    let kind = row.kind;
+    let payload = row.payload;
+    let attempts = row.attempts;
+    let max_attempts = row.max_attempts;
+
     let payload = payload.0;
     let dead = attempts >= max_attempts;
     let next_status = if dead { "dead" } else { "queued" };
@@ -331,7 +325,7 @@ pub async fn fail_with_outcome(
         "dead": dead,
     });
 
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         r#"
         UPDATE jobs
         SET
@@ -346,12 +340,12 @@ pub async fn fail_with_outcome(
           AND lease_owner = $2
           AND status = 'leased'
         "#,
+        job_id,
+        worker_id,
+        next_status as _,
+        run_after,
+        Json(last_error) as _
     )
-    .bind(job_id)
-    .bind(worker_id)
-    .bind(next_status)
-    .bind(run_after)
-    .bind(Json(last_error))
     .execute(&mut *tx)
     .await?
     .rows_affected()

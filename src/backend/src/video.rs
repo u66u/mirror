@@ -265,9 +265,7 @@ fn run_command(
 
 fn read_bounded(mut file: impl Read, max_bytes: u64) -> Result<Vec<u8>, VideoToolError> {
     let mut output = Vec::new();
-    file.by_ref()
-        .take(max_bytes + 1)
-        .read_to_end(&mut output)?;
+    file.by_ref().take(max_bytes + 1).read_to_end(&mut output)?;
     if u64::try_from(output.len()).map_err(|_| VideoToolError::OutputTooLarge)? > max_bytes {
         return Err(VideoToolError::OutputTooLarge);
     }

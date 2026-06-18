@@ -140,8 +140,7 @@ async fn invalid_part_framing_creates_no_part_rows_or_storage_objects() -> TestR
     assert!(matches!(out_of_range, Err(UploadError::PartOutOfRange)));
 
     let part_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM upload_parts WHERE upload_id = $1")
-            .bind(created.upload_id)
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM upload_parts WHERE upload_id = $1"#, created.upload_id)
             .fetch_one(&deps.pool)
             .await?;
     assert_eq!(part_count, 0);

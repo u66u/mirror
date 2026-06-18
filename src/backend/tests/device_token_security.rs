@@ -34,7 +34,7 @@ async fn android_login_token_authorizes_then_stops_after_self_revocation() -> Te
         .to_request();
     let wrong_response = test::call_service(&app, wrong_login).await;
     assert_eq!(wrong_response.status(), StatusCode::UNAUTHORIZED);
-    let token_count: i64 = sqlx::query_scalar("SELECT count(*) FROM device_tokens")
+    let token_count: i64 = sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM device_tokens"#)
         .fetch_one(&pool)
         .await?;
     assert_eq!(token_count, 0);
@@ -150,7 +150,7 @@ async fn repeated_owner_password_failures_rate_limit_device_login() -> TestResul
         test::call_service(&app, correct_password).await.status(),
         StatusCode::TOO_MANY_REQUESTS
     );
-    let token_count: i64 = sqlx::query_scalar("SELECT count(*) FROM device_tokens")
+    let token_count: i64 = sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM device_tokens"#)
         .fetch_one(&pool)
         .await?;
     assert_eq!(token_count, 0);

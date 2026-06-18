@@ -60,14 +60,13 @@ pub async fn scan_original_storage(
     pool: &PgPool,
     storage: &ObjectStorage,
 ) -> Result<OriginalStorageIntegrityReport, IntegrityError> {
-    let database_originals = sqlx::query_as::<_, (String, String)>(
-        "SELECT blake3_hash, storage_key FROM originals ORDER BY storage_key",
-    )
-    .fetch_all(pool)
-    .await?;
+    let database_originals =
+        sqlx::query!("SELECT blake3_hash, storage_key FROM originals ORDER BY storage_key")
+            .fetch_all(pool)
+            .await?;
     let database_keys = database_originals
         .iter()
-        .map(|(_, storage_key)| storage_key.as_str())
+        .map(|row| row.storage_key.as_str())
         .collect::<BTreeSet<_>>();
 
     let listed_keys = storage
@@ -86,10 +85,10 @@ pub async fn scan_original_storage(
         .collect::<Result<Vec<_>, _>>()?;
     let missing_objects = database_originals
         .into_iter()
-        .filter(|(_, storage_key)| !listed_keys.contains(storage_key))
-        .map(|(blake3_hash, storage_key)| MissingOriginalObject {
-            blake3_hash,
-            storage_key,
+        .filter(|row| !listed_keys.contains(&row.storage_key))
+        .map(|row| MissingOriginalObject {
+            blake3_hash: row.blake3_hash,
+            storage_key: row.storage_key,
         })
         .collect();
 
@@ -124,13 +123,13 @@ pub async fn remediate_original_orphans(
     let mut already_missing_objects = Vec::new();
 
     for key in unique_keys.into_values() {
-        let is_db_backed = sqlx::query_scalar::<_, bool>(
+        let is_db_backed = sqlx::query_scalar!(
             "SELECT EXISTS (SELECT 1 FROM originals WHERE storage_key = $1)",
+            key.as_str()
         )
-        .bind(key.as_str())
         .fetch_one(pool)
         .await?;
-        if is_db_backed {
+        if is_db_backed.unwrap_or(false) {
             retained_db_backed_objects.push(key);
             continue;
         }

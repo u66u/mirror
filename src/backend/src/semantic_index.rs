@@ -6,8 +6,8 @@
 
 use pgvector::Vector;
 use sqlx::{PgPool, Postgres, Transaction};
-use uuid::Uuid;
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::models::{DistanceMetric, ModelPackKind, ValidatedEmbedding};
 
@@ -72,7 +72,7 @@ pub async fn upsert_asset_embedding_with_dimension_in_tx(
     check_dimension(embedding, embedding_dimension)?;
     let vector = Vector::from(embedding.values().to_vec());
 
-    let affected = sqlx::query(
+    let affected = sqlx::query!(
         r#"
         INSERT INTO asset_embeddings (
             asset_id,
@@ -105,11 +105,11 @@ pub async fn upsert_asset_embedding_with_dimension_in_tx(
             embedding_dimension = EXCLUDED.embedding_dimension,
             updated_at = now()
         "#,
+        asset_id,
+        model_pack_id,
+        vector as _,
+        embedding_dimension
     )
-    .bind(asset_id)
-    .bind(model_pack_id)
-    .bind(vector)
-    .bind(embedding_dimension)
     .execute(&mut **tx)
     .await?
     .rows_affected();
@@ -126,8 +126,7 @@ pub async fn delete_asset_embeddings(
     pool: &PgPool,
     asset_id: Uuid,
 ) -> Result<u64, SemanticIndexError> {
-    let deleted = sqlx::query("DELETE FROM asset_embeddings WHERE asset_id = $1")
-        .bind(asset_id)
+    let deleted = sqlx::query!("DELETE FROM asset_embeddings WHERE asset_id = $1", asset_id)
         .execute(pool)
         .await?
         .rows_affected();
@@ -195,20 +194,24 @@ async fn semantic_model_spec(
     pool: &PgPool,
     model_pack_id: Uuid,
 ) -> Result<SemanticModelSpec, SemanticIndexError> {
-    let row = sqlx::query_as::<_, (String, i32, String)>(
+    let row = sqlx::query!(
         r#"
         SELECT kind, embedding_dimension, distance_metric
         FROM model_packs
         WHERE id = $1
         "#,
+        model_pack_id
     )
-    .bind(model_pack_id)
     .fetch_optional(pool)
     .await?;
 
-    let Some((kind, embedding_dimension, distance_metric)) = row else {
+    let Some(row) = row else {
         return Err(SemanticIndexError::InvalidModelPack);
     };
+
+    let kind = row.kind;
+    let embedding_dimension = row.embedding_dimension;
+    let distance_metric = row.distance_metric;
 
     if kind != ModelPackKind::SemanticImageText.as_str() {
         return Err(SemanticIndexError::InvalidModelPack);

@@ -6,9 +6,9 @@
 
 use serde::Serialize;
 use sqlx::PgPool;
+use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use thiserror::Error;
 
 use crate::storage::StorageKey;
 
@@ -88,18 +88,7 @@ pub async fn original_manifest(
     pool: &PgPool,
     input: ExportManifestInput,
 ) -> Result<ExportManifest, ExportError> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            String,
-            String,
-            i64,
-            Option<String>,
-            OffsetDateTime,
-        ),
-    >(
+    let rows = sqlx::query!(
         r#"
         SELECT
             a.public_id,
@@ -107,7 +96,7 @@ pub async fn original_manifest(
             o.storage_key,
             o.media_type,
             o.size_bytes,
-            s.original_filename,
+            s.original_filename as "original_filename?",
             a.created_at
         FROM assets a
         JOIN originals o ON o.id = a.original_id
@@ -122,8 +111,8 @@ pub async fn original_manifest(
           AND a.trashed_at IS NULL
         ORDER BY a.created_at ASC, a.public_id ASC
         "#,
+        input.owner_id
     )
-    .bind(input.owner_id)
     .fetch_all(pool)
     .await?;
 
@@ -132,25 +121,15 @@ pub async fn original_manifest(
         manifest_version: "mirror-original-export-v1",
         items: rows
             .into_iter()
-            .map(
-                |(
-                    asset_id,
-                    blake3_hash,
-                    storage_key,
-                    media_type,
-                    size_bytes,
-                    original_filename,
-                    created_at,
-                )| ExportManifestItem {
-                    asset_id,
-                    blake3_hash,
-                    storage_key,
-                    media_type,
-                    size_bytes,
-                    original_filename,
-                    created_at,
-                },
-            )
+            .map(|row| ExportManifestItem {
+                asset_id: row.public_id,
+                blake3_hash: row.blake3_hash,
+                storage_key: row.storage_key,
+                media_type: row.media_type,
+                size_bytes: row.size_bytes,
+                original_filename: row.original_filename,
+                created_at: row.created_at,
+            })
             .collect(),
     })
 }
@@ -160,7 +139,7 @@ pub async fn original_blob(
     pool: &PgPool,
     input: ExportOriginalInput,
 ) -> Result<ExportOriginal, ExportError> {
-    let row = sqlx::query_as::<_, (String, String, i64)>(
+    let row = sqlx::query!(
         r#"
         SELECT o.storage_key, o.media_type, o.size_bytes
         FROM assets a
@@ -169,16 +148,17 @@ pub async fn original_blob(
           AND a.public_id = $2
           AND a.trashed_at IS NULL
         "#,
+        input.owner_id,
+        input.asset_public_id
     )
-    .bind(input.owner_id)
-    .bind(input.asset_public_id)
     .fetch_optional(pool)
     .await?
     .ok_or(ExportError::NotFound)?;
 
     Ok(ExportOriginal {
-        storage_key: StorageKey::new(row.0).map_err(|_| ExportError::InvalidStorageKey)?,
-        media_type: row.1,
-        size_bytes: row.2,
+        storage_key: StorageKey::new(row.storage_key)
+            .map_err(|_| ExportError::InvalidStorageKey)?,
+        media_type: row.media_type,
+        size_bytes: row.size_bytes,
     })
 }

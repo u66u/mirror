@@ -5,9 +5,9 @@
 
 use serde::Serialize;
 use sqlx::PgPool;
+use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use thiserror::Error;
 
 use crate::assets::{AssetDerivativeView, AssetTimelineItem};
 
@@ -52,7 +52,7 @@ pub async fn search_assets(
 ) -> Result<AssetSearchPage, SearchError> {
     let query = search_query(&input.query)?;
     let limit = search_limit(input.limit)?;
-    let rows = sqlx::query_as::<_, SearchAssetRow>(
+    let rows = sqlx::query!(
         r#"
         SELECT
             a.public_id,
@@ -61,13 +61,13 @@ pub async fn search_assets(
             o.blake3_hash,
             o.media_type,
             o.size_bytes,
-            s.original_filename,
-            t.format,
-            t.width,
-            t.height,
-            p.format,
-            p.width,
-            p.height
+            s.original_filename as "original_filename?",
+            t.format AS "thumbnail_format?",
+            t.width AS "thumbnail_width?",
+            t.height AS "thumbnail_height?",
+            p.format AS "preview_format?",
+            p.width AS "preview_width?",
+            p.height AS "preview_height?"
         FROM assets a
         JOIN originals o ON o.id = a.original_id
         LEFT JOIN LATERAL (
@@ -99,15 +99,32 @@ pub async fn search_assets(
         ORDER BY a.created_at DESC, a.public_id DESC
         LIMIT $3
         "#,
+        input.owner_id,
+        format!("%{}%", escape_like(&query)),
+        limit
     )
-    .bind(input.owner_id)
-    .bind(format!("%{}%", escape_like(&query)))
-    .bind(limit)
     .fetch_all(pool)
     .await?;
 
     Ok(AssetSearchPage {
-        items: rows.into_iter().map(AssetTimelineItem::from).collect(),
+        items: rows
+            .into_iter()
+            .map(|row| AssetTimelineItem {
+                asset_id: row.public_id,
+                created_at: row.created_at,
+                favorite_at: row.favorite_at,
+                original_blake3: row.blake3_hash,
+                media_type: row.media_type,
+                size_bytes: row.size_bytes,
+                original_filename: row.original_filename,
+                thumbnail: derivative_view(
+                    row.thumbnail_format,
+                    row.thumbnail_width,
+                    row.thumbnail_height,
+                ),
+                preview: derivative_view(row.preview_format, row.preview_width, row.preview_height),
+            })
+            .collect(),
     })
 }
 
@@ -121,7 +138,7 @@ pub async fn search_assets_by_public_ids(
         return Ok(AssetSearchPage { items: Vec::new() });
     }
 
-    let rows = sqlx::query_as::<_, SearchAssetRow>(
+    let rows = sqlx::query!(
         r#"
         WITH requested(asset_public_id, ord) AS (
             SELECT * FROM unnest($2::uuid[]) WITH ORDINALITY
@@ -133,13 +150,13 @@ pub async fn search_assets_by_public_ids(
             o.blake3_hash,
             o.media_type,
             o.size_bytes,
-            s.original_filename,
-            t.format,
-            t.width,
-            t.height,
-            p.format,
-            p.width,
-            p.height
+            s.original_filename as "original_filename?",
+            t.format AS "thumbnail_format?",
+            t.width AS "thumbnail_width?",
+            t.height AS "thumbnail_height?",
+            p.format AS "preview_format?",
+            p.width AS "preview_width?",
+            p.height AS "preview_height?"
         FROM requested r
         JOIN assets a
           ON a.public_id = r.asset_public_id
@@ -171,63 +188,32 @@ pub async fn search_assets_by_public_ids(
         ) p ON true
         ORDER BY r.ord ASC
         "#,
+        owner_id,
+        asset_public_ids
     )
-    .bind(owner_id)
-    .bind(asset_public_ids)
     .fetch_all(pool)
     .await?;
 
     Ok(AssetSearchPage {
-        items: rows.into_iter().map(AssetTimelineItem::from).collect(),
+        items: rows
+            .into_iter()
+            .map(|row| AssetTimelineItem {
+                asset_id: row.public_id,
+                created_at: row.created_at,
+                favorite_at: row.favorite_at,
+                original_blake3: row.blake3_hash,
+                media_type: row.media_type,
+                size_bytes: row.size_bytes,
+                original_filename: row.original_filename,
+                thumbnail: derivative_view(
+                    row.thumbnail_format,
+                    row.thumbnail_width,
+                    row.thumbnail_height,
+                ),
+                preview: derivative_view(row.preview_format, row.preview_width, row.preview_height),
+            })
+            .collect(),
     })
-}
-
-type SearchAssetRow = (
-    Uuid,
-    OffsetDateTime,
-    Option<OffsetDateTime>,
-    String,
-    String,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<i32>,
-    Option<i32>,
-    Option<String>,
-    Option<i32>,
-    Option<i32>,
-);
-
-impl From<SearchAssetRow> for AssetTimelineItem {
-    fn from(row: SearchAssetRow) -> Self {
-        let (
-            asset_id,
-            created_at,
-            favorite_at,
-            original_blake3,
-            media_type,
-            size_bytes,
-            original_filename,
-            thumbnail_format,
-            thumbnail_width,
-            thumbnail_height,
-            preview_format,
-            preview_width,
-            preview_height,
-        ) = row;
-
-        Self {
-            asset_id,
-            created_at,
-            favorite_at,
-            original_blake3,
-            media_type,
-            size_bytes,
-            original_filename,
-            thumbnail: derivative_view(thumbnail_format, thumbnail_width, thumbnail_height),
-            preview: derivative_view(preview_format, preview_width, preview_height),
-        }
-    }
 }
 
 fn derivative_view(

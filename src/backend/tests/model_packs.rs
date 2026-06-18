@@ -156,14 +156,12 @@ async fn model_pack_activation_requires_passed_self_test_and_is_one_active_per_k
     record_model_pack_self_test(&pool, second.model_pack_id, true, None).await?;
     activate_model_pack(&pool, second.model_pack_id).await?;
 
-    let statuses: Vec<(String, String)> = sqlx::query_as(
-        r#"
+    let statuses: Vec<(String, String)> = sqlx::query!(r#"
         SELECT model_revision, status
         FROM model_packs
         WHERE kind = 'semantic_image_text'
         ORDER BY model_revision
-        "#,
-    )
+        "#).map(|r| (r.model_revision, r.status))
     .fetch_all(&pool)
     .await?;
     assert_eq!(
@@ -196,7 +194,7 @@ async fn model_reindex_queues_embedding_jobs_for_active_assets_only() -> TestRes
     assert_eq!(run.total_assets, 1);
     assert_eq!(run.queued_assets, 1);
     let jobs: Vec<(String, serde_json::Value)> =
-        sqlx::query_as("SELECT kind, payload FROM jobs WHERE kind = 'embed_asset'")
+        sqlx::query!("SELECT kind, payload FROM jobs WHERE kind = 'embed_asset'").map(|r| (r.kind, r.payload))
             .fetch_all(&pool)
             .await?;
     assert_eq!(jobs.len(), 1);
@@ -329,28 +327,28 @@ async fn insert_model_pack_asset(pool: &sqlx::PgPool, trashed: bool) -> TestResu
     let hash = blake3::hash(&bytes).to_hex().to_string();
     let original_id = Uuid::now_v7();
     let asset_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO originals (id, blake3_hash, storage_key, size_bytes, media_type)
         VALUES ($1, $2, $3, $4, 'image/jpeg')
         "#,
+        original_id,
+        hash,
+        format!("originals/blake3/{hash}"),
+        i64::try_from(bytes.len())?
     )
-    .bind(original_id)
-    .bind(&hash)
-    .bind(format!("originals/blake3/{hash}"))
-    .bind(i64::try_from(bytes.len())?)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO assets (id, public_id, owner_id, original_id, trashed_at)
         VALUES ($1, $2, 1, $3, CASE WHEN $4 THEN now() ELSE NULL END)
         "#,
+        asset_id,
+        Uuid::now_v7(),
+        original_id,
+        trashed
     )
-    .bind(asset_id)
-    .bind(Uuid::now_v7())
-    .bind(original_id)
-    .bind(trashed)
     .execute(pool)
     .await?;
     Ok(asset_id)

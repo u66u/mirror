@@ -128,15 +128,15 @@ fn original_key_for(bytes: &[u8]) -> TestResult<StorageKey> {
 }
 
 async fn insert_original(pool: &sqlx::PgPool, hash: &str, storage_key: &str) -> TestResult {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO originals (id, blake3_hash, storage_key, size_bytes, media_type)
         VALUES ($1, $2, $3, 1, 'image/jpeg')
         "#,
+        Uuid::now_v7(),
+        hash,
+        storage_key
     )
-    .bind(Uuid::now_v7())
-    .bind(hash)
-    .bind(storage_key)
     .execute(pool)
     .await?;
     Ok(())

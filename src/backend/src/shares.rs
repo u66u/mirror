@@ -113,7 +113,8 @@ pub async fn create_share(
     let share_id = Uuid::now_v7();
     let share_public_id = Uuid::now_v7();
 
-    sqlx::query(
+    let token_bytes = token_hash.as_bytes().as_slice();
+    sqlx::query!(
         r#"
         INSERT INTO asset_shares (
             id,
@@ -126,14 +127,14 @@ pub async fn create_share(
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
+        share_id,
+        share_public_id,
+        input.owner_id,
+        asset_id,
+        token_bytes,
+        input.allow_original_download,
+        expires_at
     )
-    .bind(share_id)
-    .bind(share_public_id)
-    .bind(input.owner_id)
-    .bind(asset_id)
-    .bind(token_hash.as_bytes().as_slice())
-    .bind(input.allow_original_download)
-    .bind(expires_at)
     .execute(pool)
     .await
     .map_err(ShareError::Database)?;
@@ -152,7 +153,7 @@ pub async fn revoke_share(
     owner_id: i16,
     share_public_id: Uuid,
 ) -> Result<bool, ShareError> {
-    let changed = sqlx::query(
+    let changed = sqlx::query!(
         r#"
         UPDATE asset_shares
         SET revoked_at = COALESCE(revoked_at, now())
@@ -160,9 +161,9 @@ pub async fn revoke_share(
           AND public_id = $2
           AND revoked_at IS NULL
         "#,
+        owner_id,
+        share_public_id
     )
-    .bind(owner_id)
-    .bind(share_public_id)
     .execute(pool)
     .await
     .map_err(ShareError::Database)?
@@ -199,7 +200,8 @@ pub async fn load_share_derivative_blob(
         return Err(ShareError::InvalidInput);
     }
     let token_hash = TokenHash::from_raw(raw_token);
-    let row = sqlx::query_as::<_, (String, String)>(
+    let token_bytes = token_hash.as_bytes().as_slice();
+    let row = sqlx::query!(
         r#"
         SELECT d.storage_key, d.format
         FROM asset_shares sh
@@ -213,17 +215,17 @@ pub async fn load_share_derivative_blob(
         ORDER BY d.created_at DESC
         LIMIT 1
         "#,
+        token_bytes,
+        kind
     )
-    .bind(token_hash.as_bytes().as_slice())
-    .bind(kind)
     .fetch_optional(pool)
     .await
     .map_err(ShareError::Database)?
     .ok_or(ShareError::NotFound)?;
 
     Ok(ShareDerivativeBlob {
-        storage_key: StorageKey::new(row.0).map_err(|_| ShareError::NotFound)?,
-        content_type: public_derivatives::public_format_content_type(&row.1)
+        storage_key: StorageKey::new(row.storage_key).map_err(|_| ShareError::NotFound)?,
+        content_type: public_derivatives::public_format_content_type(&row.format)
             .ok_or(ShareError::InvalidInput)?,
     })
 }
@@ -244,7 +246,7 @@ async fn internal_asset_id(
     owner_id: i16,
     asset_public_id: Uuid,
 ) -> Result<Uuid, ShareError> {
-    sqlx::query_scalar(
+    sqlx::query_scalar!(
         r#"
         SELECT id
         FROM assets
@@ -252,9 +254,9 @@ async fn internal_asset_id(
           AND public_id = $2
           AND trashed_at IS NULL
         "#,
+        owner_id,
+        asset_public_id
     )
-    .bind(owner_id)
-    .bind(asset_public_id)
     .fetch_optional(pool)
     .await
     .map_err(ShareError::Database)?
@@ -277,33 +279,19 @@ struct ShareRow {
 
 async fn active_share_row(pool: &PgPool, raw_token: &str) -> Result<ShareRow, ShareError> {
     let token_hash = TokenHash::from_raw(raw_token);
-    sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            Uuid,
-            String,
-            Option<String>,
-            Option<i32>,
-            Option<i32>,
-            Option<String>,
-            Option<i32>,
-            Option<i32>,
-            bool,
-            OffsetDateTime,
-        ),
-    >(
+    let token_bytes = token_hash.as_bytes().as_slice();
+    sqlx::query!(
         r#"
         SELECT
             sh.public_id,
-            a.public_id,
+            a.public_id as asset_public_id,
             o.media_type,
-            t.format,
-            t.width,
-            t.height,
-            p.format,
-            p.width,
-            p.height,
+            t.format as thumbnail_format,
+            t.width as thumbnail_width,
+            t.height as thumbnail_height,
+            p.format as preview_format,
+            p.width as preview_width,
+            p.height as preview_height,
             sh.allow_original_download,
             sh.expires_at
         FROM asset_shares sh
@@ -330,36 +318,24 @@ async fn active_share_row(pool: &PgPool, raw_token: &str) -> Result<ShareRow, Sh
           AND sh.expires_at > now()
           AND a.trashed_at IS NULL
         "#,
+        token_bytes
     )
-    .bind(token_hash.as_bytes().as_slice())
     .fetch_optional(pool)
     .await
     .map_err(ShareError::Database)?
     .map(
-        |(
-            share_public_id,
-            asset_public_id,
-            media_type,
-            thumbnail_format,
-            thumbnail_width,
-            thumbnail_height,
-            preview_format,
-            preview_width,
-            preview_height,
-            allow_original_download,
-            expires_at,
-        )| ShareRow {
-            share_public_id,
-            asset_public_id,
-            media_type,
-            thumbnail_format,
-            thumbnail_width,
-            thumbnail_height,
-            preview_format,
-            preview_width,
-            preview_height,
-            allow_original_download,
-            expires_at,
+        |row| ShareRow {
+            share_public_id: row.public_id,
+            asset_public_id: row.asset_public_id,
+            media_type: row.media_type,
+            thumbnail_format: Some(row.thumbnail_format),
+            thumbnail_width: Some(row.thumbnail_width),
+            thumbnail_height: Some(row.thumbnail_height),
+            preview_format: Some(row.preview_format),
+            preview_width: Some(row.preview_width),
+            preview_height: Some(row.preview_height),
+            allow_original_download: row.allow_original_download,
+            expires_at: row.expires_at,
         },
     )
     .ok_or(ShareError::NotFound)

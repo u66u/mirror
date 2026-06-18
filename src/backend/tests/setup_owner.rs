@@ -7,7 +7,7 @@ use support::{TestResult, connect_test_database};
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn owner_setup_hashes_password_and_consumes_setup_token() -> TestResult {
     let pool = connect_test_database().await?;
-    sqlx::query("TRUNCATE owner_accounts CASCADE")
+    sqlx::query!("TRUNCATE owner_accounts CASCADE")
         .execute(&pool)
         .await?;
 

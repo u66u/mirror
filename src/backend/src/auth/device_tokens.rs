@@ -4,8 +4,8 @@
 //! `TokenHash` only.
 
 use sqlx::PgPool;
-use uuid::Uuid;
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::auth::{OpaqueToken, TokenHash};
 
@@ -64,7 +64,7 @@ pub async fn create_device_token(
     let token_hash = token.hash();
     let device_token_id = Uuid::now_v7();
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO device_tokens (
             id,
@@ -76,13 +76,13 @@ pub async fn create_device_token(
         )
         VALUES ($1, $2, $3, $4, $5, $6)
         "#,
+        device_token_id,
+        input.owner_id,
+        token_hash.as_bytes().as_slice(),
+        name,
+        input.created_by_session_id,
+        input.user_agent
     )
-    .bind(device_token_id)
-    .bind(input.owner_id)
-    .bind(token_hash.as_bytes().as_slice())
-    .bind(name)
-    .bind(input.created_by_session_id)
-    .bind(input.user_agent)
     .execute(pool)
     .await
     .map_err(DeviceTokenError::Database)?;
@@ -99,27 +99,24 @@ pub async fn authenticate_device_token(
     raw_token: &str,
 ) -> Result<Option<AuthenticatedDeviceToken>, DeviceTokenError> {
     let token_hash = TokenHash::from_raw(raw_token);
-    let token = sqlx::query_as::<_, (Uuid, i16)>(
+    let token_hash_bytes = token_hash.as_bytes().as_slice();
+    let token = sqlx::query_as!(
+        crate::auth::device_tokens::AuthenticatedDeviceToken,
         r#"
         UPDATE device_tokens
         SET last_used_at = now()
         WHERE token_hash = $1
           AND revoked_at IS NULL
           AND (expires_at IS NULL OR expires_at > now())
-        RETURNING id, owner_id
+        RETURNING id as "device_token_id!", owner_id as "owner_id!"
         "#,
+        token_hash_bytes
     )
-    .bind(token_hash.as_bytes().as_slice())
     .fetch_optional(pool)
     .await
     .map_err(DeviceTokenError::Database)?;
 
-    Ok(
-        token.map(|(device_token_id, owner_id)| AuthenticatedDeviceToken {
-            device_token_id,
-            owner_id,
-        }),
-    )
+    Ok(token)
 }
 
 /// Revokes an Android device token. Idempotent for missing/already-revoked IDs.
@@ -127,15 +124,15 @@ pub async fn revoke_device_token(
     pool: &PgPool,
     device_token_id: Uuid,
 ) -> Result<(), DeviceTokenError> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE device_tokens
         SET revoked_at = COALESCE(revoked_at, now()),
             revocation_reason = COALESCE(revocation_reason, 'revoked')
         WHERE id = $1
         "#,
+        device_token_id
     )
-    .bind(device_token_id)
     .execute(pool)
     .await
     .map_err(DeviceTokenError::Database)?;
@@ -151,7 +148,7 @@ pub async fn revoke_owner_device_token(
     owner_id: i16,
     device_token_id: Uuid,
 ) -> Result<bool, DeviceTokenError> {
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE device_tokens
         SET revoked_at = COALESCE(revoked_at, now()),
@@ -159,9 +156,9 @@ pub async fn revoke_owner_device_token(
         WHERE id = $1
           AND owner_id = $2
         "#,
+        device_token_id,
+        owner_id
     )
-    .bind(device_token_id)
-    .bind(owner_id)
     .execute(pool)
     .await
     .map_err(DeviceTokenError::Database)?;

@@ -104,8 +104,7 @@ async fn share_route_hashes_token_serves_derivative_and_revokes() -> TestResult 
     );
     assert_eq!(test::read_body(derivative_response).await, "thumbnail");
 
-    sqlx::query("UPDATE assets SET trashed_at = now() WHERE public_id = $1")
-        .bind(asset.public_id)
+    sqlx::query!("UPDATE assets SET trashed_at = now() WHERE public_id = $1", asset.public_id)
         .execute(&deps.pool)
         .await?;
     let after_trash = test::TestRequest::get()
@@ -179,7 +178,7 @@ async fn share_creation_is_owner_rate_limited_before_token_minting() -> TestResu
         }
     }
 
-    let share_count: i64 = sqlx::query_scalar("SELECT count(*) FROM asset_shares")
+    let share_count: i64 = sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM asset_shares"#)
         .fetch_one(&deps.pool)
         .await?;
     assert_eq!(share_count, 20);

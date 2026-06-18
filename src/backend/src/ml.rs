@@ -385,7 +385,7 @@ async fn record_reindex_asset_result_in_tx(
     succeeded: bool,
     error_message: Option<&str>,
 ) -> Result<(), MlError> {
-    let changed = sqlx::query_scalar::<_, bool>(
+    let changed = sqlx::query_scalar!(
         r#"
         UPDATE model_reindex_assets
         SET
@@ -393,30 +393,30 @@ async fn record_reindex_asset_result_in_tx(
             error_message = CASE WHEN $3 THEN NULL ELSE $4 END,
             updated_at = now()
         WHERE reindex_run_id = $1
-          AND asset_id = $2
-          AND status = 'queued'
-        RETURNING true
+        AND asset_id = $2
+        AND status = 'queued'
+        RETURNING true AS "changed!"
         "#,
+        reindex_run_id,
+        asset_id,
+        succeeded,
+        error_message
     )
-    .bind(reindex_run_id)
-    .bind(asset_id)
-    .bind(succeeded)
-    .bind(error_message)
     .fetch_optional(&mut **tx)
     .await?
     .unwrap_or(false);
 
-    let exists = sqlx::query_scalar::<_, bool>(
+    let exists = sqlx::query_scalar!(
         r#"
-        SELECT true
+        SELECT true AS "exists!"
         FROM model_reindex_assets
         WHERE reindex_run_id = $1
           AND asset_id = $2
         LIMIT 1
         "#,
+        reindex_run_id,
+        asset_id
     )
-    .bind(reindex_run_id)
-    .bind(asset_id)
     .fetch_optional(&mut **tx)
     .await?
     .unwrap_or(false);
@@ -426,7 +426,7 @@ async fn record_reindex_asset_result_in_tx(
     }
 
     if changed {
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE model_reindex_runs
             SET
@@ -442,17 +442,12 @@ async fn record_reindex_asset_result_in_tx(
                     THEN 'running'
                     ELSE status
                 END,
-                completed_at = CASE
-                    WHEN processed_assets + failed_assets + 1 >= total_assets
-                    THEN now()
-                    ELSE completed_at
-                END,
                 updated_at = now()
             WHERE id = $1
             "#,
+            reindex_run_id,
+            succeeded
         )
-        .bind(reindex_run_id)
-        .bind(succeeded)
         .execute(&mut **tx)
         .await?;
     }
@@ -498,14 +493,14 @@ async fn load_embed_asset(
     pool: &PgPool,
     payload: &EmbedAssetPayload,
 ) -> Result<Option<EmbedAsset>, MlError> {
-    let row = sqlx::query_as::<_, (String, String, i32, String, Json<ModelPackManifest>, String)>(
+    let row = sqlx::query!(
         r#"
         SELECT
             o.storage_key,
             o.media_type,
             mp.embedding_dimension,
             mp.distance_metric,
-            mp.manifest,
+            mp.manifest as "manifest: Json<ModelPackManifest>",
             ra.status
         FROM model_reindex_runs rr
         JOIN model_reindex_assets ra
@@ -523,38 +518,36 @@ async fn load_embed_asset(
           AND mp.kind = 'semantic_image_text'
           AND mp.self_test_status = 'passed'
         "#,
+        payload.asset_id,
+        payload.model_pack_id,
+        payload.reindex_run_id
     )
-    .bind(payload.asset_id)
-    .bind(payload.model_pack_id)
-    .bind(payload.reindex_run_id)
     .fetch_optional(pool)
     .await?;
 
-    let Some((storage_key, media_type, embedding_dimension, distance_metric, manifest, status)) =
-        row
-    else {
+    let Some(row) = row else {
         return Err(MlError::NotFound);
     };
 
-    if status != "queued" {
+    if row.status != "queued" {
         return Ok(None);
     }
 
-    let manifest = manifest.0;
-    validate_semantic_model_pack_row(&manifest, embedding_dimension, &distance_metric)?;
+    let manifest = row.manifest.0;
+    validate_semantic_model_pack_row(&manifest, row.embedding_dimension, &row.distance_metric)?;
 
     Ok(Some(EmbedAsset {
-        storage_key,
-        media_type,
+        storage_key: row.storage_key,
+        media_type: row.media_type,
         manifest,
-        embedding_dimension,
+        embedding_dimension: row.embedding_dimension,
     }))
 }
 
 async fn active_semantic_model_pack(pool: &PgPool) -> Result<ActiveSemanticModelPack, MlError> {
-    let row = sqlx::query_as::<_, (Uuid, i32, String, Json<ModelPackManifest>)>(
+    let row = sqlx::query!(
         r#"
-        SELECT id, embedding_dimension, distance_metric, manifest
+        SELECT id, embedding_dimension, distance_metric, manifest as "manifest: Json<ModelPackManifest>"
         FROM model_packs
         WHERE kind = 'semantic_image_text'
           AND status = 'active'
@@ -566,15 +559,15 @@ async fn active_semantic_model_pack(pool: &PgPool) -> Result<ActiveSemanticModel
     .fetch_optional(pool)
     .await?;
 
-    let Some((model_pack_id, embedding_dimension, distance_metric, manifest)) = row else {
+    let Some(row) = row else {
         return Err(MlError::NotFound);
     };
 
-    let manifest = manifest.0;
-    validate_semantic_model_pack_row(&manifest, embedding_dimension, &distance_metric)?;
+    let manifest = row.manifest.0;
+    validate_semantic_model_pack_row(&manifest, row.embedding_dimension, &row.distance_metric)?;
 
     Ok(ActiveSemanticModelPack {
-        model_pack_id,
+        model_pack_id: row.id,
         manifest,
     })
 }

@@ -277,29 +277,29 @@ async fn insert_semantic_asset(
     let original_id = Uuid::now_v7();
     let internal_id = Uuid::now_v7();
     let public_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO originals (id, blake3_hash, storage_key, size_bytes, media_type)
         VALUES ($1, $2, $3, $4, 'image/jpeg')
         "#,
+        original_id,
+        hash,
+        format!("originals/blake3/{hash}"),
+        i64::try_from(bytes.len())?
     )
-    .bind(original_id)
-    .bind(&hash)
-    .bind(format!("originals/blake3/{hash}"))
-    .bind(i64::try_from(bytes.len())?)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO assets (id, public_id, owner_id, original_id, trashed_at)
         VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN now() ELSE NULL END)
         "#,
+        internal_id,
+        public_id,
+        owner_id,
+        original_id,
+        trashed
     )
-    .bind(internal_id)
-    .bind(public_id)
-    .bind(owner_id)
-    .bind(original_id)
-    .bind(trashed)
     .execute(pool)
     .await?;
 

@@ -3,8 +3,9 @@
 //! Keys are not user paths. Constructors validate shape so callers cannot
 //! smuggle absolute paths, parent traversal, or backend-specific separators.
 
-use uuid::Uuid;
+use crate::paths::validate_relative_str;
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Valid object key relative to the storage root.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -115,19 +116,11 @@ pub enum StorageKeyError {
 }
 
 fn validate_key(key: &str) -> Result<(), StorageKeyError> {
-    if key.is_empty() {
-        return Err(StorageKeyError::Empty);
+    match validate_relative_str(key, 512) {
+        Ok(()) => Ok(()),
+        Err("String path is empty") => Err(StorageKeyError::Empty),
+        Err(_) => Err(StorageKeyError::UnsafePath),
     }
-    if key.starts_with('/') || key.starts_with('\\') || key.contains('\\') {
-        return Err(StorageKeyError::UnsafePath);
-    }
-    if key
-        .split('/')
-        .any(|component| component.is_empty() || component == "." || component == "..")
-    {
-        return Err(StorageKeyError::UnsafePath);
-    }
-    Ok(())
 }
 
 fn validate_blake3_hex(hash_hex: &str) -> Result<(), StorageKeyError> {
@@ -149,16 +142,5 @@ fn validate_segment(segment: &str) -> Result<(), StorageKeyError> {
 }
 
 fn validate_model_pack_path(path: &str) -> Result<(), StorageKeyError> {
-    if path.is_empty()
-        || path.len() > 300
-        || path.starts_with('/')
-        || path.contains('\\')
-        || path
-            .split('/')
-            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
-    {
-        Err(StorageKeyError::UnsafePath)
-    } else {
-        Ok(())
-    }
+    validate_relative_str(path, 300).map_err(|_| StorageKeyError::UnsafePath)
 }

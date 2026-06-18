@@ -7,9 +7,9 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blake3::Hasher;
 use serde::Serialize;
 use sqlx::{PgPool, Postgres, Transaction};
+use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use thiserror::Error;
 
 use crate::jobs::{JobKind, JobSpec, enqueue_in_tx};
 use crate::public_derivatives;
@@ -221,30 +221,30 @@ pub async fn promote_verified_upload(
     let asset_id = Uuid::now_v7();
     let asset_public_id = Uuid::now_v7();
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO assets (id, public_id, owner_id, original_id)
         VALUES ($1, $2, $3, $4)
         "#,
+        asset_id,
+        asset_public_id,
+        owner_id,
+        original_id
     )
-    .bind(asset_id)
-    .bind(asset_public_id)
-    .bind(owner_id)
-    .bind(original_id)
     .execute(&mut *tx)
     .await
     .map_err(PromoteError::Database)?;
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO asset_sources (id, asset_id, source_kind, upload_id, original_filename)
         VALUES ($1, $2, 'upload', $3, $4)
         "#,
+        Uuid::now_v7(),
+        asset_id,
+        upload_id,
+        upload.original_filename
     )
-    .bind(Uuid::now_v7())
-    .bind(asset_id)
-    .bind(upload_id)
-    .bind(&upload.original_filename)
     .execute(&mut *tx)
     .await
     .map_err(PromoteError::Database)?;
@@ -269,10 +269,10 @@ pub async fn detect_original_orphan(
         .exists(&final_key)
         .await
         .map_err(PromoteError::Storage)?;
-    let row_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM originals WHERE blake3_hash = $1)",
+    let row_exists = sqlx::query_scalar!(
+        "SELECT EXISTS (SELECT 1 FROM originals WHERE blake3_hash = $1) AS \"exists!\"",
+        blake3_hash
     )
-    .bind(blake3_hash)
     .fetch_one(pool)
     .await
     .map_err(PromoteError::Database)?;
@@ -325,7 +325,7 @@ pub async fn load_derivative_blob(
     if !public_derivatives::public_kind_allowed(kind) {
         return Err(AssetReadError::InvalidInput);
     }
-    let row = sqlx::query_as::<_, (String, String)>(
+    let row = sqlx::query!(
         r#"
         SELECT d.storage_key, d.format
         FROM assets a
@@ -337,18 +337,18 @@ pub async fn load_derivative_blob(
         ORDER BY d.created_at DESC
         LIMIT 1
         "#,
+        owner_id,
+        asset_public_id,
+        kind
     )
-    .bind(owner_id)
-    .bind(asset_public_id)
-    .bind(kind)
     .fetch_optional(pool)
     .await
     .map_err(AssetReadError::Database)?
     .ok_or(AssetReadError::NotFound)?;
 
     Ok(AssetDerivativeBlob {
-        storage_key: row.0,
-        content_type: public_derivatives::public_format_content_type(&row.1)
+        storage_key: row.storage_key,
+        content_type: public_derivatives::public_format_content_type(&row.format)
             .ok_or(AssetReadError::InvalidInput)?,
     })
 }
@@ -359,16 +359,16 @@ pub async fn trash_asset(
     owner_id: i16,
     asset_public_id: Uuid,
 ) -> Result<(), AssetMutationError> {
-    let changed = sqlx::query(
+    let changed = sqlx::query!(
         r#"
         UPDATE assets
         SET trashed_at = COALESCE(trashed_at, now())
         WHERE owner_id = $1
           AND public_id = $2
         "#,
+        owner_id,
+        asset_public_id
     )
-    .bind(owner_id)
-    .bind(asset_public_id)
     .execute(pool)
     .await
     .map_err(AssetMutationError::Database)?
@@ -387,7 +387,7 @@ pub async fn restore_asset(
     owner_id: i16,
     asset_public_id: Uuid,
 ) -> Result<(), AssetMutationError> {
-    let changed = sqlx::query(
+    let changed = sqlx::query!(
         r#"
         UPDATE assets
         SET trashed_at = NULL
@@ -395,9 +395,9 @@ pub async fn restore_asset(
           AND public_id = $2
           AND trashed_at IS NOT NULL
         "#,
+        owner_id,
+        asset_public_id
     )
-    .bind(owner_id)
-    .bind(asset_public_id)
     .execute(pool)
     .await
     .map_err(AssetMutationError::Database)?
@@ -416,7 +416,7 @@ pub async fn favorite_asset(
     owner_id: i16,
     asset_public_id: Uuid,
 ) -> Result<(), AssetMutationError> {
-    let changed = sqlx::query(
+    let changed = sqlx::query!(
         r#"
         UPDATE assets
         SET favorite_at = COALESCE(favorite_at, now())
@@ -424,9 +424,9 @@ pub async fn favorite_asset(
           AND public_id = $2
           AND trashed_at IS NULL
         "#,
+        owner_id,
+        asset_public_id
     )
-    .bind(owner_id)
-    .bind(asset_public_id)
     .execute(pool)
     .await
     .map_err(AssetMutationError::Database)?
@@ -445,7 +445,7 @@ pub async fn unfavorite_asset(
     owner_id: i16,
     asset_public_id: Uuid,
 ) -> Result<(), AssetMutationError> {
-    let changed = sqlx::query(
+    let changed = sqlx::query!(
         r#"
         UPDATE assets
         SET favorite_at = NULL
@@ -453,9 +453,9 @@ pub async fn unfavorite_asset(
           AND public_id = $2
           AND trashed_at IS NULL
         "#,
+        owner_id,
+        asset_public_id
     )
-    .bind(owner_id)
-    .bind(asset_public_id)
     .execute(pool)
     .await
     .map_err(AssetMutationError::Database)?
@@ -479,7 +479,7 @@ pub async fn purge_trashed_asset(
     asset_public_id: Uuid,
 ) -> Result<(), AssetMutationError> {
     let mut tx = pool.begin().await.map_err(AssetMutationError::Database)?;
-    let Some(asset) = sqlx::query_as::<_, (Uuid, Uuid, Option<OffsetDateTime>)>(
+    let Some(asset) = sqlx::query!(
         r#"
         SELECT id, original_id, trashed_at
         FROM assets
@@ -487,34 +487,31 @@ pub async fn purge_trashed_asset(
           AND public_id = $2
         FOR UPDATE
         "#,
+        owner_id,
+        asset_public_id
     )
-    .bind(owner_id)
-    .bind(asset_public_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(AssetMutationError::Database)?
     else {
         return Err(AssetMutationError::NotFound);
     };
-    if asset.2.is_none() {
+    if asset.trashed_at.is_none() {
         return Err(AssetMutationError::NotTrashed);
     }
 
-    sqlx::query("DELETE FROM assets WHERE id = $1")
-        .bind(asset.0)
+    sqlx::query!("DELETE FROM assets WHERE id = $1", asset.id)
         .execute(&mut *tx)
         .await
         .map_err(AssetMutationError::Database)?;
 
-    let remaining_original_refs: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM assets WHERE original_id = $1")
-            .bind(asset.1)
+    let remaining_original_refs =
+        sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM assets WHERE original_id = $1"#, asset.original_id)
             .fetch_one(&mut *tx)
             .await
             .map_err(AssetMutationError::Database)?;
     let original_removed = if remaining_original_refs == 0 {
-        sqlx::query("DELETE FROM originals WHERE id = $1")
-            .bind(asset.1)
+        sqlx::query!("DELETE FROM originals WHERE id = $1", asset.original_id)
             .execute(&mut *tx)
             .await
             .map_err(AssetMutationError::Database)?
@@ -524,7 +521,7 @@ pub async fn purge_trashed_asset(
         false
     };
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO audit_events (
             actor_kind,
@@ -542,13 +539,13 @@ pub async fn purge_trashed_asset(
             'success',
             'asset',
             $2,
-            jsonb_build_object('original_removed', $3)
+            jsonb_build_object('original_removed', $3::boolean)
         )
         "#,
+        owner_id,
+        asset_public_id.to_string(),
+        original_removed
     )
-    .bind(owner_id)
-    .bind(asset_public_id.to_string())
-    .bind(original_removed)
     .execute(&mut *tx)
     .await
     .map_err(AssetMutationError::Database)?;
@@ -575,15 +572,15 @@ async fn existing_asset_for_upload(
     pool: &PgPool,
     upload_id: Uuid,
 ) -> Result<Option<PromotedUpload>, PromoteError> {
-    sqlx::query_scalar::<_, Uuid>(
+    sqlx::query_scalar!(
         r#"
         SELECT a.public_id
         FROM asset_sources s
         JOIN assets a ON a.id = s.asset_id
         WHERE s.upload_id = $1
         "#,
+        upload_id,
     )
-    .bind(upload_id)
     .fetch_optional(pool)
     .await
     .map(|row| row.map(|asset_id| PromotedUpload { asset_id }))
@@ -595,7 +592,7 @@ async fn load_verified_upload(
     owner_id: i16,
     upload_id: Uuid,
 ) -> Result<VerifiedUpload, PromoteError> {
-    let row = sqlx::query_as::<_, (String, i64, String, String)>(
+    let row = sqlx::query!(
         r#"
         SELECT original_filename, expected_size, expected_blake3, media_type
         FROM upload_sessions
@@ -603,19 +600,19 @@ async fn load_verified_upload(
           AND owner_id = $2
           AND status = 'verified'
         "#,
+        upload_id,
+        owner_id
     )
-    .bind(upload_id)
-    .bind(owner_id)
     .fetch_optional(pool)
     .await
     .map_err(PromoteError::Database)?
     .ok_or(PromoteError::UploadNotVerified)?;
 
     Ok(VerifiedUpload {
-        original_filename: row.0,
-        expected_size: row.1,
-        expected_blake3: row.2,
-        media_type: row.3,
+        original_filename: row.original_filename,
+        expected_size: row.expected_size,
+        expected_blake3: row.expected_blake3,
+        media_type: row.media_type,
     })
 }
 
@@ -625,23 +622,23 @@ async fn read_verified_staged_bytes(
     upload_id: Uuid,
     upload: &VerifiedUpload,
 ) -> Result<Vec<u8>, PromoteError> {
-    let parts = sqlx::query_as::<_, (i64, String, String)>(
+    let parts = sqlx::query!(
         r#"
         SELECT size_bytes, storage_key, blake3_hash
         FROM upload_parts
         WHERE upload_id = $1
         ORDER BY part_index
         "#,
+        upload_id,
     )
-    .bind(upload_id)
     .fetch_all(pool)
     .await
     .map_err(PromoteError::Database)?
     .into_iter()
-    .map(|(size_bytes, storage_key, blake3_hash)| UploadPart {
-        size_bytes,
-        storage_key,
-        blake3_hash,
+    .map(|row| UploadPart {
+        size_bytes: row.size_bytes,
+        storage_key: row.storage_key,
+        blake3_hash: row.blake3_hash,
     })
     .collect::<Vec<_>>();
 
@@ -678,7 +675,7 @@ async fn upsert_original(
     upload: &VerifiedUpload,
     storage_key: &str,
 ) -> Result<Uuid, PromoteError> {
-    sqlx::query_scalar::<_, Uuid>(
+    sqlx::query_scalar!(
         r#"
         INSERT INTO originals (id, blake3_hash, storage_key, size_bytes, media_type)
         VALUES ($1, $2, $3, $4, $5)
@@ -686,12 +683,12 @@ async fn upsert_original(
         DO UPDATE SET blake3_hash = EXCLUDED.blake3_hash
         RETURNING id
         "#,
+        Uuid::now_v7(),
+        upload.expected_blake3,
+        storage_key,
+        upload.expected_size,
+        upload.media_type
     )
-    .bind(Uuid::now_v7())
-    .bind(&upload.expected_blake3)
-    .bind(storage_key)
-    .bind(upload.expected_size)
-    .bind(&upload.media_type)
     .fetch_one(&mut **tx)
     .await
     .map_err(PromoteError::Database)
@@ -717,45 +714,46 @@ async fn enqueue_asset_jobs(
     Ok(())
 }
 
-type AssetTimelineRow = (
-    Uuid,
-    OffsetDateTime,
-    Option<OffsetDateTime>,
-    String,
-    String,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<i32>,
-    Option<i32>,
-    Option<String>,
-    Option<i32>,
-    Option<i32>,
-);
+struct AssetTimelineRow {
+    public_id: Uuid,
+    created_at: OffsetDateTime,
+    favorite_at: Option<OffsetDateTime>,
+    blake3_hash: String,
+    media_type: String,
+    size_bytes: i64,
+    original_filename: Option<String>,
+    thumbnail_format: Option<String>,
+    thumbnail_width: Option<i32>,
+    thumbnail_height: Option<i32>,
+    preview_format: Option<String>,
+    preview_width: Option<i32>,
+    preview_height: Option<i32>,
+}
 
-type TrashedAssetTimelineRow = (
-    Uuid,
-    OffsetDateTime,
-    OffsetDateTime,
-    Option<OffsetDateTime>,
-    String,
-    String,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<i32>,
-    Option<i32>,
-    Option<String>,
-    Option<i32>,
-    Option<i32>,
-);
+struct TrashedAssetTimelineRow {
+    public_id: Uuid,
+    created_at: OffsetDateTime,
+    trashed_at: OffsetDateTime,
+    favorite_at: Option<OffsetDateTime>,
+    blake3_hash: String,
+    media_type: String,
+    size_bytes: i64,
+    original_filename: Option<String>,
+    thumbnail_format: Option<String>,
+    thumbnail_width: Option<i32>,
+    thumbnail_height: Option<i32>,
+    preview_format: Option<String>,
+    preview_width: Option<i32>,
+    preview_height: Option<i32>,
+}
 
 async fn list_assets_first_page(
     pool: &PgPool,
     owner_id: i16,
     limit: i64,
 ) -> Result<Vec<AssetTimelineRow>, ListAssetsError> {
-    sqlx::query_as::<_, AssetTimelineRow>(
+    sqlx::query_as!(
+        AssetTimelineRow,
         r#"
         SELECT
             a.public_id,
@@ -765,12 +763,12 @@ async fn list_assets_first_page(
             o.media_type,
             o.size_bytes,
             s.original_filename,
-            t.format,
-            t.width,
-            t.height,
-            p.format,
-            p.width,
-            p.height
+            t.format as thumbnail_format,
+            t.width as thumbnail_width,
+            t.height as thumbnail_height,
+            p.format as preview_format,
+            p.width as preview_width,
+            p.height as preview_height
         FROM assets a
         JOIN originals o ON o.id = a.original_id
         LEFT JOIN LATERAL (
@@ -801,9 +799,9 @@ async fn list_assets_first_page(
         ORDER BY a.created_at DESC, a.public_id DESC
         LIMIT $2
         "#,
+        owner_id,
+        limit
     )
-    .bind(owner_id)
-    .bind(limit)
     .fetch_all(pool)
     .await
     .map_err(ListAssetsError::Database)
@@ -814,23 +812,24 @@ async fn list_trashed_assets_first_page(
     owner_id: i16,
     limit: i64,
 ) -> Result<Vec<TrashedAssetTimelineRow>, ListAssetsError> {
-    sqlx::query_as::<_, TrashedAssetTimelineRow>(
+    sqlx::query_as!(
+        TrashedAssetTimelineRow,
         r#"
         SELECT
             a.public_id,
             a.created_at,
-            a.trashed_at,
+            a.trashed_at as "trashed_at!",
             a.favorite_at,
             o.blake3_hash,
             o.media_type,
             o.size_bytes,
             s.original_filename,
-            t.format,
-            t.width,
-            t.height,
-            p.format,
-            p.width,
-            p.height
+            t.format as thumbnail_format,
+            t.width as thumbnail_width,
+            t.height as thumbnail_height,
+            p.format as preview_format,
+            p.width as preview_width,
+            p.height as preview_height
         FROM assets a
         JOIN originals o ON o.id = a.original_id
         LEFT JOIN LATERAL (
@@ -861,9 +860,9 @@ async fn list_trashed_assets_first_page(
         ORDER BY a.trashed_at DESC, a.public_id DESC
         LIMIT $2
         "#,
+        owner_id,
+        limit
     )
-    .bind(owner_id)
-    .bind(limit)
     .fetch_all(pool)
     .await
     .map_err(ListAssetsError::Database)
@@ -876,7 +875,8 @@ async fn list_assets_after(
     cursor_created_at: OffsetDateTime,
     cursor_public_id: Uuid,
 ) -> Result<Vec<AssetTimelineRow>, ListAssetsError> {
-    sqlx::query_as::<_, AssetTimelineRow>(
+    sqlx::query_as!(
+        AssetTimelineRow,
         r#"
         SELECT
             a.public_id,
@@ -886,12 +886,12 @@ async fn list_assets_after(
             o.media_type,
             o.size_bytes,
             s.original_filename,
-            t.format,
-            t.width,
-            t.height,
-            p.format,
-            p.width,
-            p.height
+            t.format as thumbnail_format,
+            t.width as thumbnail_width,
+            t.height as thumbnail_height,
+            p.format as preview_format,
+            p.width as preview_width,
+            p.height as preview_height
         FROM assets a
         JOIN originals o ON o.id = a.original_id
         LEFT JOIN LATERAL (
@@ -923,11 +923,11 @@ async fn list_assets_after(
         ORDER BY a.created_at DESC, a.public_id DESC
         LIMIT $2
         "#,
+        owner_id,
+        limit,
+        cursor_created_at,
+        cursor_public_id
     )
-    .bind(owner_id)
-    .bind(limit)
-    .bind(cursor_created_at)
-    .bind(cursor_public_id)
     .fetch_all(pool)
     .await
     .map_err(ListAssetsError::Database)
@@ -940,23 +940,24 @@ async fn list_trashed_assets_after(
     cursor_trashed_at: OffsetDateTime,
     cursor_public_id: Uuid,
 ) -> Result<Vec<TrashedAssetTimelineRow>, ListAssetsError> {
-    sqlx::query_as::<_, TrashedAssetTimelineRow>(
+    sqlx::query_as!(
+        TrashedAssetTimelineRow,
         r#"
         SELECT
             a.public_id,
             a.created_at,
-            a.trashed_at,
+            a.trashed_at as "trashed_at!",
             a.favorite_at,
             o.blake3_hash,
             o.media_type,
             o.size_bytes,
             s.original_filename,
-            t.format,
-            t.width,
-            t.height,
-            p.format,
-            p.width,
-            p.height
+            t.format as thumbnail_format,
+            t.width as thumbnail_width,
+            t.height as thumbnail_height,
+            p.format as preview_format,
+            p.width as preview_width,
+            p.height as preview_height
         FROM assets a
         JOIN originals o ON o.id = a.original_id
         LEFT JOIN LATERAL (
@@ -988,11 +989,11 @@ async fn list_trashed_assets_after(
         ORDER BY a.trashed_at DESC, a.public_id DESC
         LIMIT $2
         "#,
+        owner_id,
+        limit,
+        cursor_trashed_at,
+        cursor_public_id
     )
-    .bind(owner_id)
-    .bind(limit)
-    .bind(cursor_trashed_at)
-    .bind(cursor_public_id)
     .fetch_all(pool)
     .await
     .map_err(ListAssetsError::Database)
@@ -1007,37 +1008,25 @@ fn build_timeline_page(
     let items = rows
         .into_iter()
         .take(limit)
-        .map(
-            |(
-                asset_id,
-                created_at,
-                favorite_at,
-                original_blake3,
-                media_type,
-                size_bytes,
-                original_filename,
-                thumbnail_format,
-                thumbnail_width,
-                thumbnail_height,
-                preview_format,
-                preview_width,
-                preview_height,
-            )| AssetTimelineItem {
-                asset_id,
-                created_at,
-                favorite_at,
-                original_blake3,
-                media_type,
-                size_bytes,
-                original_filename,
-                thumbnail: asset_derivative_view(
-                    thumbnail_format,
-                    thumbnail_width,
-                    thumbnail_height,
-                ),
-                preview: asset_derivative_view(preview_format, preview_width, preview_height),
-            },
-        )
+        .map(|row| AssetTimelineItem {
+            asset_id: row.public_id,
+            created_at: row.created_at,
+            favorite_at: row.favorite_at,
+            original_blake3: row.blake3_hash,
+            media_type: row.media_type,
+            size_bytes: row.size_bytes,
+            original_filename: row.original_filename,
+            thumbnail: asset_derivative_view(
+                row.thumbnail_format,
+                row.thumbnail_width,
+                row.thumbnail_height,
+            ),
+            preview: asset_derivative_view(
+                row.preview_format,
+                row.preview_width,
+                row.preview_height,
+            ),
+        })
         .collect::<Vec<_>>();
     let next_cursor = if has_more {
         items
@@ -1059,39 +1048,26 @@ fn build_trashed_timeline_page(
     let items = rows
         .into_iter()
         .take(limit)
-        .map(
-            |(
-                asset_id,
-                created_at,
-                trashed_at,
-                favorite_at,
-                original_blake3,
-                media_type,
-                size_bytes,
-                original_filename,
-                thumbnail_format,
-                thumbnail_width,
-                thumbnail_height,
-                preview_format,
-                preview_width,
-                preview_height,
-            )| TrashedAssetTimelineItem {
-                asset_id,
-                created_at,
-                trashed_at,
-                favorite_at,
-                original_blake3,
-                media_type,
-                size_bytes,
-                original_filename,
-                thumbnail: asset_derivative_view(
-                    thumbnail_format,
-                    thumbnail_width,
-                    thumbnail_height,
-                ),
-                preview: asset_derivative_view(preview_format, preview_width, preview_height),
-            },
-        )
+        .map(|row| TrashedAssetTimelineItem {
+            asset_id: row.public_id,
+            created_at: row.created_at,
+            trashed_at: row.trashed_at,
+            favorite_at: row.favorite_at,
+            original_blake3: row.blake3_hash,
+            media_type: row.media_type,
+            size_bytes: row.size_bytes,
+            original_filename: row.original_filename,
+            thumbnail: asset_derivative_view(
+                row.thumbnail_format,
+                row.thumbnail_width,
+                row.thumbnail_height,
+            ),
+            preview: asset_derivative_view(
+                row.preview_format,
+                row.preview_width,
+                row.preview_height,
+            ),
+        })
         .collect::<Vec<_>>();
     let next_cursor = if has_more {
         items

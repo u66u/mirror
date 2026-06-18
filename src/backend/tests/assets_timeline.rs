@@ -162,8 +162,7 @@ async fn derivative_route_returns_authenticated_derivative_bytes() -> TestResult
         asset_id,
     )
     .await?;
-    let public_id: Uuid = sqlx::query_scalar("SELECT public_id FROM assets WHERE id = $1")
-        .bind(asset_id)
+    let public_id: Uuid = sqlx::query_scalar!("SELECT public_id FROM assets WHERE id = $1", asset_id)
         .fetch_one(&deps.pool)
         .await?;
     let session = create_session(
@@ -375,8 +374,7 @@ async fn trash_route_hides_timeline_and_derivatives_until_restore() -> TestResul
         asset_id,
     )
     .await?;
-    let public_id: Uuid = sqlx::query_scalar("SELECT public_id FROM assets WHERE id = $1")
-        .bind(asset_id)
+    let public_id: Uuid = sqlx::query_scalar!("SELECT public_id FROM assets WHERE id = $1", asset_id)
         .fetch_one(&deps.pool)
         .await?;
     let session = create_session(
@@ -518,13 +516,13 @@ async fn purge_route_requires_trash_and_audits_permanent_removal() -> TestResult
         StatusCode::NO_CONTENT
     );
 
-    let asset_count: i64 = sqlx::query_scalar("SELECT count(*) FROM assets")
+    let asset_count: i64 = sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM assets"#)
         .fetch_one(&deps.pool)
         .await?;
-    let original_count: i64 = sqlx::query_scalar("SELECT count(*) FROM originals")
+    let original_count: i64 = sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM originals"#)
         .fetch_one(&deps.pool)
         .await?;
-    let share_count: i64 = sqlx::query_scalar("SELECT count(*) FROM asset_shares")
+    let share_count: i64 = sqlx::query_scalar!(r#"SELECT count(*) as "count!" FROM asset_shares"#)
         .fetch_one(&deps.pool)
         .await?;
     let audit_count: i64 = sqlx::query_scalar(

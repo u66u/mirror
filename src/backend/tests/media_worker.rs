@@ -185,8 +185,7 @@ async fn video_handlers_stream_original_and_persist_posters() -> TestResult {
     let upload_id =
         create_verified_upload(&deps.pool, &deps.storage, "video.mp4", "video/mp4", bytes).await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    let asset_id = sqlx::query_scalar("SELECT id FROM assets WHERE public_id = $1")
-        .bind(promoted.asset_id)
+    let asset_id = sqlx::query_scalar!("SELECT id FROM assets WHERE public_id = $1", promoted.asset_id)
         .fetch_one(&deps.pool)
         .await?;
     let video_processor = FfmpegVideoProcessor::new("ffprobe", "ffmpeg", Duration::from_secs(10));
@@ -208,25 +207,19 @@ async fn video_handlers_stream_original_and_persist_posters() -> TestResult {
     )
     .await?;
 
-    let (width, height, duration_ms) = sqlx::query_as::<_, (i32, i32, i64)>(
-        r#"
-        SELECT width, height, (raw->>'duration_ms')::bigint
+    let (width, height, duration_ms) = sqlx::query!(r#"
+        SELECT width as "width!", height as "height!", (raw->>'duration_ms')::bigint as duration_ms
         FROM asset_metadata
         WHERE asset_id = $1
-        "#,
-    )
-    .bind(asset_id)
+        "#, asset_id).map(|r| (r.width, r.height, r.duration_ms.unwrap_or_default()))
     .fetch_one(&deps.pool)
     .await?;
-    let derivatives = sqlx::query_as::<_, (String, i32, i32, String)>(
-        r#"
-        SELECT kind, width, height, storage_key
+    let derivatives = sqlx::query!(r#"
+        SELECT kind as "kind!", width as "width!", height as "height!", storage_key as "storage_key!"
         FROM derivatives
         WHERE asset_id = $1
         ORDER BY kind
-        "#,
-    )
-    .bind(asset_id)
+        "#, asset_id).map(|r| (r.kind, r.width, r.height, r.storage_key))
     .fetch_all(&deps.pool)
     .await?;
 
@@ -269,8 +262,7 @@ async fn media_job_rejects_invalid_payload_without_side_effects() -> TestResult 
 async fn promoted_asset(deps: &StorageTestDeps, filename: &str) -> TestResult<Uuid> {
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, filename).await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
-    let internal_asset_id = sqlx::query_scalar("SELECT id FROM assets WHERE public_id = $1")
-        .bind(promoted.asset_id)
+    let internal_asset_id = sqlx::query_scalar!("SELECT id FROM assets WHERE public_id = $1", promoted.asset_id)
         .fetch_one(&deps.pool)
         .await?;
     Ok(internal_asset_id)

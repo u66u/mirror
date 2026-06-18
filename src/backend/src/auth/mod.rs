@@ -10,8 +10,8 @@ mod setup_token;
 mod tokens;
 
 use sqlx::PgPool;
-use uuid::Uuid;
 use thiserror::Error;
+use uuid::Uuid;
 
 pub use device_tokens::{
     AuthenticatedDeviceToken, DeviceTokenCreateInput, DeviceTokenCreateOutput, DeviceTokenError,
@@ -152,13 +152,13 @@ pub async fn login_owner(
 
 /// Verifies the current owner password without creating a session.
 pub async fn verify_owner_password(pool: &PgPool, password: &str) -> Result<bool, sqlx::Error> {
-    let password_hash = sqlx::query_scalar::<_, String>(
+    let password_hash = sqlx::query_scalar!(
         r#"
         SELECT password_hash
         FROM owner_accounts
         WHERE id = 1
           AND disabled_at IS NULL
-        "#,
+        "#
     )
     .fetch_optional(pool)
     .await?;
@@ -179,15 +179,15 @@ pub async fn create_owner(
     let password_hash = hash_password(&input.password)?;
     let owner_public_id = Uuid::now_v7();
 
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         INSERT INTO owner_accounts (public_id, display_name, password_hash)
         VALUES ($1, $2, $3)
         "#,
+        owner_public_id,
+        display_name,
+        password_hash
     )
-    .bind(owner_public_id)
-    .bind(display_name)
-    .bind(password_hash)
     .execute(pool)
     .await;
 

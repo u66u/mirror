@@ -6,8 +6,8 @@
 use blake3::Hasher;
 use serde::Serialize;
 use sqlx::PgPool;
-use uuid::Uuid;
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::storage::{ObjectStorage, StorageKey};
 
@@ -210,11 +210,9 @@ pub async fn put_part(
         .map_err(|_| UploadError::InvalidInput)?;
     let hash = blake3::hash(&bytes).to_hex().to_string();
 
-    storage
-        .write(&key, bytes)
-        .await?;
+    storage.write(&key, bytes).await?;
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO upload_parts (upload_id, part_index, size_bytes, storage_key, blake3_hash)
         VALUES ($1, $2, $3, $4, $5)
@@ -225,12 +223,12 @@ pub async fn put_part(
             blake3_hash = EXCLUDED.blake3_hash,
             created_at = now()
         "#,
+        upload_id,
+        part_index,
+        size,
+        key.as_str(),
+        hash
     )
-    .bind(upload_id)
-    .bind(part_index)
-    .bind(size)
-    .bind(key.as_str())
-    .bind(hash)
     .execute(pool)
     .await?;
 
@@ -299,7 +297,7 @@ pub async fn complete_upload(
         return Err(UploadError::VerificationFailed);
     }
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE upload_sessions
         SET status = $1,
@@ -309,10 +307,10 @@ pub async fn complete_upload(
           AND owner_id = $3
           AND status = 'open'
         "#,
+        UploadStatus::Verified.as_str(),
+        upload_id,
+        owner_id
     )
-    .bind(UploadStatus::Verified.as_str())
-    .bind(upload_id)
-    .bind(owner_id)
     .execute(pool)
     .await?;
 
@@ -325,7 +323,7 @@ pub async fn cancel_upload(
     owner_id: i16,
     upload_id: Uuid,
 ) -> Result<(), UploadError> {
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE upload_sessions
         SET status = 'cancelled',
@@ -335,9 +333,9 @@ pub async fn cancel_upload(
           AND owner_id = $2
           AND status = 'open'
         "#,
+        upload_id,
+        owner_id
     )
-    .bind(upload_id)
-    .bind(owner_id)
     .execute(pool)
     .await?;
 
@@ -403,6 +401,7 @@ async fn committed_parts(pool: &PgPool, upload_id: Uuid) -> Result<Vec<i32>, Upl
     .bind(upload_id)
     .fetch_all(pool)
     .await
+    .map_err(UploadError::Database)
 }
 
 async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, UploadError> {
