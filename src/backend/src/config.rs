@@ -3,7 +3,7 @@
 //! V1 keeps config explicit and environment-backed. Secret-bearing config must
 //! never be logged without redaction; see `docs/style-guide.md`.
 
-use std::{env, fmt, net::SocketAddr, path::PathBuf, thread};
+use std::{env, fmt, net::SocketAddr, num::NonZeroUsize, path::PathBuf, thread};
 
 use ipnet::IpNet;
 use sha2::{Digest, Sha256};
@@ -431,6 +431,15 @@ impl Config {
         } else {
             Ok(())
         }
+    }
+
+    /// Returns the configured Mirror-level ML inference concurrency cap.
+    ///
+    /// `None` means callers should not install an application-level semaphore.
+    #[must_use]
+    pub fn ml_concurrency_limit(&self) -> Option<NonZeroUsize> {
+        self.ml_max_concurrent_inferences
+            .and_then(NonZeroUsize::new)
     }
 }
 

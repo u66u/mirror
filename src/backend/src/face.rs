@@ -39,6 +39,7 @@ use crate::{
 };
 
 const MAX_FACE_IMAGE_BYTES: usize = 25 * 1024 * 1024;
+const MAX_FACE_EMBEDDING_FIXED_BATCH_SIZE: usize = 1_000;
 const FACE_CHIP_GENERATOR_VERSION: &str = "face-chip-v1-webp-1";
 
 /// Shared face runtime handle for worker wiring.
@@ -1914,7 +1915,7 @@ fn run_face_embedding_batches(
     if chips.is_empty() {
         return Ok(Vec::new());
     }
-    let fixed_batch_size = model_fixed_batch_size(session, embedder)?;
+    let fixed_batch_size = face_embedding_fixed_batch_size(session, embedder)?;
     let chunk_size = fixed_batch_size.unwrap_or(chips.len());
     let mut embeddings = Vec::with_capacity(chips.len());
     for chunk in chips.chunks(chunk_size) {
@@ -1934,7 +1935,7 @@ fn run_face_embedding_batches(
     Ok(embeddings)
 }
 
-fn model_fixed_batch_size(
+fn face_embedding_fixed_batch_size(
     session: &Session,
     embedder: &dyn FaceEmbedderAdapter,
 ) -> Result<Option<usize>, FaceIndexError> {
@@ -1967,7 +1968,7 @@ fn model_fixed_batch_size(
         batch_size if batch_size > 0 => {
             let batch_size =
                 usize::try_from(batch_size).map_err(|_| FaceIndexError::RuntimeUnavailable)?;
-            if batch_size > 1_000 {
+            if batch_size > MAX_FACE_EMBEDDING_FIXED_BATCH_SIZE {
                 return Err(ModelPackError::InvalidManifest("face_embedding.input_shape").into());
             }
             Ok(Some(batch_size))

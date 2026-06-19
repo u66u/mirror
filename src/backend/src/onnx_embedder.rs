@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    config::MlDevicePreference,
+    config::{Config, MlDevicePreference},
     media::{MediaToolError, decode_still_image, normalize_still_image_for_image_crate},
     ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError},
     models::{ModelPackError, ModelPackKind, ModelPackManifest, ModelRuntime},
@@ -34,6 +34,16 @@ pub struct OnnxSessionOptions {
     pub inter_threads: Option<usize>,
     /// Whether independent graph operators may execute in parallel.
     pub parallel_execution: Option<bool>,
+}
+
+impl From<&Config> for OnnxSessionOptions {
+    fn from(config: &Config) -> Self {
+        Self {
+            intra_threads: config.ml_intra_threads,
+            inter_threads: config.ml_inter_threads,
+            parallel_execution: config.ml_parallel_execution,
+        }
+    }
 }
 
 /// Production image/text embedder backed by ONNX Runtime.

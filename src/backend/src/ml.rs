@@ -56,11 +56,11 @@ impl<E: ?Sized> MlRuntime<E> {
         max_concurrent_embeddings: NonZeroUsize,
         max_image_bytes: usize,
     ) -> Self {
-        Self {
+        Self::with_optional_concurrency_and_max_image_bytes(
             embedder,
-            permits: Some(Arc::new(Semaphore::new(max_concurrent_embeddings.get()))),
-            max_image_bytes: max_image_bytes.max(1),
-        }
+            Some(max_concurrent_embeddings),
+            max_image_bytes,
+        )
     }
 
     /// Creates a runtime with an optional inference-concurrency cap.

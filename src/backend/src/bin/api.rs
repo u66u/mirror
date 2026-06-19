@@ -2,7 +2,7 @@
 //!
 //! This binary owns Actix startup, HTTP middleware, and process configuration.
 
-use std::{io, num::NonZeroUsize, sync::Arc};
+use std::{io, sync::Arc};
 
 use actix_web::{App, HttpServer, web};
 use mirror_backend::{
@@ -37,11 +37,7 @@ async fn main() -> std::io::Result<()> {
         setup,
         storage,
     };
-    let session_options = OnnxSessionOptions {
-        intra_threads: config.ml_intra_threads,
-        inter_threads: config.ml_inter_threads,
-        parallel_execution: config.ml_parallel_execution,
-    };
+    let session_options = OnnxSessionOptions::from(&config);
     let embedder: Arc<dyn ImageTextEmbedder + Send + Sync> =
         Arc::new(OnnxImageTextEmbedder::with_session_options(
             config.storage_root.clone(),
@@ -50,9 +46,7 @@ async fn main() -> std::io::Result<()> {
         ));
     let ml_runtime = SharedImageTextRuntime::with_optional_concurrency_and_max_image_bytes(
         embedder,
-        config
-            .ml_max_concurrent_inferences
-            .and_then(NonZeroUsize::new),
+        config.ml_concurrency_limit(),
         config.ml_max_image_bytes,
     );
     let face_runtime: SharedFaceRuntime = Arc::new(OnnxFaceRuntime::with_session_options(
