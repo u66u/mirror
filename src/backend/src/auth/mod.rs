@@ -159,15 +159,12 @@ pub async fn login_owner(
 
     if second_factor_enabled(pool).await? {
         let Some(second_factor) = input.second_factor else {
-            return Err(OwnerLoginError::SecondFactorRequired);
+            return Err(OwnerLoginError::InvalidCredentials);
         };
         match verify_second_factor(pool, auth_secret, second_factor).await {
             Ok(()) => {}
-            Err(MfaError::SecondFactorRequired) => {
-                return Err(OwnerLoginError::SecondFactorRequired);
-            }
-            Err(MfaError::InvalidSecondFactor) => {
-                return Err(OwnerLoginError::InvalidSecondFactor);
+            Err(MfaError::SecondFactorRequired | MfaError::InvalidSecondFactor) => {
+                return Err(OwnerLoginError::InvalidCredentials);
             }
             Err(error) => return Err(OwnerLoginError::Mfa(error)),
         }

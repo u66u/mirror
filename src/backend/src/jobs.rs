@@ -65,6 +65,13 @@ impl JobSpec {
             run_after: None,
         }
     }
+
+    /// Overrides the default leasing priority.
+    #[must_use]
+    pub const fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
 }
 
 /// Leased job returned to a worker.

@@ -23,7 +23,7 @@ use tracing_actix_web::TracingLogger;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let config = Config::from_env();
+    let config = Config::from_env().map_err(io_other)?;
     config
         .validate_auth_secret_for_database()
         .map_err(io_other)?;

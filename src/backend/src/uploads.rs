@@ -483,11 +483,11 @@ fn validate_create_input(input: &CreateUploadInput) -> Result<(), UploadError> {
     Ok(())
 }
 
-fn expected_part_count(expected_size: i64) -> Option<i64> {
+pub(crate) fn expected_part_count(expected_size: i64) -> Option<i64> {
     (expected_size > 0).then(|| ((expected_size - 1) / UPLOAD_PART_SIZE_I64) + 1)
 }
 
-fn expected_part_size(expected_size: i64, part_index: i32) -> Option<i64> {
+pub(crate) fn expected_part_size(expected_size: i64, part_index: i32) -> Option<i64> {
     let part_count = expected_part_count(expected_size)?;
     let part_index = i64::from(part_index);
     if part_index < 0 || part_index >= part_count {
@@ -531,7 +531,7 @@ fn is_supported_media_type(value: &str) -> bool {
     )
 }
 
-fn media_signature_matches(media_type: &str, bytes: &[u8]) -> bool {
+pub(crate) fn media_signature_matches(media_type: &str, bytes: &[u8]) -> bool {
     match media_type {
         "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
         "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),

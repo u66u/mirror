@@ -118,7 +118,7 @@ async fn assets_route_returns_authenticated_owner_timeline() -> TestResult {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -178,7 +178,7 @@ async fn derivative_route_returns_authenticated_derivative_bytes() -> TestResult
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -240,7 +240,7 @@ async fn favorite_routes_update_timeline_marker_idempotently() -> TestResult {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -312,7 +312,7 @@ async fn trash_listing_pages_without_active_assets_or_duplicates() -> TestResult
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -391,7 +391,7 @@ async fn trash_route_hides_timeline_and_derivatives_until_restore() -> TestResul
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -478,7 +478,7 @@ async fn purge_route_requires_trash_and_audits_permanent_removal() -> TestResult
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),

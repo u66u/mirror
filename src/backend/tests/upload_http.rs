@@ -50,7 +50,7 @@ async fn upload_part_route_accepts_four_mib_and_rejects_larger_without_artifacts
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -150,7 +150,7 @@ async fn complete_upload_route_promotes_asset_and_enqueues_jobs() -> TestResult 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -192,7 +192,7 @@ async fn create_upload_route_respects_persisted_rate_limit_bucket() -> TestResul
         },
     )
     .await?;
-    let config = Config::from_env();
+    let config = Config::from_env()?;
     assert!(
         rate_limit::record_quota_attempt(
             &deps.pool,

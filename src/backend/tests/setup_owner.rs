@@ -69,7 +69,7 @@ async fn setup_owner_route_is_ip_rate_limited() -> TestResult {
         .await?;
 
     let (setup, _) = SetupState::pending()?;
-    let mut config = Config::from_env();
+    let mut config = Config::from_env()?;
     config.rate_limits.setup_owner.max_per_window = 1;
     assert!(
         rate_limit::record_quota_attempt(

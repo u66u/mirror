@@ -41,7 +41,7 @@ async fn share_route_hashes_token_serves_derivative_and_revokes() -> TestResult 
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -158,7 +158,7 @@ async fn share_creation_is_owner_rate_limited_before_token_minting() -> TestResu
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),

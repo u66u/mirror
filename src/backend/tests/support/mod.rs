@@ -17,6 +17,7 @@ use mirror_backend::{
         PasswordError, SessionError, SetupState, SetupTokenError, TokenError,
     },
     backups::BackupError,
+    config::ConfigError,
     db::{connect, run_migrations},
     jobs::JobError,
     media::{
@@ -110,6 +111,12 @@ impl From<sqlx::migrate::MigrateError> for TestError {
 impl From<PasswordError> for TestError {
     fn from(error: PasswordError) -> Self {
         Self::new("password failed", error)
+    }
+}
+
+impl From<ConfigError> for TestError {
+    fn from(error: ConfigError) -> Self {
+        Self::new("config failed", error)
     }
 }
 

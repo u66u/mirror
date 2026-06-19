@@ -97,7 +97,7 @@ async fn search_route_returns_authenticated_owner_results() -> TestResult {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),
@@ -159,7 +159,7 @@ async fn search_route_semantic_mode_uses_active_model_pack() -> TestResult {
     .await?;
     let embedder: Arc<dyn ImageTextEmbedder + Send + Sync> = Arc::new(FakeImageTextEmbedder);
     let runtime = SharedImageTextRuntime::new(embedder, NonZeroUsize::MIN);
-    let mut config = Config::from_env();
+    let mut config = Config::from_env()?;
     config.rate_limits.semantic_search.max_per_window = 1;
     let app = test::init_service(
         App::new()

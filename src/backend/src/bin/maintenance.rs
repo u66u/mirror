@@ -79,7 +79,7 @@ async fn main() -> io::Result<()> {
         print!("{USAGE}");
         return Ok(());
     };
-    let config = Config::from_env();
+    let config = Config::from_env().map_err(io_other)?;
     if options.print_model_pack_schema {
         let schema = models::model_pack_manifest_schema_json().map_err(io_other)?;
         let body = serde_json::to_string_pretty(&schema).map_err(io_other)?;

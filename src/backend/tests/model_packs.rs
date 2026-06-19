@@ -373,7 +373,7 @@ async fn model_pack_admin_routes_install_self_test_activate_and_reindex() -> Tes
     let app = actix_test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(pool.clone()),
                 setup: SetupState::Disabled,
                 storage: None,
@@ -492,7 +492,7 @@ async fn model_pack_admin_routes_are_owner_credential_rate_limited() -> TestResu
         },
     )
     .await?;
-    let mut config = Config::from_env();
+    let mut config = Config::from_env()?;
     config.rate_limits.model_pack_admin.max_per_window = 1;
     let app = actix_test::init_service(
         App::new()
@@ -558,7 +558,7 @@ async fn model_pack_self_test_run_route_records_runtime_result() -> TestResult {
         App::new()
             .app_data(web::Data::new(runtime))
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(storage.clone()),
@@ -626,7 +626,7 @@ async fn face_model_pack_self_test_run_route_uses_face_runtime() -> TestResult {
         App::new()
             .app_data(web::Data::new(face_runtime))
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(storage.clone()),
@@ -719,13 +719,16 @@ async fn model_reindex_queues_embedding_jobs_for_active_assets_only() -> TestRes
     assert_eq!(run.status, "queued");
     assert_eq!(run.total_assets, 1);
     assert_eq!(run.queued_assets, 1);
-    let jobs: Vec<(String, serde_json::Value)> =
-        sqlx::query!("SELECT kind, payload FROM jobs WHERE kind = 'embed_asset'")
-            .map(|r| (r.kind, r.payload))
+    let duplicate_run = start_model_reindex(&pool, pack.model_pack_id).await?;
+    assert_eq!(duplicate_run.reindex_run_id, run.reindex_run_id);
+    let jobs: Vec<(String, serde_json::Value, i32)> =
+        sqlx::query!("SELECT kind, payload, priority FROM jobs WHERE kind = 'embed_asset'")
+            .map(|r| (r.kind, r.payload, r.priority))
             .fetch_all(&pool)
             .await?;
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].0, "embed_asset");
+    assert_eq!(jobs[0].2, -10);
     assert_eq!(
         jobs[0].1["asset_id"].as_str(),
         Some(active_asset_id.to_string().as_str())

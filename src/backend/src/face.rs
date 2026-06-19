@@ -451,7 +451,8 @@ pub async fn enqueue_face_index(pool: &PgPool, asset_id: Uuid) -> Result<(), Fac
             JobKind::IndexFaces,
             serde_json::json!({ "asset_id": asset_id }),
             format!("face-index:{asset_id}"),
-        ),
+        )
+        .with_priority(100),
     )
     .await?;
     tx.commit().await?;
@@ -1052,9 +1053,16 @@ async fn best_person_match(
     embedding: &[f32],
     threshold: f32,
 ) -> Result<Option<Uuid>, FaceIndexError> {
-    let rows = sqlx::query(
+    let embedding_dimension = i32::try_from(embedding.len()).map_err(|_| {
+        FaceIndexError::Model(ModelPackError::InvalidManifest(
+            "face_embedding.embedding_dimension",
+        ))
+    })?;
+    let query_embedding = Vector::from(embedding.to_vec());
+    let max_distance = f64::from(1.0_f32 - threshold);
+    sqlx::query_scalar::<_, Uuid>(
         r#"
-        SELECT pf.person_id, fe.embedding
+        SELECT pf.person_id
         FROM person_faces pf
         JOIN face_embeddings fe
           ON fe.face_occurrence_id = pf.face_occurrence_id
@@ -1066,25 +1074,20 @@ async fn best_person_match(
           AND pf.review_state = 'assigned'
           AND p.review_status <> 'hidden'
           AND fe.model_pack_id = $2
+          AND fe.embedding_dimension = $4
+          AND (fe.embedding <=> $3) <= $5
+        ORDER BY fe.embedding <=> $3 ASC, pf.person_id ASC
+        LIMIT 1
         "#,
     )
     .bind(owner_id)
     .bind(model_pack_id)
-    .fetch_all(&mut **tx)
-    .await?;
-
-    let mut best = None;
-    for row in rows {
-        let person_id: Uuid = row.get("person_id");
-        let other: Vector = row.get("embedding");
-        let Some(score) = cosine_similarity(embedding, other.as_slice()) else {
-            continue;
-        };
-        if score >= threshold && best.is_none_or(|(_, best_score)| score > best_score) {
-            best = Some((person_id, score));
-        }
-    }
-    Ok(best.map(|(person_id, _)| person_id))
+    .bind(query_embedding)
+    .bind(embedding_dimension)
+    .bind(max_distance)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(FaceIndexError::Database)
 }
 
 struct OnnxInput {
@@ -1262,6 +1265,8 @@ struct ScrfdOutputMap {
     kps_name: Option<String>,
 }
 
+const SCRFD_ANCHORS_PER_LOCATION: usize = 2;
+
 impl FaceDetectorAdapter for ScrfdDetectorAdapter<'_> {
     fn output_names(&self) -> Vec<String> {
         scrfd_output_maps(self.config)
@@ -1300,6 +1305,7 @@ impl FaceDetectorAdapter for ScrfdDetectorAdapter<'_> {
                 return Err(ModelPackError::InvalidManifest("face_detection.output_names").into());
             }
             let face_count = bboxes.len() / 4;
+            validate_scrfd_head_shape(map.stride, face_count, scores.len(), ctx)?;
             let kps = map
                 .kps_name
                 .as_deref()
@@ -1412,12 +1418,47 @@ fn scrfd_output_maps(config: &FaceDetectionModelConfig) -> Vec<ScrfdOutputMap> {
     Vec::new()
 }
 
+fn validate_scrfd_head_shape(
+    stride: u32,
+    face_count: usize,
+    score_count: usize,
+    ctx: &DetectorPreprocessCtx,
+) -> Result<(), FaceIndexError> {
+    let (grid_width, grid_height) = scrfd_grid(stride, ctx)?;
+    let Some(expected_face_count) = grid_width
+        .checked_mul(grid_height)
+        .and_then(|grid| grid.checked_mul(SCRFD_ANCHORS_PER_LOCATION))
+    else {
+        return Err(ModelPackError::InvalidManifest("face_detection.output_names").into());
+    };
+    if face_count != expected_face_count
+        || !(score_count == face_count || score_count == face_count * 2)
+    {
+        return Err(ModelPackError::InvalidManifest("face_detection.output_names").into());
+    }
+    Ok(())
+}
+
+fn scrfd_grid(stride: u32, ctx: &DetectorPreprocessCtx) -> Result<(usize, usize), FaceIndexError> {
+    if stride == 0
+        || !ctx.network_width.is_multiple_of(stride)
+        || !ctx.network_height.is_multiple_of(stride)
+    {
+        return Err(ModelPackError::InvalidManifest("face_detection.output_names").into());
+    }
+    let width = usize::try_from(ctx.network_width / stride)
+        .map_err(|_| ModelPackError::InvalidManifest("face_detection.output_names"))?;
+    let height = usize::try_from(ctx.network_height / stride)
+        .map_err(|_| ModelPackError::InvalidManifest("face_detection.output_names"))?;
+    Ok((width.max(1), height.max(1)))
+}
+
 fn scrfd_anchor(index: usize, stride: u32, ctx: &DetectorPreprocessCtx) -> (f32, f32) {
     let stride_usize = usize::try_from(stride).unwrap_or(1);
     let width = usize::try_from(ctx.network_width / stride)
         .unwrap_or(1)
         .max(1);
-    let anchor_index = index / 2;
+    let anchor_index = index / SCRFD_ANCHORS_PER_LOCATION;
     let x = (anchor_index % width) * stride_usize;
     let y = (anchor_index / width) * stride_usize;
     (x as f32, y as f32)
@@ -2311,24 +2352,6 @@ fn face_iou(left: FaceBox, right: FaceBox) -> f32 {
     intersection / (left_area + right_area - intersection).max(f32::EPSILON)
 }
 
-fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
-    if left.len() != right.len() || left.is_empty() {
-        return None;
-    }
-    let mut dot = 0.0;
-    let mut left_norm = 0.0;
-    let mut right_norm = 0.0;
-    for (left, right) in left.iter().zip(right) {
-        dot += left * right;
-        left_norm += left * left;
-        right_norm += right * right;
-    }
-    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
-        return None;
-    }
-    Some(dot / left_norm.sqrt() / right_norm.sqrt())
-}
-
 fn face_uuid_field(value: &Value, field: &str) -> Result<Uuid, FaceIndexError> {
     value
         .get(field)
@@ -2351,4 +2374,26 @@ fn is_supported_face_media_type(media_type: &str) -> bool {
         media_type,
         "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/heic" | "image/heif"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrfd_head_shape_requires_standard_two_anchors_per_location() {
+        let ctx = DetectorPreprocessCtx {
+            network_width: 640,
+            network_height: 640,
+            resized_width: 640.0,
+            resized_height: 640.0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+        };
+        let expected = 80 * 80 * SCRFD_ANCHORS_PER_LOCATION;
+
+        assert!(validate_scrfd_head_shape(8, expected, expected, &ctx).is_ok());
+        assert!(validate_scrfd_head_shape(8, 80 * 80, 80 * 80, &ctx).is_err());
+        assert!(validate_scrfd_head_shape(8, expected * 3 / 2, expected * 3 / 2, &ctx).is_err());
+    }
 }

@@ -78,7 +78,7 @@ async fn owner_login_requires_totp_or_recovery_code_when_enabled() -> TestResult
     .await;
     assert!(matches!(
         password_only,
-        Err(OwnerLoginError::SecondFactorRequired)
+        Err(OwnerLoginError::InvalidCredentials)
     ));
 
     let wrong_totp = auth::login_owner(
@@ -97,7 +97,7 @@ async fn owner_login_requires_totp_or_recovery_code_when_enabled() -> TestResult
     .await;
     assert!(matches!(
         wrong_totp,
-        Err(OwnerLoginError::InvalidSecondFactor)
+        Err(OwnerLoginError::InvalidCredentials)
     ));
 
     let session = auth::login_owner(
@@ -158,7 +158,7 @@ async fn owner_login_requires_totp_or_recovery_code_when_enabled() -> TestResult
     .await;
     assert!(matches!(
         reused_recovery,
-        Err(OwnerLoginError::InvalidSecondFactor)
+        Err(OwnerLoginError::InvalidCredentials)
     ));
 
     Ok(())

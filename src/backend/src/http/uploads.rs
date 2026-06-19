@@ -156,9 +156,8 @@ pub async fn complete_upload_route(
     )
     .await?;
     let upload_id = path.into_inner();
-    let upload = uploads::complete_upload(pool, storage, current.owner_id(), upload_id).await?;
-    let promoted =
-        assets::promote_verified_upload(pool, storage, current.owner_id(), upload_id).await?;
+    let (upload, promoted) =
+        assets::complete_and_promote_upload(pool, storage, current.owner_id(), upload_id).await?;
     if state.config.face_recognition_enabled {
         face::enqueue_face_index(pool, promoted.asset_internal_id)
             .await

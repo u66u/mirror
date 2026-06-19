@@ -589,7 +589,7 @@ async fn backend_requests_index_real_face_fixtures_with_manifests(
         },
     )
     .await?;
-    let mut config = Config::from_env();
+    let mut config = Config::from_env()?;
     config.face_recognition_enabled = true;
     let app = actix_test::init_service(
         App::new()

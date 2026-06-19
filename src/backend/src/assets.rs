@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::jobs::{JobKind, JobSpec, enqueue_in_tx};
 use crate::public_derivatives;
 use crate::storage::{ObjectStorage, StorageKey};
+use crate::uploads::{self, UploadSessionView, UploadStatus};
 
 /// Result of promoting a verified upload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -221,45 +222,71 @@ pub async fn promote_verified_upload(
         write_staged_upload_to_original(&mut tx, storage, upload_id, &upload, &final_key).await?;
     }
 
-    let original_id = upsert_original(&mut tx, &upload, final_key.as_str()).await?;
-    let asset_id = Uuid::now_v7();
-    let asset_public_id = Uuid::now_v7();
-
-    sqlx::query!(
-        r#"
-        INSERT INTO assets (id, public_id, owner_id, original_id)
-        VALUES ($1, $2, $3, $4)
-        "#,
-        asset_id,
-        asset_public_id,
-        owner_id,
-        original_id
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(PromoteError::Database)?;
-
-    sqlx::query!(
-        r#"
-        INSERT INTO asset_sources (id, asset_id, source_kind, upload_id, original_filename)
-        VALUES ($1, $2, 'upload', $3, $4)
-        "#,
-        Uuid::now_v7(),
-        asset_id,
-        upload_id,
-        upload.original_filename
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(PromoteError::Database)?;
-
-    enqueue_asset_jobs(&mut tx, asset_id).await?;
+    let promoted =
+        insert_asset_for_upload(&mut tx, owner_id, upload_id, &upload, final_key.as_str()).await?;
     tx.commit().await.map_err(PromoteError::Database)?;
 
-    Ok(PromotedUpload {
-        asset_id: asset_public_id,
-        asset_internal_id: asset_id,
-    })
+    Ok(promoted)
+}
+
+/// Verifies an open upload and promotes it without reading staged parts twice.
+pub async fn complete_and_promote_upload(
+    pool: &PgPool,
+    storage: &ObjectStorage,
+    owner_id: i16,
+    upload_id: Uuid,
+) -> Result<(UploadSessionView, PromotedUpload), PromoteError> {
+    let mut tx = pool.begin().await.map_err(PromoteError::Database)?;
+    let promotable = load_promotable_upload_for_update(&mut tx, owner_id, upload_id).await?;
+
+    if let Some(existing) = existing_asset_for_upload(&mut tx, upload_id).await? {
+        if promotable.status == UploadPromotionStatus::Open {
+            mark_upload_verified(&mut tx, owner_id, upload_id).await?;
+        }
+        let parts = upload_parts(&mut tx, upload_id).await?;
+        let upload = upload_view(upload_id, &promotable.upload, &parts);
+        tx.commit().await.map_err(PromoteError::Database)?;
+        return Ok((upload, existing));
+    }
+
+    let parts = upload_parts(&mut tx, upload_id).await?;
+    validate_upload_parts(&parts, &promotable.upload)?;
+
+    let final_key = StorageKey::original_blake3(&promotable.upload.expected_blake3)
+        .map_err(|_| PromoteError::VerificationFailed)?;
+
+    if storage
+        .exists(&final_key)
+        .await
+        .map_err(PromoteError::Storage)?
+    {
+        verify_staged_upload_part_rows(storage, parts.clone(), &promotable.upload).await?;
+    } else {
+        write_staged_upload_parts_to_original(
+            storage,
+            upload_id,
+            &promotable.upload,
+            &final_key,
+            parts.clone(),
+        )
+        .await?;
+    }
+
+    if promotable.status == UploadPromotionStatus::Open {
+        mark_upload_verified(&mut tx, owner_id, upload_id).await?;
+    }
+    let promoted = insert_asset_for_upload(
+        &mut tx,
+        owner_id,
+        upload_id,
+        &promotable.upload,
+        final_key.as_str(),
+    )
+    .await?;
+    let upload = upload_view(upload_id, &promotable.upload, &parts);
+    tx.commit().await.map_err(PromoteError::Database)?;
+
+    Ok((upload, promoted))
 }
 
 /// Detects a content-addressed original object that exists without DB metadata.
@@ -568,11 +595,24 @@ struct VerifiedUpload {
     media_type: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct UploadPart {
+    part_index: i32,
     size_bytes: i64,
     storage_key: String,
     blake3_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadPromotionStatus {
+    Open,
+    Verified,
+}
+
+#[derive(Debug)]
+struct PromotableUpload {
+    status: UploadPromotionStatus,
+    upload: VerifiedUpload,
 }
 
 async fn existing_asset_for_upload(
@@ -597,6 +637,91 @@ async fn existing_asset_for_upload(
         })
     })
     .map_err(PromoteError::Database)
+}
+
+async fn insert_asset_for_upload(
+    tx: &mut Transaction<'_, Postgres>,
+    owner_id: i16,
+    upload_id: Uuid,
+    upload: &VerifiedUpload,
+    final_key: &str,
+) -> Result<PromotedUpload, PromoteError> {
+    let original_id = upsert_original(tx, upload, final_key).await?;
+    let asset_id = Uuid::now_v7();
+    let asset_public_id = Uuid::now_v7();
+
+    sqlx::query!(
+        r#"
+        INSERT INTO assets (id, public_id, owner_id, original_id)
+        VALUES ($1, $2, $3, $4)
+        "#,
+        asset_id,
+        asset_public_id,
+        owner_id,
+        original_id
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(PromoteError::Database)?;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO asset_sources (id, asset_id, source_kind, upload_id, original_filename)
+        VALUES ($1, $2, 'upload', $3, $4)
+        "#,
+        Uuid::now_v7(),
+        asset_id,
+        upload_id,
+        &upload.original_filename
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(PromoteError::Database)?;
+
+    enqueue_asset_jobs(tx, asset_id).await?;
+
+    Ok(PromotedUpload {
+        asset_id: asset_public_id,
+        asset_internal_id: asset_id,
+    })
+}
+
+async fn load_promotable_upload_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    owner_id: i16,
+    upload_id: Uuid,
+) -> Result<PromotableUpload, PromoteError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT status, original_filename, expected_size, expected_blake3, media_type
+        FROM upload_sessions
+        WHERE id = $1
+          AND owner_id = $2
+        FOR UPDATE
+        "#,
+        upload_id,
+        owner_id
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(PromoteError::Database)?
+    .ok_or(PromoteError::UploadNotVerified)?;
+
+    let status = match row.status.as_str() {
+        "open" => UploadPromotionStatus::Open,
+        "verified" => UploadPromotionStatus::Verified,
+        _ => return Err(PromoteError::UploadNotVerified),
+    };
+
+    Ok(PromotableUpload {
+        status,
+        upload: VerifiedUpload {
+            original_filename: row.original_filename,
+            expected_size: row.expected_size,
+            expected_blake3: row.expected_blake3,
+            media_type: row.media_type,
+        },
+    })
 }
 
 async fn load_verified_upload_for_update(
@@ -638,7 +763,7 @@ async fn upload_parts(
 ) -> Result<Vec<UploadPart>, PromoteError> {
     let parts = sqlx::query!(
         r#"
-        SELECT size_bytes, storage_key, blake3_hash
+        SELECT part_index, size_bytes, storage_key, blake3_hash
         FROM upload_parts
         WHERE upload_id = $1
         ORDER BY part_index
@@ -650,6 +775,7 @@ async fn upload_parts(
     .map_err(PromoteError::Database)?
     .into_iter()
     .map(|row| UploadPart {
+        part_index: row.part_index,
         size_bytes: row.size_bytes,
         storage_key: row.storage_key,
         blake3_hash: row.blake3_hash,
@@ -659,13 +785,90 @@ async fn upload_parts(
     Ok(parts)
 }
 
+fn validate_upload_parts(
+    parts: &[UploadPart],
+    upload: &VerifiedUpload,
+) -> Result<(), PromoteError> {
+    let expected_part_count = uploads::expected_part_count(upload.expected_size)
+        .ok_or(PromoteError::VerificationFailed)?;
+    if i64::try_from(parts.len()).map_err(|_| PromoteError::VerificationFailed)?
+        != expected_part_count
+    {
+        return Err(PromoteError::VerificationFailed);
+    }
+    for (expected_part_index, part) in parts.iter().enumerate() {
+        let expected_part_index =
+            i32::try_from(expected_part_index).map_err(|_| PromoteError::VerificationFailed)?;
+        let expected_size = uploads::expected_part_size(upload.expected_size, expected_part_index)
+            .ok_or(PromoteError::VerificationFailed)?;
+        if part.part_index != expected_part_index || part.size_bytes != expected_size {
+            return Err(PromoteError::VerificationFailed);
+        }
+    }
+    Ok(())
+}
+
+async fn mark_upload_verified(
+    tx: &mut Transaction<'_, Postgres>,
+    owner_id: i16,
+    upload_id: Uuid,
+) -> Result<(), PromoteError> {
+    let updated = sqlx::query!(
+        r#"
+        UPDATE upload_sessions
+        SET status = 'verified',
+            completed_at = COALESCE(completed_at, now()),
+            updated_at = now()
+        WHERE id = $1
+          AND owner_id = $2
+          AND status = 'open'
+        "#,
+        upload_id,
+        owner_id
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(PromoteError::Database)?
+    .rows_affected();
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(PromoteError::UploadNotVerified)
+    }
+}
+
+fn upload_view(
+    upload_id: Uuid,
+    upload: &VerifiedUpload,
+    parts: &[UploadPart],
+) -> UploadSessionView {
+    UploadSessionView {
+        upload_id,
+        status: UploadStatus::Verified,
+        expected_size: upload.expected_size,
+        expected_blake3: upload.expected_blake3.clone(),
+        media_type: upload.media_type.clone(),
+        committed_parts: parts.iter().map(|part| part.part_index).collect(),
+    }
+}
+
 async fn verify_staged_upload_parts(
     tx: &mut Transaction<'_, Postgres>,
     storage: &ObjectStorage,
     upload_id: Uuid,
     upload: &VerifiedUpload,
 ) -> Result<(), PromoteError> {
-    let stream = verified_part_stream(storage.clone(), upload_parts(tx, upload_id).await?, upload);
+    let parts = upload_parts(tx, upload_id).await?;
+    validate_upload_parts(&parts, upload)?;
+    verify_staged_upload_part_rows(storage, parts, upload).await
+}
+
+async fn verify_staged_upload_part_rows(
+    storage: &ObjectStorage,
+    parts: Vec<UploadPart>,
+    upload: &VerifiedUpload,
+) -> Result<(), PromoteError> {
+    let stream = verified_part_stream(storage.clone(), parts, upload);
     futures_util::pin_mut!(stream);
     while stream.try_next().await?.is_some() {}
     Ok(())
@@ -679,12 +882,19 @@ async fn write_staged_upload_to_original(
     final_key: &StorageKey,
 ) -> Result<(), PromoteError> {
     let parts = upload_parts(tx, upload_id).await?;
+    validate_upload_parts(&parts, upload)?;
+    write_staged_upload_parts_to_original(storage, upload_id, upload, final_key, parts).await
+}
+
+async fn write_staged_upload_parts_to_original(
+    storage: &ObjectStorage,
+    upload_id: Uuid,
+    upload: &VerifiedUpload,
+    final_key: &StorageKey,
+    parts: Vec<UploadPart>,
+) -> Result<(), PromoteError> {
     let temp_key = StorageKey::staging_upload(upload_id, "promoted-original")
         .map_err(|_| PromoteError::VerificationFailed)?;
-    storage
-        .delete(&temp_key)
-        .await
-        .map_err(PromoteError::Storage)?;
     let stream = verified_part_stream(storage.clone(), parts, upload);
     let write_result = storage.write_stream(&temp_key, stream).await;
     if let Err(error) = write_result {
@@ -714,11 +924,14 @@ fn verified_part_stream(
             hasher: Hasher::new(),
             expected_size: upload.expected_size,
             expected_blake3: upload.expected_blake3.clone(),
+            media_type: upload.media_type.clone(),
+            first_bytes: Vec::new(),
         },
         |mut state| async move {
             if state.next_index == state.parts.len() {
                 if state.total_size != state.expected_size
                     || state.hasher.finalize().to_hex().as_str() != state.expected_blake3
+                    || !uploads::media_signature_matches(&state.media_type, &state.first_bytes)
                 {
                     return Err(PromoteError::VerificationFailed);
                 }
@@ -742,6 +955,12 @@ fn verified_part_stream(
             }
             state.total_size += bytes_len;
             state.hasher.update(&bytes);
+            if state.first_bytes.len() < 12 {
+                let remaining = 12 - state.first_bytes.len();
+                state
+                    .first_bytes
+                    .extend(bytes.iter().copied().take(remaining));
+            }
             state.next_index += 1;
 
             Ok(Some((Bytes::from(bytes), state)))
@@ -757,6 +976,8 @@ struct VerifiedPartStreamState {
     hasher: Hasher,
     expected_size: i64,
     expected_blake3: String,
+    media_type: String,
+    first_bytes: Vec<u8>,
 }
 
 async fn upsert_original(

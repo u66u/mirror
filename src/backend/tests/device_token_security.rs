@@ -16,7 +16,7 @@ async fn android_login_token_authorizes_then_stops_after_self_revocation() -> Te
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(pool.clone()),
                 setup: auth::SetupState::Disabled,
                 storage: None,
@@ -112,7 +112,7 @@ async fn repeated_owner_password_failures_rate_limit_device_login() -> TestResul
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(pool.clone()),
                 setup: auth::SetupState::Disabled,
                 storage: None,

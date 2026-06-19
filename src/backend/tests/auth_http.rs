@@ -45,7 +45,7 @@ fn auth_cookie_secure_flag_can_be_disabled_for_local_http() {
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn totp_routes_enable_login_and_recovery_code_device_tokens() -> TestResult {
     let pool = fresh_owner_pool().await?;
-    let mut config = Config::from_env();
+    let mut config = Config::from_env()?;
     config.auth_secret = AuthSecret::from_secret("route-auth-secret");
     config.auth_secret_configured = true;
     let session = auth::create_session(
@@ -130,10 +130,22 @@ async fn totp_routes_enable_login_and_recovery_code_device_tokens() -> TestResul
             "device_name": "browser"
         }))
         .to_request();
-    assert_eq!(
-        actix_test::call_service(&app, password_only).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
+    let password_only_response = actix_test::call_service(&app, password_only).await;
+    assert_eq!(password_only_response.status(), StatusCode::UNAUTHORIZED);
+    let password_only_body: Value = actix_test::read_body_json(password_only_response).await;
+    assert_eq!(password_only_body["error"], "invalid_credentials");
+
+    let device_login_without_factor = actix_test::TestRequest::post()
+        .uri("/auth/device-login")
+        .set_json(json!({
+            "name": "Pixel",
+            "password": "correct horse battery staple"
+        }))
+        .to_request();
+    let device_login_response = actix_test::call_service(&app, device_login_without_factor).await;
+    assert_eq!(device_login_response.status(), StatusCode::UNAUTHORIZED);
+    let device_login_body: Value = actix_test::read_body_json(device_login_response).await;
+    assert_eq!(device_login_body["error"], "invalid_credentials");
 
     let totp_login = actix_test::TestRequest::post()
         .uri("/auth/login")
@@ -192,7 +204,7 @@ async fn totp_routes_enable_login_and_recovery_code_device_tokens() -> TestResul
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn totp_password_reauth_failures_are_rate_limited() -> TestResult {
     let pool = fresh_owner_pool().await?;
-    let mut config = Config::from_env();
+    let mut config = Config::from_env()?;
     config.auth_secret = AuthSecret::from_secret("route-auth-secret");
     config.auth_secret_configured = true;
     config.rate_limits.owner_password_login.max_per_window = 2;

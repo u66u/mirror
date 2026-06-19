@@ -32,6 +32,9 @@ pub const MODEL_PACK_PRESETS: &[&str] = &[
     "insightface_buffalo_l_scrfd_arcface",
 ];
 
+const REINDEX_JOB_PRIORITY: i32 = -10;
+const REINDEX_ASSET_BATCH_SIZE: i64 = 500;
+
 /// Supported model task kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
@@ -770,7 +773,7 @@ pub async fn install_model_pack(
         manifest.model_revision,
         manifest.license,
         manifest.embedding_dimension,
-        std::option::Option::<DistanceMetric>::from(validated.distance_metric) as _,
+        validated.distance_metric as _,
         sqlx::types::Json(&manifest) as _
     )
     .fetch_one(&mut *tx)
@@ -1013,19 +1016,14 @@ pub async fn start_model_reindex(
     }
     let model_kind = row.kind;
 
-    let asset_ids: Vec<Uuid> = sqlx::query_scalar!(
-        r#"
-        SELECT id
-        FROM assets
-        WHERE trashed_at IS NULL
-        ORDER BY created_at ASC, id ASC
-        "#
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let total_assets =
-        i32::try_from(asset_ids.len()).map_err(|_| ModelPackError::InvalidManifest("assets"))?;
-    let status = if asset_ids.is_empty() {
+    if let Some(existing) = active_reindex_run(&mut tx, model_pack_id).await? {
+        tx.commit().await?;
+        return Ok(existing);
+    }
+
+    let media_types = reindex_media_types(&model_kind)?;
+    let total_assets = eligible_reindex_asset_count(&mut tx, &media_types).await?;
+    let status = if total_assets == 0 {
         "succeeded"
     } else {
         "queued"
@@ -1069,43 +1067,56 @@ pub async fn start_model_reindex(
         _ => return Err(ModelPackError::InvalidManifest("kind")),
     };
 
-    for asset_id in asset_ids {
-        sqlx::query!(
-            r#"
-            INSERT INTO model_reindex_assets (reindex_run_id, asset_id)
-            VALUES ($1, $2)
-            "#,
-            run_id,
-            asset_id
-        )
-        .execute(&mut *tx)
-        .await?;
-        let (kind, payload) =
-            if let Some((detection_model_pack_id, embedding_model_pack_id)) = face_pair {
-                (
-                    JobKind::IndexFaces,
-                    json!({
-                        "asset_id": asset_id,
-                        "detection_model_pack_id": detection_model_pack_id,
-                        "embedding_model_pack_id": embedding_model_pack_id,
-                        "reindex_run_id": run_id,
-                    }),
-                )
-            } else {
-                (
-                    JobKind::EmbedAsset,
-                    json!({
-                        "asset_id": asset_id,
-                        "model_pack_id": model_pack_id,
-                        "reindex_run_id": run_id,
-                    }),
-                )
-            };
-        jobs::enqueue_in_tx(
-            &mut tx,
-            JobSpec::immediate(kind, payload, format!("model-reindex:{run_id}:{asset_id}")),
-        )
-        .await?;
+    let mut after: Option<(OffsetDateTime, Uuid)> = None;
+    loop {
+        let assets = eligible_reindex_assets_after(&mut tx, &media_types, after).await?;
+        if assets.is_empty() {
+            break;
+        }
+        for (asset_id, _) in &assets {
+            sqlx::query!(
+                r#"
+                INSERT INTO model_reindex_assets (reindex_run_id, asset_id)
+                VALUES ($1, $2)
+                "#,
+                run_id,
+                *asset_id
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        for (asset_id, _) in &assets {
+            let (kind, payload) =
+                if let Some((detection_model_pack_id, embedding_model_pack_id)) = face_pair {
+                    (
+                        JobKind::IndexFaces,
+                        json!({
+                            "asset_id": *asset_id,
+                            "detection_model_pack_id": detection_model_pack_id,
+                            "embedding_model_pack_id": embedding_model_pack_id,
+                            "reindex_run_id": run_id,
+                        }),
+                    )
+                } else {
+                    (
+                        JobKind::EmbedAsset,
+                        json!({
+                            "asset_id": *asset_id,
+                            "model_pack_id": model_pack_id,
+                            "reindex_run_id": run_id,
+                        }),
+                    )
+                };
+            jobs::enqueue_in_tx(
+                &mut tx,
+                JobSpec::immediate(kind, payload, format!("model-reindex:{run_id}:{asset_id}"))
+                    .with_priority(REINDEX_JOB_PRIORITY),
+            )
+            .await?;
+        }
+        after = assets
+            .last()
+            .map(|(asset_id, created_at)| (*created_at, *asset_id));
     }
 
     tx.commit().await?;
@@ -1118,6 +1129,117 @@ pub async fn start_model_reindex(
         processed_assets: row.processed_assets,
         failed_assets: row.failed_assets,
     })
+}
+
+async fn active_reindex_run(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    model_pack_id: Uuid,
+) -> Result<Option<ModelReindexRun>, ModelPackError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id, model_pack_id, status, total_assets, queued_assets, processed_assets, failed_assets
+        FROM model_reindex_runs
+        WHERE model_pack_id = $1
+          AND status IN ('queued', 'running')
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+        model_pack_id
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(row.map(|row| ModelReindexRun {
+        reindex_run_id: row.id,
+        model_pack_id: row.model_pack_id,
+        status: row.status,
+        total_assets: row.total_assets,
+        queued_assets: row.queued_assets,
+        processed_assets: row.processed_assets,
+        failed_assets: row.failed_assets,
+    }))
+}
+
+fn reindex_media_types(model_kind: &str) -> Result<Vec<String>, ModelPackError> {
+    match model_kind {
+        "semantic_image_text" | "face_identity" | "face_detection" | "face_embedding" => Ok([
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "image/heic",
+            "image/heif",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()),
+        _ => Err(ModelPackError::InvalidManifest("kind")),
+    }
+}
+
+async fn eligible_reindex_asset_count(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    media_types: &[String],
+) -> Result<i32, ModelPackError> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM assets a
+        JOIN originals o ON o.id = a.original_id
+        WHERE a.trashed_at IS NULL
+          AND o.media_type = ANY($1)
+        "#,
+    )
+    .bind(media_types)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    i32::try_from(count).map_err(|_| ModelPackError::InvalidManifest("assets"))
+}
+
+async fn eligible_reindex_assets_after(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    media_types: &[String],
+    after: Option<(OffsetDateTime, Uuid)>,
+) -> Result<Vec<(Uuid, OffsetDateTime)>, ModelPackError> {
+    if let Some((created_at, asset_id)) = after {
+        sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
+            r#"
+            SELECT a.id, a.created_at
+            FROM assets a
+            JOIN originals o ON o.id = a.original_id
+            WHERE a.trashed_at IS NULL
+              AND o.media_type = ANY($1)
+              AND (a.created_at > $2 OR (a.created_at = $2 AND a.id > $3))
+            ORDER BY a.created_at ASC, a.id ASC
+            LIMIT $4
+            "#,
+        )
+        .bind(media_types)
+        .bind(created_at)
+        .bind(asset_id)
+        .bind(REINDEX_ASSET_BATCH_SIZE)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(ModelPackError::Database)
+    } else {
+        sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
+            r#"
+            SELECT a.id, a.created_at
+            FROM assets a
+            JOIN originals o ON o.id = a.original_id
+            WHERE a.trashed_at IS NULL
+              AND o.media_type = ANY($1)
+            ORDER BY a.created_at ASC, a.id ASC
+            LIMIT $2
+            "#,
+        )
+        .bind(media_types)
+        .bind(REINDEX_ASSET_BATCH_SIZE)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(ModelPackError::Database)
+    }
 }
 
 async fn active_face_counterpart(

@@ -68,12 +68,23 @@ impl fmt::Debug for Config {
     }
 }
 
+const MIN_OPERATOR_SECRET_BYTES: usize = 32;
+
 /// Configuration validation failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigError {
     /// DB-backed auth persists encrypted secrets and needs stable key material.
     #[error("MIRROR_AUTH_SECRET is required when MIRROR_DATABASE_URL is configured")]
     MissingAuthSecret,
+    /// Auth secret was present but too weak for production secret encryption.
+    #[error("MIRROR_AUTH_SECRET must be at least 32 non-whitespace bytes")]
+    WeakAuthSecret,
+    /// Rate-limit secret was present but too weak for stable keyed hashing.
+    #[error("MIRROR_RATE_LIMIT_SECRET must be at least 32 non-whitespace bytes")]
+    WeakRateLimitSecret,
+    /// One configured trusted-proxy CIDR failed to parse.
+    #[error("MIRROR_TRUSTED_PROXIES contains invalid CIDR: {0}")]
+    InvalidTrustedProxy(String),
 }
 
 /// Operator-configurable semantic search behavior.
@@ -314,8 +325,7 @@ impl Config {
     ///
     /// This does not validate Postgres/storage settings yet; those arrive in
     /// later tasks and will extend `/ready`.
-    #[must_use]
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, ConfigError> {
         let bind_addr = env::var("MIRROR_BIND_ADDR")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -326,11 +336,18 @@ impl Config {
         let storage_root = env::var("MIRROR_STORAGE_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("data/storage"));
-        let rate_limit_secret = env::var("MIRROR_RATE_LIMIT_SECRET")
-            .map(|secret| RateLimitSecret::from_secret(&secret))
-            .unwrap_or_else(|_| RateLimitSecret::random_or_dev_fallback());
+        let rate_limit_secret = match env::var("MIRROR_RATE_LIMIT_SECRET") {
+            Ok(secret) => {
+                validate_operator_secret(&secret, ConfigError::WeakRateLimitSecret)?;
+                RateLimitSecret::from_secret(&secret)
+            }
+            Err(_) => RateLimitSecret::random_or_dev_fallback(),
+        };
         let auth_secret_env = env::var("MIRROR_AUTH_SECRET").ok();
         let auth_secret_configured = auth_secret_env.is_some();
+        if let Some(secret) = auth_secret_env.as_deref() {
+            validate_operator_secret(secret, ConfigError::WeakAuthSecret)?;
+        }
         let auth_secret = auth_secret_env
             .as_deref()
             .map(AuthSecret::from_secret)
@@ -340,6 +357,7 @@ impl Config {
         let trusted_proxies = env::var("MIRROR_TRUSTED_PROXIES")
             .ok()
             .map(|value| parse_trusted_proxies(&value))
+            .transpose()?
             .unwrap_or_default();
         let ml_device = env::var("MIRROR_ML_DEVICE")
             .ok()
@@ -352,7 +370,7 @@ impl Config {
         let semantic_search = SemanticSearchConfig::from_env();
         let face_recognition_enabled = env_bool("MIRROR_FACE_RECOGNITION_ENABLED", false);
 
-        Self {
+        Ok(Self {
             bind_addr,
             log_level,
             database_url,
@@ -367,7 +385,7 @@ impl Config {
             ml_max_image_bytes,
             semantic_search,
             face_recognition_enabled,
-        }
+        })
     }
 
     /// Validates settings required before serving DB-backed auth routes.
@@ -377,6 +395,14 @@ impl Config {
         } else {
             Ok(())
         }
+    }
+}
+
+fn validate_operator_secret(secret: &str, error: ConfigError) -> Result<(), ConfigError> {
+    if secret.trim().len() < MIN_OPERATOR_SECRET_BYTES {
+        Err(error)
+    } else {
+        Ok(())
     }
 }
 
@@ -398,7 +424,7 @@ fn quota_from_env(prefix: &str, default: RateLimitQuota) -> RateLimitQuota {
     }
 }
 
-fn parse_trusted_proxies(value: &str) -> Vec<IpNet> {
+fn parse_trusted_proxies(value: &str) -> Result<Vec<IpNet>, ConfigError> {
     value
         .split(',')
         .filter_map(|part| {
@@ -406,7 +432,10 @@ fn parse_trusted_proxies(value: &str) -> Vec<IpNet> {
             if part.is_empty() {
                 None
             } else {
-                part.parse().ok()
+                Some(
+                    part.parse()
+                        .map_err(|_| ConfigError::InvalidTrustedProxy(part.to_owned())),
+                )
             }
         })
         .collect()
@@ -453,4 +482,44 @@ fn env_bool(name: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn operator_secrets_require_non_whitespace_minimum_length() {
+        assert_eq!(
+            validate_operator_secret("", ConfigError::WeakAuthSecret),
+            Err(ConfigError::WeakAuthSecret)
+        );
+        assert_eq!(
+            validate_operator_secret(
+                "                                ",
+                ConfigError::WeakAuthSecret
+            ),
+            Err(ConfigError::WeakAuthSecret)
+        );
+        assert_eq!(
+            validate_operator_secret(
+                "12345678901234567890123456789012",
+                ConfigError::WeakAuthSecret
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_parser_rejects_invalid_non_empty_entries() {
+        assert_eq!(
+            parse_trusted_proxies("127.0.0.1/32, ::1/128").map(|parsed| parsed.len()),
+            Ok(2)
+        );
+
+        assert_eq!(
+            parse_trusted_proxies("127.0.0.1/32, not-a-cidr"),
+            Err(ConfigError::InvalidTrustedProxy("not-a-cidr".to_owned()))
+        );
+    }
 }

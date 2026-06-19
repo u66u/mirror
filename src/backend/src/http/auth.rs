@@ -218,25 +218,13 @@ pub async fn login(
             clear_owner_mfa_limit(&state, pool, &rate_limit_key).await?;
             output
         }
-        Err(auth::OwnerLoginError::InvalidCredentials) => {
+        Err(
+            auth::OwnerLoginError::InvalidCredentials
+            | auth::OwnerLoginError::SecondFactorRequired
+            | auth::OwnerLoginError::InvalidSecondFactor,
+        ) => {
             record_owner_password_login_failure(&state, pool, &rate_limit_key).await?;
-            return Err(ApiError::Unauthorized(
-                "invalid_credentials",
-                "invalid credentials",
-            ));
-        }
-        Err(auth::OwnerLoginError::SecondFactorRequired) => {
-            return Err(ApiError::Unauthorized(
-                "second_factor_required",
-                "second factor required",
-            ));
-        }
-        Err(auth::OwnerLoginError::InvalidSecondFactor) => {
-            record_owner_mfa_failure(&state, pool, &rate_limit_key).await?;
-            return Err(ApiError::Unauthorized(
-                "invalid_second_factor",
-                "invalid second factor",
-            ));
+            return Err(invalid_login_credentials());
         }
         Err(error) => return Err(error.into()),
     };
@@ -279,13 +267,20 @@ pub async fn device_login(
             "invalid credentials",
         ));
     }
-    verify_login_second_factor(
+    if let Err(error) = verify_login_second_factor(
         &state,
         pool,
         &rate_limit_key,
         second_factor_from_device_login(&body),
     )
-    .await?;
+    .await
+    {
+        if matches!(error, ApiError::Unauthorized(_, _)) {
+            record_owner_password_login_failure(&state, pool, &rate_limit_key).await?;
+            return Err(invalid_login_credentials());
+        }
+        return Err(error);
+    }
     clear_owner_password_login_limit(&state, pool, &rate_limit_key).await?;
 
     let output = auth::create_device_token(
@@ -828,6 +823,10 @@ fn second_factor_from_management(body: &MfaSecondFactorRequest) -> auth::SecondF
 
 fn mfa_session_key(session_id: Uuid) -> String {
     format!("session:{session_id}")
+}
+
+fn invalid_login_credentials() -> ApiError {
+    ApiError::Unauthorized("invalid_credentials", "invalid credentials")
 }
 
 async fn require_owner_password(

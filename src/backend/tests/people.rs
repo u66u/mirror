@@ -269,7 +269,7 @@ async fn people_album_routes_list_assigned_and_unassigned_faces() -> TestResult 
     let app = actix_test::init_service(
         App::new()
             .app_data(web::Data::new(AppState {
-                config: Config::from_env(),
+                config: Config::from_env()?,
                 db: Some(deps.pool.clone()),
                 setup: SetupState::Disabled,
                 storage: Some(deps.storage.clone()),

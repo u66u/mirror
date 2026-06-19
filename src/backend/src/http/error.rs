@@ -121,8 +121,8 @@ map_api_errors! {
 map_api_errors! {
     impl From<OwnerLoginError> for ApiError;
     OwnerLoginError::InvalidCredentials => Self::Unauthorized("invalid_credentials", "invalid credentials"),
-    OwnerLoginError::SecondFactorRequired => Self::Unauthorized("second_factor_required", "second factor required"),
-    OwnerLoginError::InvalidSecondFactor => Self::Unauthorized("invalid_second_factor", "invalid second factor"),
+    OwnerLoginError::SecondFactorRequired => Self::Unauthorized("invalid_credentials", "invalid credentials"),
+    OwnerLoginError::InvalidSecondFactor => Self::Unauthorized("invalid_credentials", "invalid credentials"),
     @internal => OwnerLoginError::Session(_) | OwnerLoginError::Mfa(_) | OwnerLoginError::Database(_)
 }
 

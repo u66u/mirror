@@ -19,7 +19,7 @@ use tracing::{error, info};
 
 #[actix_web::main]
 async fn main() -> io::Result<()> {
-    let config = Config::from_env();
+    let config = Config::from_env().map_err(io_other)?;
     telemetry::init(&config.log_level);
     let database_url = config.database_url.as_deref().ok_or_else(|| {
         io::Error::new(
