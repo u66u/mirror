@@ -13,11 +13,15 @@ maintenance --model-pack-presets
 maintenance --model-pack-preset opencv_yunet_detection_2023mar
 maintenance --model-pack-preset opencv_sface_embedding_2021dec
 maintenance --model-pack-preset insightface_buffalo_l_scrfd_arcface
+maintenance --materialize-model-pack-preset insightface_buffalo_l_scrfd_arcface ./data
 ```
 
 Preset JSON uses placeholder `files[].sha256`, `files[].size_bytes`, and
 `self_tests[].expected_output_sha256` values. Operators must replace them with
 the exact local model and self-test fixture values before validation/install.
+The materializer fills `files[].sha256` and `files[].size_bytes` from a local
+directory; runtime self-test output hashes still require an actual self-test
+run.
 
 ## Model Identity
 
@@ -45,7 +49,7 @@ InsightFace SCRFD + ArcFace preset:
 
 - `score_threshold = 0.5`
 - `nms_threshold = 0.4`
-- `min_face_size_ratio = 0.05`
+- `min_face_size_ratio = 0.15`
 - `match_threshold = 0.55`
 - `embedding_dimension = 512`
 - `distance_metric = "cosine"`

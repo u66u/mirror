@@ -14,9 +14,10 @@ use mirror_backend::{
     models::{
         MODEL_PACK_MANIFEST_FILENAME, ModelPackError, ModelPackFileManifest, ModelPackManifest,
         ModelPackSelfTestManifest, activate_model_pack, install_model_pack,
-        install_model_pack_files, model_pack_manifest_schema_json, model_pack_operator_error,
-        record_model_pack_self_test, record_reindex_asset_result, start_model_reindex,
-        validate_embedding_output, validate_model_pack_directory, validate_model_pack_manifest,
+        install_model_pack_files, materialize_model_pack_preset_from_directory,
+        model_pack_manifest_schema_json, model_pack_operator_error, record_model_pack_self_test,
+        record_reindex_asset_result, start_model_reindex, validate_embedding_output,
+        validate_model_pack_directory, validate_model_pack_manifest,
     },
     state::AppState,
 };
@@ -106,6 +107,37 @@ fn built_in_model_pack_presets_are_valid_json_manifests() -> TestResult {
             serde_json::from_str(&body).map_err(std::io::Error::other)?;
         validate_model_pack_manifest(&manifest)?;
     }
+    Ok(())
+}
+
+#[test]
+fn model_pack_preset_materializer_fills_local_file_metadata() -> TestResult {
+    let source_dir = TempDir::new()?;
+    std::fs::create_dir_all(source_dir.path().join("models"))?;
+    std::fs::create_dir_all(source_dir.path().join("self-tests"))?;
+    std::fs::write(
+        source_dir
+            .path()
+            .join("models/face_detection_yunet_2023mar.onnx"),
+        b"detector",
+    )?;
+    std::fs::write(source_dir.path().join("self-tests/face.jpg"), b"face")?;
+
+    let manifest = materialize_model_pack_preset_from_directory(
+        "opencv_yunet_detection_2023mar",
+        source_dir.path(),
+    )?;
+
+    validate_model_pack_manifest(&manifest)?;
+    let detector = manifest
+        .files
+        .iter()
+        .find(|file| file.path == "models/face_detection_yunet_2023mar.onnx")
+        .ok_or_else(|| std::io::Error::other("detector file missing"))?;
+    let digest = Sha256::digest(b"detector");
+    assert_eq!(detector.sha256, format!("{digest:x}"));
+    assert_eq!(detector.size_bytes, 8);
+
     Ok(())
 }
 

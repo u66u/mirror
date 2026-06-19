@@ -79,9 +79,11 @@ impl OnnxImageTextEmbedder {
     ) -> Result<Arc<ModelPackRuntime>, MlError> {
         validate_semantic_onnx_manifest(manifest)?;
 
-        let mut cache = self.cache.lock().map_err(|_| MlError::RuntimeUnavailable)?;
-        if let Some(runtime) = cache.get(&model_pack_id) {
-            return Ok(Arc::clone(runtime));
+        {
+            let cache = self.cache.lock().map_err(|_| MlError::RuntimeUnavailable)?;
+            if let Some(runtime) = cache.get(&model_pack_id) {
+                return Ok(Arc::clone(runtime));
+            }
         }
 
         let runtime = Arc::new(ModelPackRuntime {
@@ -109,6 +111,10 @@ impl OnnxImageTextEmbedder {
             .map_err(|_| MlError::RuntimeUnavailable)?,
         });
 
+        let mut cache = self.cache.lock().map_err(|_| MlError::RuntimeUnavailable)?;
+        if let Some(existing) = cache.get(&model_pack_id) {
+            return Ok(Arc::clone(existing));
+        }
         cache.insert(model_pack_id, Arc::clone(&runtime));
         Ok(runtime)
     }

@@ -688,7 +688,9 @@ Authentication:
 - Argon2id password hashing.
 - Optional quiet TOTP. V1 supports TOTP but does not force enrollment or
   aggressively nag.
-- Recovery codes.
+- One-time recovery codes for TOTP fallback.
+- TOTP seeds are encrypted at rest with `MIRROR_AUTH_SECRET`. Recovery codes are
+  stored only as hashes and are returned once when generated.
 - No forced password rotation.
 - Allow long passwords and password-manager paste.
 - Sensitive actions require recent password reauthentication: changing backup
@@ -706,7 +708,8 @@ Authentication:
 - Revocable Android device tokens.
 - Store only hashed device tokens in Postgres.
 - Android login exchanges owner password plus device name for one raw token
-  returned once. Android stores it using a non-exportable Keystore key.
+  returned once. When TOTP is enabled, Android login and browser-created device
+  tokens require TOTP or a recovery code.
 - Android API requests use `Authorization: Bearer`; CSRF applies only to
   browser cookie sessions.
 - A device token may revoke itself. Browser session management may revoke any

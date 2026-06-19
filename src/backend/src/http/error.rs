@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{
     assets::{AssetMutationError, AssetReadError, ListAssetsError, PromoteError},
-    auth::{DeviceTokenError, OwnerLoginError, OwnerSetupError},
+    auth::{DeviceTokenError, MfaError, OwnerLoginError, OwnerSetupError},
     exports::ExportError,
     ml::MlError,
     models::ModelPackError,
@@ -121,7 +121,19 @@ map_api_errors! {
 map_api_errors! {
     impl From<OwnerLoginError> for ApiError;
     OwnerLoginError::InvalidCredentials => Self::Unauthorized("invalid_credentials", "invalid credentials"),
-    @internal => OwnerLoginError::Session(_) | OwnerLoginError::Database(_)
+    OwnerLoginError::SecondFactorRequired => Self::Unauthorized("second_factor_required", "second factor required"),
+    OwnerLoginError::InvalidSecondFactor => Self::Unauthorized("invalid_second_factor", "invalid second factor"),
+    @internal => OwnerLoginError::Session(_) | OwnerLoginError::Mfa(_) | OwnerLoginError::Database(_)
+}
+
+map_api_errors! {
+    impl From<MfaError> for ApiError;
+    MfaError::SecondFactorRequired => Self::Unauthorized("second_factor_required", "second factor required"),
+    MfaError::InvalidSecondFactor => Self::Unauthorized("invalid_second_factor", "invalid second factor"),
+    MfaError::TotpNotEnabled => Self::Conflict("totp_not_enabled", "totp is not enabled"),
+    MfaError::TotpAlreadyEnabled => Self::Conflict("totp_already_enabled", "totp is already enabled"),
+    MfaError::TotpSetupMissing => Self::Conflict("totp_setup_missing", "totp setup has not been initialized"),
+    @internal => MfaError::RandomFailed | MfaError::CryptoFailed | MfaError::Database(_)
 }
 
 map_api_errors! {

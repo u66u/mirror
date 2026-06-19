@@ -4,11 +4,13 @@
 //! logged for the admin once, but only a digest lives in process state.
 
 mod device_tokens;
+mod mfa;
 mod password;
 mod sessions;
 mod setup_token;
 mod tokens;
 
+use crate::config::AuthSecret;
 use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
@@ -16,6 +18,11 @@ use uuid::Uuid;
 pub use device_tokens::{
     AuthenticatedDeviceToken, DeviceTokenCreateInput, DeviceTokenCreateOutput, DeviceTokenError,
     authenticate_device_token, create_device_token, revoke_device_token, revoke_owner_device_token,
+};
+pub use mfa::{
+    MfaError, MfaStatus, RecoveryCodesOutput, SecondFactorInput, TotpSetupOutput, begin_totp_setup,
+    disable_totp, enable_totp, mfa_status, rotate_recovery_codes, second_factor_enabled,
+    verify_second_factor,
 };
 pub use password::{PasswordError, hash_password, verify_password};
 pub use sessions::{
@@ -71,6 +78,8 @@ pub enum OwnerSetupError {
 pub struct OwnerLoginInput {
     /// Candidate owner password.
     pub password: String,
+    /// Optional TOTP or recovery code, required when TOTP is enabled.
+    pub second_factor: Option<SecondFactorInput>,
     /// Browser user-agent metadata.
     pub user_agent: Option<String>,
     /// Human-friendly device/browser label.
@@ -83,9 +92,18 @@ pub enum OwnerLoginError {
     /// Owner does not exist or password is wrong.
     #[error("invalid credentials")]
     InvalidCredentials,
+    /// Owner password was valid, but TOTP/recovery proof is required.
+    #[error("second factor required")]
+    SecondFactorRequired,
+    /// Owner password was valid, but TOTP/recovery proof failed.
+    #[error("invalid second factor")]
+    InvalidSecondFactor,
     /// Session creation failed.
     #[error("session creation failed: {0}")]
     Session(#[from] SessionError),
+    /// MFA verification failed internally.
+    #[error("mfa failed: {0}")]
+    Mfa(#[from] MfaError),
     /// Database failed.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -116,6 +134,7 @@ pub async fn owner_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
 /// Verifies owner password and creates a DB-backed web session.
 pub async fn login_owner(
     pool: &PgPool,
+    auth_secret: &AuthSecret,
     input: OwnerLoginInput,
 ) -> Result<SessionCreateOutput, OwnerLoginError> {
     let owner = sqlx::query_as::<_, (i16, String)>(
@@ -136,6 +155,22 @@ pub async fn login_owner(
 
     if !verify_password(&input.password, &password_hash) {
         return Err(OwnerLoginError::InvalidCredentials);
+    }
+
+    if second_factor_enabled(pool).await? {
+        let Some(second_factor) = input.second_factor else {
+            return Err(OwnerLoginError::SecondFactorRequired);
+        };
+        match verify_second_factor(pool, auth_secret, second_factor).await {
+            Ok(()) => {}
+            Err(MfaError::SecondFactorRequired) => {
+                return Err(OwnerLoginError::SecondFactorRequired);
+            }
+            Err(MfaError::InvalidSecondFactor) => {
+                return Err(OwnerLoginError::InvalidSecondFactor);
+            }
+            Err(error) => return Err(OwnerLoginError::Mfa(error)),
+        }
     }
 
     create_session(

@@ -24,14 +24,73 @@ const CSRF_COOKIE: &str = "mirror_csrf";
 const CSRF_HEADER: &str = "x-csrf-token";
 const SESSION_MAX_AGE: Duration = Duration::days(30);
 const OWNER_PASSWORD_LOGIN_ACTION: &str = "owner_password_login";
+const OWNER_MFA_ACTION: &str = "owner_mfa";
 
 /// Owner login request body.
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     /// Owner password.
     pub password: String,
+    /// Six-digit TOTP code, required when TOTP is enabled unless using recovery code.
+    pub totp_code: Option<String>,
+    /// One-time recovery code, accepted when TOTP is enabled.
+    pub recovery_code: Option<String>,
     /// Optional browser/device label.
     pub device_name: Option<String>,
+}
+
+/// Owner MFA status response.
+#[derive(Debug, Serialize)]
+pub struct MfaStatusResponse {
+    /// Whether TOTP is active for login.
+    pub totp_enabled: bool,
+    /// Whether setup has generated a pending secret not yet verified.
+    pub totp_setup_pending: bool,
+    /// Number of unused recovery codes.
+    pub recovery_codes_remaining: i64,
+}
+
+/// Password reauth request for MFA setup.
+#[derive(Debug, Deserialize)]
+pub struct MfaPasswordRequest {
+    /// Current owner password.
+    pub password: String,
+}
+
+/// TOTP setup response.
+#[derive(Debug, Serialize)]
+pub struct TotpSetupResponse {
+    /// Base32 TOTP secret for manual authenticator entry.
+    pub secret_base32: String,
+    /// Standard otpauth URI for authenticator apps.
+    pub provisioning_uri: String,
+}
+
+/// TOTP enable request.
+#[derive(Debug, Deserialize)]
+pub struct TotpEnableRequest {
+    /// Current owner password.
+    pub password: String,
+    /// Six-digit TOTP code from the pending secret.
+    pub totp_code: String,
+}
+
+/// Second-factor management request.
+#[derive(Debug, Deserialize)]
+pub struct MfaSecondFactorRequest {
+    /// Current owner password.
+    pub password: String,
+    /// Six-digit TOTP code.
+    pub totp_code: Option<String>,
+    /// One-time recovery code.
+    pub recovery_code: Option<String>,
+}
+
+/// Recovery codes response.
+#[derive(Debug, Serialize)]
+pub struct RecoveryCodesResponse {
+    /// Raw one-time recovery codes returned only once.
+    pub recovery_codes: Vec<String>,
 }
 
 /// Session inventory response row.
@@ -60,6 +119,10 @@ pub struct CreateDeviceTokenRequest {
     pub name: String,
     /// Current owner password for recent reauthentication.
     pub password: String,
+    /// Six-digit TOTP code, required when TOTP is enabled unless using recovery code.
+    pub totp_code: Option<String>,
+    /// One-time recovery code, accepted when TOTP is enabled.
+    pub recovery_code: Option<String>,
 }
 
 /// Android device-token creation response.
@@ -130,11 +193,19 @@ pub async fn login(
     };
     let rate_limit_key = owner_password_login_key(&req, &state);
     reject_blocked_owner_password_login(&state, pool, &rate_limit_key).await?;
+    if auth::second_factor_enabled(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?
+    {
+        reject_blocked_owner_mfa(&state, pool, &rate_limit_key).await?;
+    }
 
     let output = match auth::login_owner(
         pool,
+        &state.config.auth_secret,
         OwnerLoginInput {
             password: body.password.clone(),
+            second_factor: Some(second_factor_from_login(&body)),
             user_agent: user_agent(&req),
             device_name: body.device_name.clone(),
         },
@@ -143,6 +214,7 @@ pub async fn login(
     {
         Ok(output) => {
             clear_owner_password_login_limit(&state, pool, &rate_limit_key).await?;
+            clear_owner_mfa_limit(&state, pool, &rate_limit_key).await?;
             output
         }
         Err(auth::OwnerLoginError::InvalidCredentials) => {
@@ -150,6 +222,19 @@ pub async fn login(
             return Err(ApiError::Unauthorized(
                 "invalid_credentials",
                 "invalid credentials",
+            ));
+        }
+        Err(auth::OwnerLoginError::SecondFactorRequired) => {
+            return Err(ApiError::Unauthorized(
+                "second_factor_required",
+                "second factor required",
+            ));
+        }
+        Err(auth::OwnerLoginError::InvalidSecondFactor) => {
+            record_owner_mfa_failure(&state, pool, &rate_limit_key).await?;
+            return Err(ApiError::Unauthorized(
+                "invalid_second_factor",
+                "invalid second factor",
             ));
         }
         Err(error) => return Err(error.into()),
@@ -187,6 +272,13 @@ pub async fn device_login(
             "invalid credentials",
         ));
     }
+    verify_login_second_factor(
+        &state,
+        pool,
+        &rate_limit_key,
+        second_factor_from_device_login(&body),
+    )
+    .await?;
     clear_owner_password_login_limit(&state, pool, &rate_limit_key).await?;
 
     let output = auth::create_device_token(
@@ -203,6 +295,168 @@ pub async fn device_login(
     Ok(HttpResponse::Created().json(CreateDeviceTokenResponse {
         device_token_id: output.device_token_id,
         token: output.token.expose().to_owned(),
+    }))
+}
+
+/// Returns owner MFA status.
+#[get("/auth/mfa")]
+pub async fn mfa_status_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    require_current_session(pool, &req).await?;
+    let status = auth::mfa_status(pool).await?;
+    Ok(HttpResponse::Ok().json(MfaStatusResponse {
+        totp_enabled: status.totp_enabled,
+        totp_setup_pending: status.totp_setup_pending,
+        recovery_codes_remaining: status.recovery_codes_remaining,
+    }))
+}
+
+/// Starts TOTP setup and returns the pending secret.
+#[post("/auth/totp/setup")]
+pub async fn setup_totp_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<MfaPasswordRequest>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let current = require_current_session(pool, &req).await?;
+    require_csrf(pool, &req, current.session_id).await?;
+    require_owner_password(pool, &body.password).await?;
+    let setup = auth::begin_totp_setup(pool, &state.config.auth_secret).await?;
+    Ok(HttpResponse::Ok().json(TotpSetupResponse {
+        secret_base32: setup.secret_base32,
+        provisioning_uri: setup.provisioning_uri,
+    }))
+}
+
+/// Enables TOTP after verifying the pending secret and returns recovery codes.
+#[post("/auth/totp/enable")]
+pub async fn enable_totp_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<TotpEnableRequest>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let current = require_current_session(pool, &req).await?;
+    require_csrf(pool, &req, current.session_id).await?;
+    require_owner_password(pool, &body.password).await?;
+    let mfa_key = mfa_session_key(current.session_id);
+    reject_blocked_owner_mfa(&state, pool, &mfa_key).await?;
+    let codes = match auth::enable_totp(pool, &state.config.auth_secret, &body.totp_code).await {
+        Ok(codes) => {
+            clear_owner_mfa_limit(&state, pool, &mfa_key).await?;
+            codes
+        }
+        Err(auth::MfaError::InvalidSecondFactor) => {
+            record_owner_mfa_failure(&state, pool, &mfa_key).await?;
+            return Err(ApiError::Unauthorized(
+                "invalid_second_factor",
+                "invalid second factor",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(HttpResponse::Ok().json(RecoveryCodesResponse {
+        recovery_codes: codes.recovery_codes,
+    }))
+}
+
+/// Disables TOTP after password reauth and second-factor proof.
+#[post("/auth/totp/disable")]
+pub async fn disable_totp_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<MfaSecondFactorRequest>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let current = require_current_session(pool, &req).await?;
+    require_csrf(pool, &req, current.session_id).await?;
+    require_owner_password(pool, &body.password).await?;
+    let mfa_key = mfa_session_key(current.session_id);
+    reject_blocked_owner_mfa(&state, pool, &mfa_key).await?;
+    match auth::disable_totp(
+        pool,
+        &state.config.auth_secret,
+        second_factor_from_management(&body),
+    )
+    .await
+    {
+        Ok(()) => clear_owner_mfa_limit(&state, pool, &mfa_key).await?,
+        Err(auth::MfaError::SecondFactorRequired | auth::MfaError::InvalidSecondFactor) => {
+            record_owner_mfa_failure(&state, pool, &mfa_key).await?;
+            return Err(ApiError::Unauthorized(
+                "invalid_second_factor",
+                "invalid second factor",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// Rotates recovery codes after password reauth and second-factor proof.
+#[post("/auth/recovery-codes/rotate")]
+pub async fn rotate_recovery_codes_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    body: web::Json<MfaSecondFactorRequest>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let current = require_current_session(pool, &req).await?;
+    require_csrf(pool, &req, current.session_id).await?;
+    require_owner_password(pool, &body.password).await?;
+    let mfa_key = mfa_session_key(current.session_id);
+    reject_blocked_owner_mfa(&state, pool, &mfa_key).await?;
+    let codes = match auth::rotate_recovery_codes(
+        pool,
+        &state.config.auth_secret,
+        second_factor_from_management(&body),
+    )
+    .await
+    {
+        Ok(codes) => {
+            clear_owner_mfa_limit(&state, pool, &mfa_key).await?;
+            codes
+        }
+        Err(auth::MfaError::SecondFactorRequired | auth::MfaError::InvalidSecondFactor) => {
+            record_owner_mfa_failure(&state, pool, &mfa_key).await?;
+            return Err(ApiError::Unauthorized(
+                "invalid_second_factor",
+                "invalid second factor",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(HttpResponse::Ok().json(RecoveryCodesResponse {
+        recovery_codes: codes.recovery_codes,
     }))
 }
 
@@ -305,6 +559,13 @@ pub async fn create_device_token_route(
             "password reauthentication failed",
         ));
     }
+    verify_login_second_factor(
+        &state,
+        pool,
+        &mfa_session_key(current.session_id),
+        second_factor_from_device_login(&body),
+    )
+    .await?;
 
     let output = auth::create_device_token(
         pool,
@@ -542,6 +803,78 @@ fn user_agent(req: &HttpRequest) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn second_factor_from_login(body: &LoginRequest) -> auth::SecondFactorInput {
+    auth::SecondFactorInput {
+        totp_code: body.totp_code.clone(),
+        recovery_code: body.recovery_code.clone(),
+    }
+}
+
+fn second_factor_from_device_login(body: &CreateDeviceTokenRequest) -> auth::SecondFactorInput {
+    auth::SecondFactorInput {
+        totp_code: body.totp_code.clone(),
+        recovery_code: body.recovery_code.clone(),
+    }
+}
+
+fn second_factor_from_management(body: &MfaSecondFactorRequest) -> auth::SecondFactorInput {
+    auth::SecondFactorInput {
+        totp_code: body.totp_code.clone(),
+        recovery_code: body.recovery_code.clone(),
+    }
+}
+
+fn mfa_session_key(session_id: Uuid) -> String {
+    format!("session:{session_id}")
+}
+
+async fn require_owner_password(pool: &sqlx::PgPool, password: &str) -> Result<(), ApiError> {
+    if auth::verify_owner_password(pool, password)
+        .await
+        .map_err(|_| ApiError::Internal)?
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized(
+            "reauth_required",
+            "password reauthentication failed",
+        ))
+    }
+}
+
+async fn verify_login_second_factor(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+    second_factor: auth::SecondFactorInput,
+) -> Result<(), ApiError> {
+    if !auth::second_factor_enabled(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?
+    {
+        return Ok(());
+    }
+    reject_blocked_owner_mfa(state, pool, key).await?;
+    match auth::verify_second_factor(pool, &state.config.auth_secret, second_factor).await {
+        Ok(()) => {
+            clear_owner_mfa_limit(state, pool, key).await?;
+            Ok(())
+        }
+        Err(auth::MfaError::SecondFactorRequired) => Err(ApiError::Unauthorized(
+            "second_factor_required",
+            "second factor required",
+        )),
+        Err(auth::MfaError::InvalidSecondFactor) => {
+            record_owner_mfa_failure(state, pool, key).await?;
+            Err(ApiError::Unauthorized(
+                "invalid_second_factor",
+                "invalid second factor",
+            ))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn reject_blocked_owner_password_login(
     state: &AppState,
     pool: &sqlx::PgPool,
@@ -564,6 +897,69 @@ async fn reject_blocked_owner_password_login(
     } else {
         Ok(())
     }
+}
+
+async fn reject_blocked_owner_mfa(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), ApiError> {
+    if rate_limit::is_blocked(
+        pool,
+        &state.config.rate_limit_secret,
+        OWNER_MFA_ACTION,
+        key,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    {
+        Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many second-factor attempts",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn record_owner_mfa_failure(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), ApiError> {
+    if rate_limit::record_failure(
+        pool,
+        &state.config.rate_limit_secret,
+        FailureInput {
+            action: OWNER_MFA_ACTION,
+            key,
+            now: OffsetDateTime::now_utc(),
+            max_attempts: state.config.rate_limits.owner_mfa.max_per_window,
+            window: state.config.rate_limits.owner_mfa.window,
+            block_for: state.config.rate_limits.owner_mfa.block_for,
+        },
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    {
+        Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many second-factor attempts",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn clear_owner_mfa_limit(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), ApiError> {
+    rate_limit::clear(pool, &state.config.rate_limit_secret, OWNER_MFA_ACTION, key)
+        .await
+        .map_err(|_| ApiError::Internal)
 }
 
 async fn record_owner_password_login_failure(

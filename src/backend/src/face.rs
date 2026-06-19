@@ -252,15 +252,24 @@ impl OnnxFaceRuntime {
             .face_detection
             .as_ref()
             .ok_or(ModelPackError::InvalidManifest("face_detection"))?;
+        {
+            let sessions = self
+                .detection_sessions
+                .lock()
+                .map_err(|_| FaceIndexError::RuntimeUnavailable)?;
+            if let Some(session) = sessions.get(&model_pack_id) {
+                return Ok(Arc::clone(session));
+            }
+        }
+        let path = model_pack_file_path(&self.storage_root, model_pack_id, &config.model_path)?;
+        let session = Arc::new(Mutex::new(open_session(&path, self.device)?));
         let mut sessions = self
             .detection_sessions
             .lock()
             .map_err(|_| FaceIndexError::RuntimeUnavailable)?;
-        if let Some(session) = sessions.get(&model_pack_id) {
-            return Ok(Arc::clone(session));
+        if let Some(existing) = sessions.get(&model_pack_id) {
+            return Ok(Arc::clone(existing));
         }
-        let path = model_pack_file_path(&self.storage_root, model_pack_id, &config.model_path)?;
-        let session = Arc::new(Mutex::new(open_session(&path, self.device)?));
         sessions.insert(model_pack_id, Arc::clone(&session));
         Ok(session)
     }
@@ -274,15 +283,24 @@ impl OnnxFaceRuntime {
             .face_embedding
             .as_ref()
             .ok_or(ModelPackError::InvalidManifest("face_embedding"))?;
+        {
+            let sessions = self
+                .embedding_sessions
+                .lock()
+                .map_err(|_| FaceIndexError::RuntimeUnavailable)?;
+            if let Some(session) = sessions.get(&model_pack_id) {
+                return Ok(Arc::clone(session));
+            }
+        }
+        let path = model_pack_file_path(&self.storage_root, model_pack_id, &config.model_path)?;
+        let session = Arc::new(Mutex::new(open_session(&path, self.device)?));
         let mut sessions = self
             .embedding_sessions
             .lock()
             .map_err(|_| FaceIndexError::RuntimeUnavailable)?;
-        if let Some(session) = sessions.get(&model_pack_id) {
-            return Ok(Arc::clone(session));
+        if let Some(existing) = sessions.get(&model_pack_id) {
+            return Ok(Arc::clone(existing));
         }
-        let path = model_pack_file_path(&self.storage_root, model_pack_id, &config.model_path)?;
-        let session = Arc::new(Mutex::new(open_session(&path, self.device)?));
         sessions.insert(model_pack_id, Arc::clone(&session));
         Ok(session)
     }
@@ -773,58 +791,142 @@ async fn persist_faces(
     embedding_pack: &FaceModelPack,
     faces: Vec<IndexedFace>,
 ) -> Result<(), FaceIndexError> {
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        r#"
-        DELETE FROM face_occurrences fo
-        WHERE fo.asset_id = $1
-          AND NOT EXISTS (
-              SELECT 1 FROM person_faces pf
-              WHERE pf.face_occurrence_id = fo.id
-          )
-        "#,
-    )
-    .bind(asset.asset_id)
-    .execute(&mut *tx)
-    .await?;
-
     let embedding_config = embedding_pack
         .manifest
         .face_embedding
         .as_ref()
         .ok_or(ModelPackError::InvalidManifest("face_embedding"))?;
+
+    struct PreparedFaceChip {
+        key: StorageKey,
+        bytes: Vec<u8>,
+        storage_key: String,
+        width: i32,
+        height: i32,
+        format: &'static str,
+    }
+
+    struct PreparedFace {
+        id: Uuid,
+        bbox: FaceBox,
+        quality: Option<f32>,
+        embedding: Vec<f32>,
+        chip: Option<PreparedFaceChip>,
+    }
+
+    let mut prepared_faces = Vec::with_capacity(faces.len());
     for face in faces {
         if !face.bbox.is_valid() {
             return Err(ModelPackError::InvalidManifest("face.bbox").into());
         }
         let embedding = validate_embedding_output(&embedding_pack.manifest, face.embedding)?;
-        let person_id = best_person_match(
-            &mut tx,
-            asset.owner_id,
-            embedding_pack.id,
-            embedding.values(),
-            embedding_config.match_threshold,
-        )
-        .await?
-        .unwrap_or_else(Uuid::now_v7);
-        ensure_person(&mut tx, person_id, asset.owner_id).await?;
         let face_id = Uuid::now_v7();
         let chip = if let Some(chip) = face.chip {
             let key = StorageKey::face_chip(face_id, chip.format, FACE_CHIP_GENERATOR_VERSION)?;
-            storage.write(&key, chip.bytes).await?;
             Some((
-                key.as_str().to_owned(),
+                key,
+                chip.bytes,
                 i32::try_from(chip.width)
                     .map_err(|_| ModelPackError::InvalidManifest("face.chip.width"))?,
                 i32::try_from(chip.height)
                     .map_err(|_| ModelPackError::InvalidManifest("face.chip.height"))?,
-                chip.format.to_owned(),
+                chip.format,
             ))
         } else {
             None
         };
-        sqlx::query(
+        let chip = chip.map(|(key, bytes, width, height, format)| PreparedFaceChip {
+            key: key.clone(),
+            bytes,
+            storage_key: key.as_str().to_owned(),
+            width,
+            height,
+            format,
+        });
+        prepared_faces.push(PreparedFace {
+            id: face_id,
+            bbox: face.bbox,
+            quality: face.quality,
+            embedding: embedding.values().to_vec(),
+            chip,
+        });
+    }
+
+    let mut new_chip_keys = Vec::new();
+    for face in &prepared_faces {
+        let Some(chip) = &face.chip else {
+            continue;
+        };
+        if let Err(error) = storage.write(&chip.key, chip.bytes.clone()).await {
+            delete_storage_keys_best_effort(storage, new_chip_keys).await;
+            return Err(error.into());
+        }
+        new_chip_keys.push(chip.key.clone());
+    }
+
+    let db_result = async {
+        let mut tx = pool.begin().await?;
+        let locked_asset = sqlx::query_scalar::<_, Uuid>(
             r#"
+            SELECT id
+            FROM assets
+            WHERE id = $1 AND owner_id = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(asset.asset_id)
+        .bind(asset.owner_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if locked_asset.is_none() {
+            return Err(FaceIndexError::NotFound);
+        }
+
+        let old_rows = sqlx::query(
+            r#"
+            SELECT fo.id, fo.chip_storage_key
+            FROM face_occurrences fo
+            WHERE fo.asset_id = $1
+              AND fo.owner_id = $2
+              AND fo.detection_model_pack_id = $3
+              AND EXISTS (
+                  SELECT 1
+                  FROM face_embeddings fe
+                  WHERE fe.face_occurrence_id = fo.id
+                    AND fe.owner_id = fo.owner_id
+                    AND fe.model_pack_id = $4
+              )
+            FOR UPDATE
+            "#,
+        )
+        .bind(asset.asset_id)
+        .bind(asset.owner_id)
+        .bind(detection_model_pack_id)
+        .bind(embedding_pack.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let old_face_ids = old_rows
+            .iter()
+            .map(|row| row.get::<Uuid, _>("id"))
+            .collect::<Vec<_>>();
+        let old_chip_keys = old_rows
+            .iter()
+            .filter_map(|row| row.get::<Option<String>, _>("chip_storage_key"))
+            .collect::<Vec<_>>();
+
+        for face in prepared_faces {
+            let person_id = best_person_match(
+                &mut tx,
+                asset.owner_id,
+                embedding_pack.id,
+                face.embedding.as_slice(),
+                embedding_config.match_threshold,
+            )
+            .await?
+            .unwrap_or_else(Uuid::now_v7);
+            ensure_person(&mut tx, person_id, asset.owner_id).await?;
+            sqlx::query(
+                r#"
             INSERT INTO face_occurrences (
                 id, asset_id, owner_id, detection_model_pack_id,
                 bbox_left, bbox_top, bbox_width, bbox_height, quality, review_state,
@@ -832,55 +934,96 @@ async fn persist_faces(
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'assigned', $10, $11, $12, $13)
             "#,
-        )
-        .bind(face_id)
-        .bind(asset.asset_id)
-        .bind(asset.owner_id)
-        .bind(detection_model_pack_id)
-        .bind(face.bbox.left)
-        .bind(face.bbox.top)
-        .bind(face.bbox.width)
-        .bind(face.bbox.height)
-        .bind(face.quality)
-        .bind(chip.as_ref().map(|chip| chip.0.as_str()))
-        .bind(chip.as_ref().map(|chip| chip.1))
-        .bind(chip.as_ref().map(|chip| chip.2))
-        .bind(chip.as_ref().map(|chip| chip.3.as_str()))
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
+            )
+            .bind(face.id)
+            .bind(asset.asset_id)
+            .bind(asset.owner_id)
+            .bind(detection_model_pack_id)
+            .bind(face.bbox.left)
+            .bind(face.bbox.top)
+            .bind(face.bbox.width)
+            .bind(face.bbox.height)
+            .bind(face.quality)
+            .bind(face.chip.as_ref().map(|chip| chip.storage_key.as_str()))
+            .bind(face.chip.as_ref().map(|chip| chip.width))
+            .bind(face.chip.as_ref().map(|chip| chip.height))
+            .bind(face.chip.as_ref().map(|chip| chip.format))
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
             INSERT INTO face_embeddings (
                 face_occurrence_id, owner_id, model_pack_id, embedding, embedding_dimension
             )
             VALUES ($1, $2, $3, $4, $5)
             "#,
-        )
-        .bind(face_id)
-        .bind(asset.owner_id)
-        .bind(embedding_pack.id)
-        .bind(Vector::from(embedding.values().to_vec()))
-        .bind(
-            i32::try_from(embedding.values().len()).map_err(|_| {
+            )
+            .bind(face.id)
+            .bind(asset.owner_id)
+            .bind(embedding_pack.id)
+            .bind(Vector::from(face.embedding.clone()))
+            .bind(i32::try_from(face.embedding.len()).map_err(|_| {
                 ModelPackError::InvalidManifest("face_embedding.embedding_dimension")
-            })?,
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
+            })?)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
             INSERT INTO person_faces (person_id, face_occurrence_id, owner_id)
             VALUES ($1, $2, $3)
             "#,
-        )
-        .bind(person_id)
-        .bind(face_id)
-        .bind(asset.owner_id)
-        .execute(&mut *tx)
-        .await?;
+            )
+            .bind(person_id)
+            .bind(face.id)
+            .bind(asset.owner_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        if !old_face_ids.is_empty() {
+            sqlx::query(
+                r#"
+                DELETE FROM face_occurrences
+                WHERE owner_id = $1 AND id = ANY($2)
+                "#,
+            )
+            .bind(asset.owner_id)
+            .bind(&old_face_ids)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok::<Vec<String>, FaceIndexError>(old_chip_keys)
     }
-    tx.commit().await?;
+    .await;
+
+    let old_chip_keys = match db_result {
+        Ok(old_chip_keys) => old_chip_keys,
+        Err(error) => {
+            delete_storage_keys_best_effort(storage, new_chip_keys).await;
+            return Err(error);
+        }
+    };
+    for key in old_chip_keys {
+        match StorageKey::new(&key) {
+            Ok(key) => {
+                if let Err(error) = storage.delete(&key).await {
+                    tracing::warn!(%error, storage_key = key.as_str(), "failed to delete old face chip");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, storage_key = key, "invalid old face chip storage key");
+            }
+        }
+    }
     Ok(())
+}
+
+async fn delete_storage_keys_best_effort(storage: &ObjectStorage, keys: Vec<StorageKey>) {
+    for key in keys {
+        if let Err(error) = storage.delete(&key).await {
+            tracing::warn!(%error, storage_key = key.as_str(), "failed to delete staged face chip");
+        }
+    }
 }
 
 async fn ensure_person(

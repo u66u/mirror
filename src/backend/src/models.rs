@@ -479,6 +479,34 @@ pub fn model_pack_preset_manifest_json(name: &str) -> Result<String, ModelPackEr
     serde_json::to_string_pretty(&manifest).map_err(ModelPackError::Json)
 }
 
+/// Returns a built-in preset with `files[].sha256` and `files[].size_bytes`
+/// filled from an existing local model-pack directory.
+pub fn materialize_model_pack_preset_from_directory(
+    name: &str,
+    source_dir: &Path,
+) -> Result<ModelPackManifest, ModelPackError> {
+    let mut manifest = model_pack_preset_manifest(name)?;
+    for file in &mut manifest.files {
+        let source_path = model_pack_source_path(source_dir, &file.path)?;
+        let bytes = std::fs::read(&source_path)?;
+        file.size_bytes = i64::try_from(bytes.len())
+            .map_err(|_| ModelPackError::InvalidManifest("file.size_bytes"))?;
+        let digest = Sha256::digest(&bytes);
+        file.sha256 = format!("{digest:x}");
+    }
+    validate_model_pack_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+/// Returns a materialized built-in preset as pretty JSON.
+pub fn materialize_model_pack_preset_json(
+    name: &str,
+    source_dir: &Path,
+) -> Result<String, ModelPackError> {
+    let manifest = materialize_model_pack_preset_from_directory(name, source_dir)?;
+    serde_json::to_string_pretty(&manifest).map_err(ModelPackError::Json)
+}
+
 fn opencv_yunet_detection_preset() -> ModelPackManifest {
     let model_path = "models/face_detection_yunet_2023mar.onnx".to_owned();
     ModelPackManifest {
@@ -925,6 +953,10 @@ pub async fn activate_model_pack(
     if row.self_test_status != "passed" {
         return Err(ModelPackError::SelfTestRequired);
     }
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('mirror_model_pack_kind'), hashtext($1))")
+        .bind(&row.kind)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query!(
         r#"
         UPDATE model_packs

@@ -1307,6 +1307,12 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `/auth/login` and `/auth/device-login` reject blocked buckets before
       password verification, record failed password attempts, and clear the
       bucket on successful authentication.
+    - Optional TOTP and one-time recovery codes are implemented for owner login,
+      direct Android device-token login, and browser-created Android device
+      tokens. TOTP seeds are encrypted with `MIRROR_AUTH_SECRET`; recovery codes
+      are hash-only and single-use.
+    - Failed second-factor attempts use a separate configurable
+      `MIRROR_RATE_LIMIT_OWNER_MFA_*` bucket.
     - `MIRROR_RATE_LIMIT_SECRET` supplies stable key material. If absent, local
       dev uses a process-random fallback, which intentionally does not provide
       restart-stable buckets.
@@ -1855,6 +1861,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - `maintenance --validate-model-pack DIR` validates `manifest.json` and all
       declared local files with the same manifest/path/checksum validation used
       by HTTP install helpers.
+    - `maintenance --materialize-model-pack-preset NAME DIR` prints a built-in
+      preset manifest with `files[].sha256` and `files[].size_bytes` filled from
+      local files, leaving runtime self-test output hashes for real self-test
+      runs.
     - Operator-facing validator errors distinguish invalid manifests, malformed
       JSON, missing/unreadable files, and size/SHA-256 mismatches without
       leaking runtime internals.

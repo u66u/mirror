@@ -168,6 +168,25 @@ async fn face_index_job_persists_embeddings_and_people_assignment() -> TestResul
     assert_eq!(people.len(), 1);
     assert_eq!(people[0].face_count, 1);
     let person_id = people[0].person_id;
+
+    face::run_face_index_job(&deps.pool, &deps.storage, &runtime, &job).await?;
+    let face_count: i64 = sqlx::query_scalar("SELECT count(*) FROM face_occurrences")
+        .fetch_one(&deps.pool)
+        .await?;
+    let embedding_count: i64 = sqlx::query_scalar("SELECT count(*) FROM face_embeddings")
+        .fetch_one(&deps.pool)
+        .await?;
+    let people_count: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+        .fetch_one(&deps.pool)
+        .await?;
+    let assigned_count: i64 = sqlx::query_scalar("SELECT count(*) FROM person_faces")
+        .fetch_one(&deps.pool)
+        .await?;
+    assert_eq!(face_count, 1);
+    assert_eq!(embedding_count, 1);
+    assert_eq!(people_count, 1);
+    assert_eq!(assigned_count, 1);
+
     mirror_backend::people::rename_person(&deps.pool, 1, person_id, " Ada ").await?;
     let people = mirror_backend::people::list_people(&deps.pool, 1).await?;
     assert_eq!(people[0].display_name.as_deref(), Some("Ada"));

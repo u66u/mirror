@@ -139,21 +139,6 @@ fn assert_fixture_embeddings_cluster(
             "{} should contain at least one face",
             fixture.filename
         );
-        eprintln!(
-            "{} detected_faces={}: {:?}",
-            fixture.filename,
-            faces.len(),
-            faces
-                .iter()
-                .map(|face| (
-                    face.quality,
-                    face.bbox.left,
-                    face.bbox.top,
-                    face.bbox.width,
-                    face.bbox.height
-                ))
-                .collect::<Vec<_>>()
-        );
         embeddings.push((
             fixture.filename.as_str(),
             fixture.label.as_str(),
@@ -194,7 +179,6 @@ fn assert_fixture_embeddings_cluster(
     }
     assert!(same_person_pairs > 0);
     assert!(different_person_pairs > 0);
-    eprintln!("{}", scores.join("\n"));
     Ok(())
 }
 
@@ -465,7 +449,6 @@ async fn backend_requests_index_real_face_fixtures_with_manifests(
         assert!(!chip_body.is_empty());
         *seen_counts.entry(first_label.clone()).or_default() += labels.len();
     }
-    eprintln!("people albums: {}", album_summaries.join(" | "));
     assert_eq!(people.len(), expected_counts.len(), "{album_summaries:?}");
     let mut face_counts = people
         .iter()

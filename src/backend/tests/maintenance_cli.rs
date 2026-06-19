@@ -170,6 +170,41 @@ fn maintenance_prints_json_model_pack_presets_without_database() -> TestResult {
 }
 
 #[test]
+fn maintenance_materializes_model_pack_preset_without_database() -> TestResult {
+    let source_dir = TempDir::new()?;
+    std::fs::create_dir_all(source_dir.path().join("models"))?;
+    std::fs::create_dir_all(source_dir.path().join("self-tests"))?;
+    std::fs::write(
+        source_dir
+            .path()
+            .join("models/face_detection_yunet_2023mar.onnx"),
+        b"detector",
+    )?;
+    std::fs::write(source_dir.path().join("self-tests/face.jpg"), b"face")?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .arg("--materialize-model-pack-preset")
+        .arg("opencv_yunet_detection_2023mar")
+        .arg(source_dir.path())
+        .output()?;
+
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("MIRROR_DATABASE_URL"));
+    let manifest: mirror_backend::models::ModelPackManifest =
+        serde_json::from_slice(&output.stdout).map_err(std::io::Error::other)?;
+    let detector = manifest
+        .files
+        .iter()
+        .find(|file| file.path == "models/face_detection_yunet_2023mar.onnx")
+        .ok_or_else(|| std::io::Error::other("detector file missing"))?;
+    let digest = Sha256::digest(b"detector");
+    assert_eq!(detector.sha256, format!("{digest:x}"));
+    assert_eq!(detector.size_bytes, 8);
+
+    Ok(())
+}
+
+#[test]
 fn maintenance_validates_local_model_pack_without_database() -> TestResult {
     let source_dir = write_cli_model_pack()?;
     let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))

@@ -21,7 +21,7 @@ use mirror_backend::{
 use uuid::Uuid;
 
 const USAGE: &str = "\
-Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--restore-plan SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--retention-plan] [--run-backup PG_DUMP_PATH] [--run-restore SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--run-retention] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID] [--enqueue-integrity-scan] [--ensure-semantic-ann-index MODEL_PACK_ID] [--model-pack-schema] [--model-pack-presets] [--model-pack-preset NAME] [--validate-model-pack DIR]
+Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--restore-plan SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--retention-plan] [--run-backup PG_DUMP_PATH] [--run-restore SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--run-retention] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID] [--enqueue-integrity-scan] [--ensure-semantic-ann-index MODEL_PACK_ID] [--model-pack-schema] [--model-pack-presets] [--model-pack-preset NAME] [--materialize-model-pack-preset NAME DIR] [--validate-model-pack DIR]
 
 Scans originals by default without modifying storage.
 --delete-orphan KEY  Select a currently reported orphan for remediation.
@@ -44,6 +44,8 @@ Scans originals by default without modifying storage.
 --model-pack-presets Print built-in model-pack preset names.
 --model-pack-preset NAME
                      Print one built-in model-pack preset manifest as JSON.
+--materialize-model-pack-preset NAME DIR
+                     Print a preset manifest with file SHA-256 and sizes read from DIR.
 --validate-model-pack DIR
                      Validate local model-pack manifest and files without API/DB.
 ";
@@ -65,6 +67,7 @@ struct Options {
     print_model_pack_schema: bool,
     print_model_pack_presets: bool,
     print_model_pack_preset: Option<String>,
+    materialize_model_pack_preset: Option<(String, std::path::PathBuf)>,
     validate_model_pack_dir: Option<std::path::PathBuf>,
 }
 
@@ -91,6 +94,17 @@ async fn main() -> io::Result<()> {
     }
     if let Some(preset) = options.print_model_pack_preset.as_deref() {
         let body = models::model_pack_preset_manifest_json(preset).map_err(io_other)?;
+        println!("{body}");
+        return Ok(());
+    }
+    if let Some((preset, source_dir)) = options.materialize_model_pack_preset.as_ref() {
+        let body =
+            models::materialize_model_pack_preset_json(preset, source_dir).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    models::model_pack_operator_error(&error),
+                )
+            })?;
         println!("{body}");
         return Ok(());
     }
@@ -269,6 +283,7 @@ fn parse_args() -> Result<Option<Options>, CliError> {
     let mut print_model_pack_schema = false;
     let mut print_model_pack_presets = false;
     let mut print_model_pack_preset = None;
+    let mut materialize_model_pack_preset = None;
     let mut validate_model_pack_dir = None;
     let mut args = env::args().skip(1);
 
@@ -337,6 +352,15 @@ fn parse_args() -> Result<Option<Options>, CliError> {
                 print_model_pack_preset =
                     Some(args.next().ok_or(CliError::MissingModelPackPreset)?);
             }
+            "--materialize-model-pack-preset" => {
+                let preset = args
+                    .next()
+                    .ok_or(CliError::MissingMaterializeModelPackPreset)?;
+                let raw_path = args
+                    .next()
+                    .ok_or(CliError::MissingMaterializeModelPackDir)?;
+                materialize_model_pack_preset = Some((preset, std::path::PathBuf::from(raw_path)));
+            }
             "--validate-model-pack" => {
                 let raw_path = args.next().ok_or(CliError::MissingModelPackDir)?;
                 validate_model_pack_dir = Some(std::path::PathBuf::from(raw_path));
@@ -366,6 +390,7 @@ fn parse_args() -> Result<Option<Options>, CliError> {
         print_model_pack_schema,
         print_model_pack_presets,
         print_model_pack_preset,
+        materialize_model_pack_preset,
         validate_model_pack_dir,
     }))
 }
@@ -399,6 +424,10 @@ enum CliError {
     MissingModelPackId,
     #[error("--model-pack-preset requires NAME")]
     MissingModelPackPreset,
+    #[error("--materialize-model-pack-preset requires NAME")]
+    MissingMaterializeModelPackPreset,
+    #[error("--materialize-model-pack-preset requires DIR")]
+    MissingMaterializeModelPackDir,
     #[error("--validate-model-pack requires DIR")]
     MissingModelPackDir,
     #[error("invalid backup run ID: {0}")]

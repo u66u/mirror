@@ -1,5 +1,6 @@
 use std::{
     env, fmt,
+    fmt::Write as _,
     num::NonZeroUsize,
     path::Path,
     process::{Command, Stdio},
@@ -12,8 +13,8 @@ use mirror_backend::{
         AssetMutationError, AssetReadError, ListAssetsError, PromoteError, promote_verified_upload,
     },
     auth::{
-        DeviceTokenError, OwnerLoginError, OwnerSetupError, OwnerSetupInput, PasswordError,
-        SessionError, SetupState, SetupTokenError, TokenError,
+        DeviceTokenError, MfaError, OwnerLoginError, OwnerSetupError, OwnerSetupInput,
+        PasswordError, SessionError, SetupState, SetupTokenError, TokenError,
     },
     backups::BackupError,
     db::{connect, run_migrations},
@@ -145,6 +146,12 @@ impl From<SessionError> for TestError {
 impl From<DeviceTokenError> for TestError {
     fn from(error: DeviceTokenError) -> Self {
         Self::new("device token failed", error)
+    }
+}
+
+impl From<MfaError> for TestError {
+    fn from(error: MfaError) -> Self {
+        Self::new("mfa failed", error)
     }
 }
 
@@ -443,6 +450,56 @@ pub async fn reset_owner(pool: &sqlx::PgPool) -> TestResult {
     .await?;
 
     Ok(())
+}
+
+#[allow(dead_code)] // T105: MFA route/domain tests need a valid current TOTP code.
+pub fn current_totp_code(secret_base32: &str) -> TestResult<String> {
+    let secret = decode_base32(secret_base32)?;
+    let step = time::OffsetDateTime::now_utc().unix_timestamp() / 30;
+    hotp_code(&secret, u64::try_from(step)?)
+}
+
+fn hotp_code(secret: &[u8], counter: u64) -> TestResult<String> {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
+    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(secret)
+        .map_err(|error| TestError::new("hmac failed", error))?;
+    mac.update(&counter.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = usize::from(digest[19] & 0x0f);
+    let binary = (u32::from(digest[offset] & 0x7f) << 24)
+        | (u32::from(digest[offset + 1]) << 16)
+        | (u32::from(digest[offset + 2]) << 8)
+        | u32::from(digest[offset + 3]);
+    let mut output = String::new();
+    write!(&mut output, "{:06}", binary % 1_000_000)
+        .map_err(|error| TestError::new("totp format failed", error))?;
+    Ok(output)
+}
+
+fn decode_base32(value: &str) -> TestResult<Vec<u8>> {
+    let mut buffer = 0_u32;
+    let mut bits = 0_u8;
+    let mut output = Vec::new();
+    for byte in value.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a',
+            b'2'..=b'7' => byte - b'2' + 26,
+            b'=' => continue,
+            _ => {
+                return Err(TestError::new("base32 decode failed", "invalid character"));
+            }
+        };
+        buffer = (buffer << 5) | u32::from(value);
+        bits += 5;
+        if bits >= 8 {
+            output.push(((buffer >> (bits - 8)) & 0xff) as u8);
+            bits -= 8;
+        }
+    }
+    Ok(output)
 }
 
 #[allow(dead_code)] // T202/T204/T302: upload/promotion/timeline tests share one valid tiny JPEG fixture.

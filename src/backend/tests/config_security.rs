@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use mirror_backend::config::{
-    Config, MlDevicePreference, RateLimitConfig, RateLimitSecret, SemanticSearchConfig,
+    AuthSecret, Config, MlDevicePreference, RateLimitConfig, RateLimitSecret, SemanticSearchConfig,
 };
 
 #[test]
@@ -12,6 +12,7 @@ fn config_debug_redacts_secret_values() {
         database_url: Some("postgres://mirror:secret@db/mirror".to_owned()),
         storage_root: PathBuf::from("/vault"),
         rate_limit_secret: RateLimitSecret::from_secret("rate-secret"),
+        auth_secret: AuthSecret::from_secret("auth-secret"),
         rate_limits: RateLimitConfig::default(),
         trusted_proxies: Vec::new(),
         ml_device: MlDevicePreference::GpuWithCpuFallback,
@@ -26,4 +27,5 @@ fn config_debug_redacts_secret_values() {
     assert!(!debug.contains("postgres://"));
     assert!(!debug.contains("secret@"));
     assert!(!debug.contains("rate-secret"));
+    assert!(!debug.contains("auth-secret"));
 }

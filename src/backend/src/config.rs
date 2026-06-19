@@ -22,6 +22,8 @@ pub struct Config {
     pub storage_root: PathBuf,
     /// Stable keyed-hash secret for DB-backed rate-limit buckets.
     pub rate_limit_secret: RateLimitSecret,
+    /// Stable encryption key material for owner authentication secrets.
+    pub auth_secret: AuthSecret,
     /// Operator-configurable DB-backed rate-limit quotas.
     pub rate_limits: RateLimitConfig,
     /// Proxy CIDRs allowed to supply forwarded client IP headers.
@@ -48,6 +50,7 @@ impl fmt::Debug for Config {
             )
             .field("storage_root", &self.storage_root)
             .field("rate_limit_secret", &self.rate_limit_secret)
+            .field("auth_secret", &self.auth_secret)
             .field("rate_limits", &self.rate_limits)
             .field("trusted_proxies", &self.trusted_proxies)
             .field("ml_device", &self.ml_device)
@@ -102,6 +105,8 @@ pub struct RateLimitQuota {
 pub struct RateLimitConfig {
     /// Failed owner-password login attempts.
     pub owner_password_login: RateLimitQuota,
+    /// Failed owner TOTP/recovery-code attempts.
+    pub owner_mfa: RateLimitQuota,
     /// First-run owner setup attempts.
     pub setup_owner: RateLimitQuota,
     /// Upload session creation.
@@ -130,6 +135,7 @@ impl Default for RateLimitConfig {
                 Duration::minutes(15),
                 Duration::minutes(15),
             ),
+            owner_mfa: RateLimitQuota::new(10, Duration::minutes(15), Duration::minutes(15)),
             setup_owner: RateLimitQuota::per_hour(20),
             upload_create: RateLimitQuota::per_hour(2_000),
             upload_part: RateLimitQuota::per_hour(20_000),
@@ -151,6 +157,7 @@ impl RateLimitConfig {
                 "MIRROR_RATE_LIMIT_OWNER_PASSWORD_LOGIN",
                 defaults.owner_password_login,
             ),
+            owner_mfa: quota_from_env("MIRROR_RATE_LIMIT_OWNER_MFA", defaults.owner_mfa),
             setup_owner: quota_from_env("MIRROR_RATE_LIMIT_SETUP_OWNER", defaults.setup_owner),
             upload_create: quota_from_env(
                 "MIRROR_RATE_LIMIT_UPLOAD_CREATE",
@@ -254,6 +261,39 @@ impl fmt::Debug for RateLimitSecret {
     }
 }
 
+/// Redacted 256-bit key material for auth secret encryption.
+#[derive(Clone)]
+pub struct AuthSecret([u8; 32]);
+
+impl AuthSecret {
+    /// Builds stable key material from an operator-provided secret string.
+    #[must_use]
+    pub fn from_secret(secret: &str) -> Self {
+        Self(Sha256::digest(secret.as_bytes()).into())
+    }
+
+    /// Derives local-dev key material from the configured rate-limit secret.
+    #[must_use]
+    pub fn from_rate_limit_secret(secret: &RateLimitSecret) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"mirror-auth-secret-v1");
+        hasher.update(secret.as_key());
+        Self(hasher.finalize().into())
+    }
+
+    /// Returns encryption key bytes.
+    #[must_use]
+    pub fn as_key(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for AuthSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthSecret([redacted])")
+    }
+}
+
 impl Config {
     /// Builds config from environment variables with local-dev defaults.
     ///
@@ -274,6 +314,9 @@ impl Config {
         let rate_limit_secret = env::var("MIRROR_RATE_LIMIT_SECRET")
             .map(|secret| RateLimitSecret::from_secret(&secret))
             .unwrap_or_else(|_| RateLimitSecret::random_or_dev_fallback());
+        let auth_secret = env::var("MIRROR_AUTH_SECRET")
+            .map(|secret| AuthSecret::from_secret(&secret))
+            .unwrap_or_else(|_| AuthSecret::from_rate_limit_secret(&rate_limit_secret));
         let rate_limits = RateLimitConfig::from_env();
         let trusted_proxies = env::var("MIRROR_TRUSTED_PROXIES")
             .ok()
@@ -296,6 +339,7 @@ impl Config {
             database_url,
             storage_root,
             rate_limit_secret,
+            auth_secret,
             rate_limits,
             trusted_proxies,
             ml_device,
