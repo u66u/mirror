@@ -24,6 +24,7 @@ const CSRF_COOKIE: &str = "mirror_csrf";
 const CSRF_HEADER: &str = "x-csrf-token";
 const SESSION_MAX_AGE: Duration = Duration::days(30);
 const OWNER_PASSWORD_LOGIN_ACTION: &str = "owner_password_login";
+const OWNER_PASSWORD_REAUTH_ACTION: &str = "owner_password_reauth";
 const OWNER_MFA_ACTION: &str = "owner_mfa";
 
 /// Owner login request body.
@@ -241,8 +242,14 @@ pub async fn login(
     };
 
     Ok(HttpResponse::NoContent()
-        .cookie(session_cookie(output.token.expose()))
-        .cookie(csrf_cookie(output.csrf_token.expose()))
+        .cookie(session_cookie(
+            output.token.expose(),
+            state.config.cookie_secure,
+        ))
+        .cookie(csrf_cookie(
+            output.csrf_token.expose(),
+            state.config.cookie_secure,
+        ))
         .finish())
 }
 
@@ -334,7 +341,7 @@ pub async fn setup_totp_route(
     };
     let current = require_current_session(pool, &req).await?;
     require_csrf(pool, &req, current.session_id).await?;
-    require_owner_password(pool, &body.password).await?;
+    require_owner_password(&state, pool, &req, current.session_id, &body.password).await?;
     let setup = auth::begin_totp_setup(pool, &state.config.auth_secret).await?;
     Ok(HttpResponse::Ok().json(TotpSetupResponse {
         secret_base32: setup.secret_base32,
@@ -357,7 +364,7 @@ pub async fn enable_totp_route(
     };
     let current = require_current_session(pool, &req).await?;
     require_csrf(pool, &req, current.session_id).await?;
-    require_owner_password(pool, &body.password).await?;
+    require_owner_password(&state, pool, &req, current.session_id, &body.password).await?;
     let mfa_key = mfa_session_key(current.session_id);
     reject_blocked_owner_mfa(&state, pool, &mfa_key).await?;
     let codes = match auth::enable_totp(pool, &state.config.auth_secret, &body.totp_code).await {
@@ -394,7 +401,7 @@ pub async fn disable_totp_route(
     };
     let current = require_current_session(pool, &req).await?;
     require_csrf(pool, &req, current.session_id).await?;
-    require_owner_password(pool, &body.password).await?;
+    require_owner_password(&state, pool, &req, current.session_id, &body.password).await?;
     let mfa_key = mfa_session_key(current.session_id);
     reject_blocked_owner_mfa(&state, pool, &mfa_key).await?;
     match auth::disable_totp(
@@ -432,7 +439,7 @@ pub async fn rotate_recovery_codes_route(
     };
     let current = require_current_session(pool, &req).await?;
     require_csrf(pool, &req, current.session_id).await?;
-    require_owner_password(pool, &body.password).await?;
+    require_owner_password(&state, pool, &req, current.session_id, &body.password).await?;
     let mfa_key = mfa_session_key(current.session_id);
     reject_blocked_owner_mfa(&state, pool, &mfa_key).await?;
     let codes = match auth::rotate_recovery_codes(
@@ -492,8 +499,8 @@ pub async fn logout(
     }
 
     Ok(HttpResponse::NoContent()
-        .cookie(expired_session_cookie())
-        .cookie(expired_csrf_cookie())
+        .cookie(expired_session_cookie(state.config.cookie_secure))
+        .cookie(expired_csrf_cookie(state.config.cookie_secure))
         .finish())
 }
 
@@ -549,16 +556,7 @@ pub async fn create_device_token_route(
     };
     let current = require_current_session(pool, &req).await?;
     require_csrf(pool, &req, current.session_id).await?;
-
-    if !auth::verify_owner_password(pool, &body.password)
-        .await
-        .map_err(|_| ApiError::Internal)?
-    {
-        return Err(ApiError::Unauthorized(
-            "reauth_required",
-            "password reauthentication failed",
-        ));
-    }
+    require_owner_password(&state, pool, &req, current.session_id, &body.password).await?;
     verify_login_second_factor(
         &state,
         pool,
@@ -623,38 +621,42 @@ pub async fn revoke_device_token_route(
 }
 
 /// Builds the session cookie sent after login.
-pub fn session_cookie(value: &str) -> Cookie<'static> {
+pub fn session_cookie(value: &str, secure: bool) -> Cookie<'static> {
     Cookie::build(SESSION_COOKIE, value.to_owned())
         .path("/")
         .http_only(true)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .max_age(SESSION_MAX_AGE)
         .finish()
 }
 
 /// Builds the readable CSRF cookie paired with the server-side CSRF digest.
-pub fn csrf_cookie(value: &str) -> Cookie<'static> {
+pub fn csrf_cookie(value: &str, secure: bool) -> Cookie<'static> {
     Cookie::build(CSRF_COOKIE, value.to_owned())
         .path("/")
         .http_only(false)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .max_age(SESSION_MAX_AGE)
         .finish()
 }
 
-fn expired_session_cookie() -> Cookie<'static> {
+fn expired_session_cookie(secure: bool) -> Cookie<'static> {
     Cookie::build(SESSION_COOKIE, "")
         .path("/")
         .http_only(true)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .max_age(Duration::ZERO)
         .finish()
 }
 
-fn expired_csrf_cookie() -> Cookie<'static> {
+fn expired_csrf_cookie(secure: bool) -> Cookie<'static> {
     Cookie::build(CSRF_COOKIE, "")
         .path("/")
         .http_only(false)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .max_age(Duration::ZERO)
         .finish()
@@ -828,17 +830,51 @@ fn mfa_session_key(session_id: Uuid) -> String {
     format!("session:{session_id}")
 }
 
-async fn require_owner_password(pool: &sqlx::PgPool, password: &str) -> Result<(), ApiError> {
+async fn require_owner_password(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    req: &HttpRequest,
+    session_id: Uuid,
+    password: &str,
+) -> Result<(), ApiError> {
+    let key = owner_password_reauth_key(req, state, session_id);
+    reject_blocked_owner_password_reauth(state, pool, &key).await?;
     if auth::verify_owner_password(pool, password)
         .await
         .map_err(|_| ApiError::Internal)?
     {
+        clear_owner_password_reauth_limit(state, pool, &key).await?;
         Ok(())
     } else {
+        record_owner_password_reauth_failure(state, pool, &key).await?;
         Err(ApiError::Unauthorized(
             "reauth_required",
             "password reauthentication failed",
         ))
+    }
+}
+
+async fn reject_blocked_owner_password_reauth(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), ApiError> {
+    if rate_limit::is_blocked(
+        pool,
+        &state.config.rate_limit_secret,
+        OWNER_PASSWORD_REAUTH_ACTION,
+        key,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    {
+        Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many password reauthentication attempts",
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -962,6 +998,50 @@ async fn clear_owner_mfa_limit(
         .map_err(|_| ApiError::Internal)
 }
 
+async fn record_owner_password_reauth_failure(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), ApiError> {
+    if rate_limit::record_failure(
+        pool,
+        &state.config.rate_limit_secret,
+        FailureInput {
+            action: OWNER_PASSWORD_REAUTH_ACTION,
+            key,
+            now: OffsetDateTime::now_utc(),
+            max_attempts: state.config.rate_limits.owner_password_login.max_per_window,
+            window: state.config.rate_limits.owner_password_login.window,
+            block_for: state.config.rate_limits.owner_password_login.block_for,
+        },
+    )
+    .await
+    .map_err(|_| ApiError::Internal)?
+    {
+        Err(ApiError::TooManyRequests(
+            "rate_limited",
+            "too many password reauthentication attempts",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn clear_owner_password_reauth_limit(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), ApiError> {
+    rate_limit::clear(
+        pool,
+        &state.config.rate_limit_secret,
+        OWNER_PASSWORD_REAUTH_ACTION,
+        key,
+    )
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 async fn record_owner_password_login_failure(
     state: &AppState,
     pool: &sqlx::PgPool,
@@ -1010,4 +1090,11 @@ fn owner_password_login_key(req: &HttpRequest, state: &AppState) -> String {
     client_ip::client_ip(req, &state.config.trusted_proxies)
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown-peer".to_owned())
+}
+
+fn owner_password_reauth_key(req: &HttpRequest, state: &AppState, session_id: Uuid) -> String {
+    let ip = client_ip::client_ip(req, &state.config.trusted_proxies)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown-peer".to_owned());
+    format!("session:{session_id}:ip:{ip}")
 }

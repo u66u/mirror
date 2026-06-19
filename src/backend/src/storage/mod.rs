@@ -46,6 +46,38 @@ impl ObjectStorage {
             .map_err(StorageError::OpenDal)
     }
 
+    /// Writes a stream of byte chunks to a generated storage key.
+    pub async fn write_stream<S, E>(&self, key: &StorageKey, stream: S) -> Result<(), E>
+    where
+        S: Stream<Item = Result<Bytes, E>>,
+        E: From<StorageError>,
+    {
+        let mut writer = self
+            .operator
+            .writer(key.as_str())
+            .await
+            .map_err(StorageError::OpenDal)?;
+        let result = async {
+            futures_util::pin_mut!(stream);
+            while let Some(chunk) = stream.try_next().await? {
+                writer.write(chunk).await.map_err(StorageError::OpenDal)?;
+            }
+            writer
+                .close()
+                .await
+                .map(|_| ())
+                .map_err(StorageError::OpenDal)?;
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = writer.abort().await;
+        }
+
+        result
+    }
+
     /// Reads a complete object.
     pub async fn read(&self, key: &StorageKey) -> Result<Vec<u8>, StorageError> {
         self.operator

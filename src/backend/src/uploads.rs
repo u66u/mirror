@@ -5,7 +5,7 @@
 
 use blake3::Hasher;
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -195,7 +195,8 @@ pub async fn put_part(
     part_index: i32,
     bytes: Vec<u8>,
 ) -> Result<(), UploadError> {
-    let session = load_upload(pool, owner_id, upload_id).await?;
+    let mut tx = pool.begin().await?;
+    let session = load_upload_for_update(&mut tx, owner_id, upload_id).await?;
     if session.status != UploadStatus::Open {
         return Err(UploadError::NotOpen);
     }
@@ -229,8 +230,10 @@ pub async fn put_part(
         key.as_str(),
         hash
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }
@@ -242,15 +245,17 @@ pub async fn complete_upload(
     owner_id: i16,
     upload_id: Uuid,
 ) -> Result<UploadSessionView, UploadError> {
-    let session = load_upload(pool, owner_id, upload_id).await?;
+    let mut tx = pool.begin().await?;
+    let session = load_upload_for_update(&mut tx, owner_id, upload_id).await?;
     if session.status == UploadStatus::Verified {
+        tx.commit().await?;
         return get_upload(pool, owner_id, upload_id).await;
     }
     if session.status != UploadStatus::Open {
         return Err(UploadError::NotOpen);
     }
 
-    let parts = part_rows(pool, upload_id).await?;
+    let parts = part_rows_for_upload(&mut tx, upload_id).await?;
     let expected_part_count =
         expected_part_count(session.expected_size).ok_or(UploadError::VerificationFailed)?;
     if i64::try_from(parts.len()).map_err(|_| UploadError::VerificationFailed)?
@@ -297,7 +302,7 @@ pub async fn complete_upload(
         return Err(UploadError::VerificationFailed);
     }
 
-    sqlx::query!(
+    let update = sqlx::query!(
         r#"
         UPDATE upload_sessions
         SET status = $1,
@@ -311,8 +316,13 @@ pub async fn complete_upload(
         upload_id,
         owner_id
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    if update.rows_affected() != 1 {
+        return Err(UploadError::NotOpen);
+    }
+
+    tx.commit().await?;
 
     get_upload(pool, owner_id, upload_id).await
 }
@@ -389,6 +399,34 @@ async fn load_upload(
     })
 }
 
+async fn load_upload_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    owner_id: i16,
+    upload_id: Uuid,
+) -> Result<UploadRow, UploadError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT status, expected_size, expected_blake3, media_type
+        FROM upload_sessions
+        WHERE id = $1
+          AND owner_id = $2
+        FOR UPDATE
+        "#,
+        upload_id,
+        owner_id
+    )
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(UploadError::NotFound)?;
+
+    Ok(UploadRow {
+        status: parse_status(&row.status)?,
+        expected_size: row.expected_size,
+        expected_blake3: row.expected_blake3,
+        media_type: row.media_type,
+    })
+}
+
 async fn committed_parts(pool: &PgPool, upload_id: Uuid) -> Result<Vec<i32>, UploadError> {
     sqlx::query_scalar!(
         r#"
@@ -404,7 +442,10 @@ async fn committed_parts(pool: &PgPool, upload_id: Uuid) -> Result<Vec<i32>, Upl
     .map_err(UploadError::Database)
 }
 
-async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, UploadError> {
+async fn part_rows_for_upload(
+    tx: &mut Transaction<'_, Postgres>,
+    upload_id: Uuid,
+) -> Result<Vec<PartRow>, UploadError> {
     let rows = sqlx::query!(
         r#"
         SELECT part_index, size_bytes, storage_key, blake3_hash
@@ -414,7 +455,7 @@ async fn part_rows(pool: &PgPool, upload_id: Uuid) -> Result<Vec<PartRow>, Uploa
         "#,
         upload_id,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
 
     Ok(rows

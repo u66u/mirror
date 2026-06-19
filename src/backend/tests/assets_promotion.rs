@@ -1,7 +1,9 @@
 use mirror_backend::{
     assets::{PromoteError, detect_original_orphan, promote_verified_upload},
     storage::StorageKey,
-    uploads::{CreateUploadInput, create_upload, put_part},
+    uploads::{
+        CreateUploadInput, UPLOAD_PART_SIZE_BYTES, complete_upload, create_upload, put_part,
+    },
 };
 
 mod support;
@@ -34,6 +36,77 @@ async fn promotion_deduplicates_originals_but_keeps_distinct_assets() -> TestRes
     assert_eq!(original_count(&deps.pool).await?, 1);
     assert_eq!(asset_count(&deps.pool).await?, 2);
     assert_eq!(job_count(&deps.pool).await?, 4);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn concurrent_promotion_of_one_upload_is_idempotent() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "parallel.jpg").await?;
+
+    let (first, second) = tokio::join!(
+        promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id),
+        promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id),
+    );
+    let first = first?;
+    let second = second?;
+
+    assert_eq!(first, second);
+    assert_eq!(original_count(&deps.pool).await?, 1);
+    assert_eq!(asset_count(&deps.pool).await?, 1);
+    assert_eq!(job_count(&deps.pool).await?, 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn promotion_writes_multipart_upload_to_original_storage() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let mut bytes = vec![0_u8; UPLOAD_PART_SIZE_BYTES + 17];
+    bytes[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+    let expected_blake3 = blake3::hash(&bytes).to_hex().to_string();
+    let upload = create_upload(
+        &deps.pool,
+        CreateUploadInput {
+            owner_id: 1,
+            original_filename: "multipart.jpg".to_owned(),
+            expected_size: i64::try_from(bytes.len())?,
+            expected_blake3: expected_blake3.clone(),
+            media_type: "image/jpeg".to_owned(),
+            client_upload_key: None,
+        },
+    )
+    .await?;
+
+    put_part(
+        &deps.pool,
+        &deps.storage,
+        1,
+        upload.upload_id,
+        0,
+        bytes[..UPLOAD_PART_SIZE_BYTES].to_vec(),
+    )
+    .await?;
+    put_part(
+        &deps.pool,
+        &deps.storage,
+        1,
+        upload.upload_id,
+        1,
+        bytes[UPLOAD_PART_SIZE_BYTES..].to_vec(),
+    )
+    .await?;
+    complete_upload(&deps.pool, &deps.storage, 1, upload.upload_id).await?;
+
+    promote_verified_upload(&deps.pool, &deps.storage, 1, upload.upload_id).await?;
+
+    let final_key = StorageKey::original_blake3(&expected_blake3)?;
+    assert_eq!(deps.storage.read(&final_key).await?, bytes);
+    assert_eq!(original_count(&deps.pool).await?, 1);
+    assert_eq!(asset_count(&deps.pool).await?, 1);
 
     Ok(())
 }

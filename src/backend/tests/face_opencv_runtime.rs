@@ -22,6 +22,7 @@ use mirror_backend::{
     storage::ObjectStorage,
     worker::{WorkerHandlers, WorkerPolicy, WorkerStep, run_once},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -36,6 +37,14 @@ struct FaceFixture {
     filename: String,
     label: String,
     media_type: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferenceFaceOutput {
+    filename: String,
+    bbox: [f32; 4],
+    score: f32,
+    embedding: Vec<f32>,
 }
 
 #[test]
@@ -77,6 +86,44 @@ fn opencv_yunet_sface_models_cluster_local_people_fixtures() -> TestResult {
 }
 
 #[test]
+#[ignore = "requires local data/ YuNet/SFace fixtures, system ONNX Runtime, and Python opencv-contrib-python"]
+fn opencv_reference_yunet_sface_matches_backend_outputs() -> TestResult {
+    require_system_onnxruntime()?;
+
+    let storage_root = TempDir::new()?;
+    let detection_pack_id = Uuid::now_v7();
+    let embedding_pack_id = Uuid::now_v7();
+    copy_model_fixture(
+        storage_root.path(),
+        detection_pack_id,
+        "models/face_detection_yunet_2023mar.onnx",
+        data_path("face_detection_yunet_2023mar.onnx"),
+    )?;
+    copy_model_fixture(
+        storage_root.path(),
+        embedding_pack_id,
+        "models/face_recognition_sface_2021dec.onnx",
+        data_path("face_recognition_sface_2021dec.onnx"),
+    )?;
+
+    let fixtures = discover_numbered_face_fixtures()?;
+    let runtime = OnnxFaceRuntime::new(
+        storage_root.path().to_path_buf(),
+        MlDevicePreference::CpuOnly,
+    );
+    let backend = backend_face_outputs(
+        &runtime,
+        &fixtures,
+        detection_pack_id,
+        &yunet_manifest(),
+        embedding_pack_id,
+        &sface_manifest(),
+    )?;
+    let reference = run_opencv_yunet_sface_reference(&fixtures)?;
+    assert_reference_outputs_match("OpenCV YuNet/SFace", &backend, &reference, 0.95, 0.95)
+}
+
+#[test]
 #[ignore = "requires local data/ InsightFace SCRFD/ArcFace fixtures and a system ONNX Runtime library"]
 fn insightface_scrfd_arcface_models_cluster_local_people_fixtures() -> TestResult {
     require_system_onnxruntime()?;
@@ -111,6 +158,50 @@ fn insightface_scrfd_arcface_models_cluster_local_people_fixtures() -> TestResul
         embedding_pack_id,
         &embedding_manifest,
         0.55,
+    )
+}
+
+#[test]
+#[ignore = "requires local data/ SCRFD/ArcFace fixtures, system ONNX Runtime, and Python insightface"]
+fn insightface_reference_scrfd_arcface_matches_backend_outputs() -> TestResult {
+    require_system_onnxruntime()?;
+
+    let storage_root = TempDir::new()?;
+    let detection_pack_id = Uuid::now_v7();
+    let embedding_pack_id = Uuid::now_v7();
+    copy_model_fixture(
+        storage_root.path(),
+        detection_pack_id,
+        "models/det_10g.onnx",
+        data_path("det_10g.onnx"),
+    )?;
+    copy_model_fixture(
+        storage_root.path(),
+        embedding_pack_id,
+        "models/w600k_r50.onnx",
+        data_path("w600k_r50.onnx"),
+    )?;
+
+    let fixtures = discover_numbered_face_fixtures()?;
+    let runtime = OnnxFaceRuntime::new(
+        storage_root.path().to_path_buf(),
+        MlDevicePreference::CpuOnly,
+    );
+    let backend = backend_face_outputs(
+        &runtime,
+        &fixtures,
+        detection_pack_id,
+        &scrfd_manifest(),
+        embedding_pack_id,
+        &arcface_manifest(),
+    )?;
+    let reference = run_insightface_scrfd_arcface_reference(&fixtures)?;
+    assert_reference_outputs_match(
+        "InsightFace SCRFD/ArcFace",
+        &backend,
+        &reference,
+        0.98,
+        0.94,
     )
 }
 
@@ -180,6 +271,286 @@ fn assert_fixture_embeddings_cluster(
     assert!(same_person_pairs > 0);
     assert!(different_person_pairs > 0);
     Ok(())
+}
+
+fn backend_face_outputs(
+    runtime: &OnnxFaceRuntime,
+    fixtures: &[FaceFixture],
+    detection_pack_id: Uuid,
+    detection_manifest: &ModelPackManifest,
+    embedding_pack_id: Uuid,
+    embedding_manifest: &ModelPackManifest,
+) -> TestResult<Vec<ReferenceFaceOutput>> {
+    let mut outputs = Vec::new();
+    for fixture in fixtures {
+        let bytes = fs::read(data_path(&fixture.filename))?;
+        let faces = runtime.detect_and_embed(FaceRuntimeRequest {
+            bytes: &bytes,
+            media_type: fixture.media_type,
+            detection_model_pack_id: detection_pack_id,
+            detection_manifest,
+            embedding_model_pack_id: embedding_pack_id,
+            embedding_manifest,
+        })?;
+        let face = faces
+            .first()
+            .ok_or_else(|| format!("{} should contain at least one face", fixture.filename))?;
+        let mut embedding = face.embedding.clone();
+        normalize_vector_l2(&mut embedding);
+        outputs.push(ReferenceFaceOutput {
+            filename: fixture.filename.clone(),
+            bbox: [
+                face.bbox.left,
+                face.bbox.top,
+                face.bbox.width,
+                face.bbox.height,
+            ],
+            score: face.quality.unwrap_or(0.0),
+            embedding,
+        });
+    }
+    Ok(outputs)
+}
+
+fn run_opencv_yunet_sface_reference(
+    fixtures: &[FaceFixture],
+) -> TestResult<Vec<ReferenceFaceOutput>> {
+    // The YuNet ONNX file is fixed at 640x640 under ONNX Runtime. This
+    // reference keeps OpenCV DNN on the same detector geometry, then maps
+    // landmarks back to the original image before SFace alignment like backend.
+    run_reference_python(
+        fixtures,
+        &[
+            (
+                "MIRROR_FACE_DETECTOR_MODEL",
+                data_path("face_detection_yunet_2023mar.onnx"),
+            ),
+            (
+                "MIRROR_FACE_EMBEDDING_MODEL",
+                data_path("face_recognition_sface_2021dec.onnx"),
+            ),
+        ],
+        r#"
+import cv2, json, os, numpy as np
+
+data_dir = os.environ["MIRROR_FACE_DATA_DIR"]
+fixtures = json.loads(os.environ["MIRROR_FACE_FIXTURES"])
+detector = cv2.FaceDetectorYN_create(os.environ["MIRROR_FACE_DETECTOR_MODEL"], "", (640, 640), 0.5, 0.3, 5000)
+recognizer = cv2.FaceRecognizerSF_create(os.environ["MIRROR_FACE_EMBEDDING_MODEL"], "")
+outputs = []
+for fixture in fixtures:
+    filename = fixture["filename"]
+    image = cv2.imread(os.path.join(data_dir, filename), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"failed to read {filename}")
+    resized = cv2.resize(image, (640, 640), interpolation=cv2.INTER_LINEAR)
+    detector.setInputSize((640, 640))
+    _, faces = detector.detect(resized)
+    if faces is None or len(faces) == 0:
+        raise RuntimeError(f"no face detected in {filename}")
+    face = max(faces, key=lambda row: float(row[14]))
+    h, w = image.shape[:2]
+    face_for_chip = face.copy()
+    face_for_chip[0] *= w / 640.0
+    face_for_chip[2] *= w / 640.0
+    face_for_chip[1] *= h / 640.0
+    face_for_chip[3] *= h / 640.0
+    for point_index in range(5):
+        face_for_chip[4 + point_index * 2] *= w / 640.0
+        face_for_chip[5 + point_index * 2] *= h / 640.0
+    aligned = recognizer.alignCrop(image, face_for_chip)
+    embedding = recognizer.feature(aligned).reshape(-1).astype(np.float32)
+    norm = float(np.linalg.norm(embedding))
+    if norm > 0:
+        embedding = embedding / norm
+    outputs.append({
+        "filename": filename,
+        "bbox": [float(face[0] / 640.0), float(face[1] / 640.0), float(face[2] / 640.0), float(face[3] / 640.0)],
+        "score": float(face[14]),
+        "embedding": embedding.astype(float).tolist(),
+    })
+print(json.dumps(outputs, sort_keys=True))
+"#,
+    )
+}
+
+fn run_insightface_scrfd_arcface_reference(
+    fixtures: &[FaceFixture],
+) -> TestResult<Vec<ReferenceFaceOutput>> {
+    run_reference_python(
+        fixtures,
+        &[
+            ("MIRROR_FACE_DETECTOR_MODEL", data_path("det_10g.onnx")),
+            ("MIRROR_FACE_EMBEDDING_MODEL", data_path("w600k_r50.onnx")),
+        ],
+        r#"
+import cv2, json, os, numpy as np
+from types import SimpleNamespace
+from insightface.model_zoo import get_model
+
+data_dir = os.environ["MIRROR_FACE_DATA_DIR"]
+fixtures = json.loads(os.environ["MIRROR_FACE_FIXTURES"])
+detector = get_model(os.environ["MIRROR_FACE_DETECTOR_MODEL"], providers=["CPUExecutionProvider"])
+detector.prepare(ctx_id=-1, input_size=(640, 640), det_thresh=0.3)
+recognizer = get_model(os.environ["MIRROR_FACE_EMBEDDING_MODEL"], providers=["CPUExecutionProvider"])
+recognizer.prepare(ctx_id=-1)
+outputs = []
+for fixture in fixtures:
+    filename = fixture["filename"]
+    image = cv2.imread(os.path.join(data_dir, filename), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"failed to read {filename}")
+    h, w = image.shape[:2]
+    bboxes, kpss = detector.detect(image, max_num=0, metric="default")
+    if bboxes is None or len(bboxes) == 0:
+        raise RuntimeError(f"no face detected in {filename}")
+    index = int(np.argmax(bboxes[:, 4]))
+    bbox = bboxes[index]
+    face = SimpleNamespace(bbox=bbox[:4], kps=kpss[index])
+    embedding = recognizer.get(image, face).reshape(-1).astype(np.float32)
+    norm = float(np.linalg.norm(embedding))
+    if norm > 0:
+        embedding = embedding / norm
+    outputs.append({
+        "filename": filename,
+        "bbox": [float(bbox[0] / w), float(bbox[1] / h), float((bbox[2] - bbox[0]) / w), float((bbox[3] - bbox[1]) / h)],
+        "score": float(bbox[4]),
+        "embedding": embedding.astype(float).tolist(),
+    })
+print(json.dumps(outputs, sort_keys=True))
+"#,
+    )
+}
+
+fn run_reference_python(
+    fixtures: &[FaceFixture],
+    extra_env: &[(&str, PathBuf)],
+    script: &str,
+) -> TestResult<Vec<ReferenceFaceOutput>> {
+    let fixture_json = serde_json::to_string(
+        &fixtures
+            .iter()
+            .map(|fixture| json!({ "filename": fixture.filename }))
+            .collect::<Vec<_>>(),
+    )?;
+    let mut command = Command::new(reference_python());
+    command
+        .arg("-c")
+        .arg(script)
+        .env("MIRROR_FACE_DATA_DIR", data_dir())
+        .env("MIRROR_FACE_FIXTURES", fixture_json);
+    for (key, path) in extra_env {
+        command.env(key, path);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "reference python failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('['))
+        .ok_or_else(|| format!("reference python produced no JSON\nstdout:\n{stdout}"))?;
+    Ok(serde_json::from_str(json_line)?)
+}
+
+fn data_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("data")
+}
+
+fn reference_python() -> PathBuf {
+    if let Some(path) = env::var_os("MIRROR_FACE_REFERENCE_PYTHON") {
+        return PathBuf::from(path);
+    }
+    let workspace_python = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".venv-onnx-probe")
+        .join("bin")
+        .join("python");
+    if workspace_python.exists() {
+        return workspace_python;
+    }
+    PathBuf::from("python3")
+}
+
+fn assert_reference_outputs_match(
+    name: &str,
+    backend: &[ReferenceFaceOutput],
+    reference: &[ReferenceFaceOutput],
+    min_bbox_iou: f32,
+    min_embedding_cosine: f32,
+) -> TestResult {
+    if backend.len() != reference.len() {
+        return Err(format!(
+            "{name}: output count mismatch backend={} reference={}",
+            backend.len(),
+            reference.len()
+        )
+        .into());
+    }
+    let reference_by_filename = reference
+        .iter()
+        .map(|output| (output.filename.as_str(), output))
+        .collect::<HashMap<_, _>>();
+    let mut summary = Vec::new();
+    for backend_output in backend {
+        let reference_output = reference_by_filename
+            .get(backend_output.filename.as_str())
+            .ok_or_else(|| format!("{name}: missing reference for {}", backend_output.filename))?;
+        let iou = bbox_iou_xywh(backend_output.bbox, reference_output.bbox);
+        let cosine = cosine(&backend_output.embedding, &reference_output.embedding);
+        summary.push(format!(
+            "{} bbox_iou={iou:.6} embedding_cosine={cosine:.6} backend_bbox={:?} reference_bbox={:?} backend_score={:.6} reference_score={:.6}",
+            backend_output.filename,
+            backend_output.bbox,
+            reference_output.bbox,
+            backend_output.score,
+            reference_output.score
+        ));
+        if iou < min_bbox_iou || cosine < min_embedding_cosine {
+            return Err(format!(
+                "{name}: reference mismatch for {}: bbox_iou={iou:.6} embedding_cosine={cosine:.6}\n{}",
+                backend_output.filename,
+                summary.join("\n")
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn bbox_iou_xywh(left: [f32; 4], right: [f32; 4]) -> f32 {
+    let left_x2 = left[0] + left[2];
+    let left_y2 = left[1] + left[3];
+    let right_x2 = right[0] + right[2];
+    let right_y2 = right[1] + right[3];
+    let inter_left = left[0].max(right[0]);
+    let inter_top = left[1].max(right[1]);
+    let inter_right = left_x2.min(right_x2);
+    let inter_bottom = left_y2.min(right_y2);
+    let inter_width = (inter_right - inter_left).max(0.0);
+    let inter_height = (inter_bottom - inter_top).max(0.0);
+    let inter_area = inter_width * inter_height;
+    let left_area = left[2].max(0.0) * left[3].max(0.0);
+    let right_area = right[2].max(0.0) * right[3].max(0.0);
+    inter_area / (left_area + right_area - inter_area).max(f32::EPSILON)
+}
+
+fn normalize_vector_l2(values: &mut [f32]) {
+    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > f32::EPSILON {
+        for value in values {
+            *value /= norm;
+        }
+    }
 }
 
 #[tokio::test]
@@ -764,7 +1135,7 @@ fn scrfd_manifest() -> ModelPackManifest {
             color_order: "rgb".to_owned(),
             tensor_layout: "nchw".to_owned(),
             mean: [0.5, 0.5, 0.5],
-            std: [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0],
+            std: [0.5, 0.5, 0.5],
         },
         face_detection: Some(FaceDetectionModelConfig {
             adapter: "scrfd".to_owned(),
@@ -828,7 +1199,7 @@ fn arcface_manifest() -> ModelPackManifest {
             tensor_layout: "nchw".to_owned(),
             alignment: "five_point".to_owned(),
             mean: [0.5, 0.5, 0.5],
-            std: [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0],
+            std: [0.5, 0.5, 0.5],
             match_threshold: 0.55,
             l2_normalize_output: true,
         }),

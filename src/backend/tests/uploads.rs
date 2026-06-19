@@ -271,3 +271,60 @@ async fn cancelled_upload_rejects_new_parts() -> TestResult {
 
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn verified_upload_rejects_new_parts_without_changing_staged_bytes() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let bytes = jpeg_bytes();
+    let expected_blake3 = blake3::hash(&bytes).to_hex().to_string();
+    let created = create_upload(
+        &deps.pool,
+        CreateUploadInput {
+            owner_id: 1,
+            original_filename: "photo.jpg".to_owned(),
+            expected_size: i64::try_from(bytes.len())?,
+            expected_blake3,
+            media_type: "image/jpeg".to_owned(),
+            client_upload_key: None,
+        },
+    )
+    .await?;
+    put_part(
+        &deps.pool,
+        &deps.storage,
+        1,
+        created.upload_id,
+        0,
+        bytes.clone(),
+    )
+    .await?;
+    let part_key = StorageKey::staging_upload(created.upload_id, "part-00000000")?;
+    let part_hash = blake3::hash(&bytes).to_hex().to_string();
+
+    complete_upload(&deps.pool, &deps.storage, 1, created.upload_id).await?;
+
+    let mut replacement = bytes.clone();
+    replacement[3] ^= 0xff;
+    let result = put_part(
+        &deps.pool,
+        &deps.storage,
+        1,
+        created.upload_id,
+        0,
+        replacement,
+    )
+    .await;
+
+    assert!(matches!(result, Err(UploadError::NotOpen)));
+    let stored_hash = sqlx::query_scalar!(
+        "SELECT blake3_hash FROM upload_parts WHERE upload_id = $1 AND part_index = 0",
+        created.upload_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
+    assert_eq!(stored_hash, part_hash);
+    assert_eq!(deps.storage.read(&part_key).await?, bytes);
+
+    Ok(())
+}

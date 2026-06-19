@@ -643,7 +643,7 @@ fn insightface_scrfd_arcface_preset() -> ModelPackManifest {
             tensor_layout: "nchw".to_owned(),
             alignment: "five_point".to_owned(),
             mean: [0.5, 0.5, 0.5],
-            std: [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0],
+            std: [0.5, 0.5, 0.5],
             match_threshold: 0.55,
             l2_normalize_output: true,
         }),

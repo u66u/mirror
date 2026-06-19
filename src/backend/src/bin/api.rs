@@ -24,6 +24,9 @@ use tracing_actix_web::TracingLogger;
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let config = Config::from_env();
+    config
+        .validate_auth_secret_for_database()
+        .map_err(io_other)?;
     telemetry::init(&config.log_level);
     let db = connect_database(&config).await?;
     let storage = connect_storage(&config)?;

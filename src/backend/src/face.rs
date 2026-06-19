@@ -1793,17 +1793,24 @@ fn preprocess_letterboxed_image_pixels(
     config: &ImagePreprocessConfig,
 ) -> Result<(Vec<usize>, Vec<f32>, DetectorPreprocessCtx), FaceIndexError> {
     let (original_width, original_height) = image.dimensions();
-    let ratio = (config.width as f32 / original_width.max(1) as f32)
-        .min(config.height as f32 / original_height.max(1) as f32);
-    let resized_width = (original_width as f32 * ratio).round().max(1.0) as u32;
-    let resized_height = (original_height as f32 * ratio).round().max(1.0) as u32;
+    let image_ratio = original_height.max(1) as f32 / original_width.max(1) as f32;
+    let model_ratio = config.height.max(1) as f32 / config.width.max(1) as f32;
+    let (resized_width, resized_height) = if image_ratio > model_ratio {
+        let resized_height = config.height.max(1);
+        let resized_width = (resized_height as f32 / image_ratio).floor().max(1.0) as u32;
+        (resized_width, resized_height)
+    } else {
+        let resized_width = config.width.max(1);
+        let resized_height = (resized_width as f32 * image_ratio).floor().max(1.0) as u32;
+        (resized_width, resized_height)
+    };
     let resized = image
-        .resize_exact(resized_width, resized_height, FilterType::CatmullRom)
+        .resize_exact(resized_width, resized_height, FilterType::Triangle)
         .to_rgb8();
     let mut padded = RgbImage::new(config.width, config.height);
-    let x_offset = config.width.saturating_sub(resized_width) as f32 / 2.0;
-    let y_offset = config.height.saturating_sub(resized_height) as f32 / 2.0;
-    image::imageops::overlay(&mut padded, &resized, x_offset as i64, y_offset as i64);
+    let x_offset = 0.0;
+    let y_offset = 0.0;
+    image::imageops::overlay(&mut padded, &resized, 0, 0);
     let (shape, values) = preprocess_pixels(
         &padded,
         config.color_order == "bgr",

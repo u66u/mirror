@@ -1,3 +1,4 @@
+use futures_util::stream;
 use mirror_backend::storage::{ObjectStorage, StorageKey};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -32,6 +33,23 @@ async fn local_storage_contract_put_get_list_delete_and_promote() -> TestResult 
 
     assert!(!storage.exists(&final_key).await?);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_storage_stream_write_preserves_chunk_order() -> TestResult {
+    let temp_dir = TempDir::new()?;
+    let storage = ObjectStorage::local(temp_dir.path())?;
+    let key = StorageKey::staging_upload(Uuid::now_v7(), "streamed")?;
+    let chunks = stream::iter([
+        Ok::<_, mirror_backend::storage::StorageError>(bytes::Bytes::from_static(b"one")),
+        Ok::<_, mirror_backend::storage::StorageError>(bytes::Bytes::from_static(b"-two")),
+        Ok::<_, mirror_backend::storage::StorageError>(bytes::Bytes::from_static(b"-three")),
+    ]);
+
+    storage.write_stream(&key, chunks).await?;
+
+    assert_eq!(storage.read(&key).await?, b"one-two-three");
     Ok(())
 }
 

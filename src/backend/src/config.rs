@@ -7,6 +7,7 @@ use std::{env, fmt, net::SocketAddr, path::PathBuf};
 
 use ipnet::IpNet;
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 use time::Duration;
 
 /// Runtime configuration shared by the API process.
@@ -24,6 +25,10 @@ pub struct Config {
     pub rate_limit_secret: RateLimitSecret,
     /// Stable encryption key material for owner authentication secrets.
     pub auth_secret: AuthSecret,
+    /// Whether `MIRROR_AUTH_SECRET` was explicitly configured.
+    pub auth_secret_configured: bool,
+    /// Whether browser auth cookies should carry the Secure attribute.
+    pub cookie_secure: bool,
     /// Operator-configurable DB-backed rate-limit quotas.
     pub rate_limits: RateLimitConfig,
     /// Proxy CIDRs allowed to supply forwarded client IP headers.
@@ -51,6 +56,8 @@ impl fmt::Debug for Config {
             .field("storage_root", &self.storage_root)
             .field("rate_limit_secret", &self.rate_limit_secret)
             .field("auth_secret", &self.auth_secret)
+            .field("auth_secret_configured", &self.auth_secret_configured)
+            .field("cookie_secure", &self.cookie_secure)
             .field("rate_limits", &self.rate_limits)
             .field("trusted_proxies", &self.trusted_proxies)
             .field("ml_device", &self.ml_device)
@@ -59,6 +66,14 @@ impl fmt::Debug for Config {
             .field("face_recognition_enabled", &self.face_recognition_enabled)
             .finish()
     }
+}
+
+/// Configuration validation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ConfigError {
+    /// DB-backed auth persists encrypted secrets and needs stable key material.
+    #[error("MIRROR_AUTH_SECRET is required when MIRROR_DATABASE_URL is configured")]
+    MissingAuthSecret,
 }
 
 /// Operator-configurable semantic search behavior.
@@ -314,9 +329,13 @@ impl Config {
         let rate_limit_secret = env::var("MIRROR_RATE_LIMIT_SECRET")
             .map(|secret| RateLimitSecret::from_secret(&secret))
             .unwrap_or_else(|_| RateLimitSecret::random_or_dev_fallback());
-        let auth_secret = env::var("MIRROR_AUTH_SECRET")
-            .map(|secret| AuthSecret::from_secret(&secret))
-            .unwrap_or_else(|_| AuthSecret::from_rate_limit_secret(&rate_limit_secret));
+        let auth_secret_env = env::var("MIRROR_AUTH_SECRET").ok();
+        let auth_secret_configured = auth_secret_env.is_some();
+        let auth_secret = auth_secret_env
+            .as_deref()
+            .map(AuthSecret::from_secret)
+            .unwrap_or_else(|| AuthSecret::from_rate_limit_secret(&rate_limit_secret));
+        let cookie_secure = env_bool("MIRROR_COOKIE_SECURE", true);
         let rate_limits = RateLimitConfig::from_env();
         let trusted_proxies = env::var("MIRROR_TRUSTED_PROXIES")
             .ok()
@@ -340,12 +359,23 @@ impl Config {
             storage_root,
             rate_limit_secret,
             auth_secret,
+            auth_secret_configured,
+            cookie_secure,
             rate_limits,
             trusted_proxies,
             ml_device,
             ml_max_image_bytes,
             semantic_search,
             face_recognition_enabled,
+        }
+    }
+
+    /// Validates settings required before serving DB-backed auth routes.
+    pub fn validate_auth_secret_for_database(&self) -> Result<(), ConfigError> {
+        if self.database_url.is_some() && !self.auth_secret_configured {
+            Err(ConfigError::MissingAuthSecret)
+        } else {
+            Ok(())
         }
     }
 }

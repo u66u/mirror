@@ -5,6 +5,8 @@
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blake3::Hasher;
+use bytes::Bytes;
+use futures_util::{TryStreamExt, stream};
 use serde::Serialize;
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
@@ -199,27 +201,26 @@ pub async fn promote_verified_upload(
     owner_id: i16,
     upload_id: Uuid,
 ) -> Result<PromotedUpload, PromoteError> {
-    if let Some(existing) = existing_asset_for_upload(pool, upload_id).await? {
+    let mut tx = pool.begin().await.map_err(PromoteError::Database)?;
+    let upload = load_verified_upload_for_update(&mut tx, owner_id, upload_id).await?;
+    if let Some(existing) = existing_asset_for_upload(&mut tx, upload_id).await? {
+        tx.commit().await.map_err(PromoteError::Database)?;
         return Ok(existing);
     }
 
-    let upload = load_verified_upload(pool, owner_id, upload_id).await?;
-    let bytes = read_verified_staged_bytes(pool, storage, upload_id, &upload).await?;
     let final_key = StorageKey::original_blake3(&upload.expected_blake3)
         .map_err(|_| PromoteError::VerificationFailed)?;
 
-    if !storage
+    if storage
         .exists(&final_key)
         .await
         .map_err(PromoteError::Storage)?
     {
-        storage
-            .write(&final_key, bytes)
-            .await
-            .map_err(PromoteError::Storage)?;
+        verify_staged_upload_parts(&mut tx, storage, upload_id, &upload).await?;
+    } else {
+        write_staged_upload_to_original(&mut tx, storage, upload_id, &upload, &final_key).await?;
     }
 
-    let mut tx = pool.begin().await.map_err(PromoteError::Database)?;
     let original_id = upsert_original(&mut tx, &upload, final_key.as_str()).await?;
     let asset_id = Uuid::now_v7();
     let asset_public_id = Uuid::now_v7();
@@ -575,7 +576,7 @@ struct UploadPart {
 }
 
 async fn existing_asset_for_upload(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     upload_id: Uuid,
 ) -> Result<Option<PromotedUpload>, PromoteError> {
     sqlx::query!(
@@ -587,7 +588,7 @@ async fn existing_asset_for_upload(
         "#,
         upload_id,
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map(|row| {
         row.map(|row| PromotedUpload {
@@ -598,26 +599,30 @@ async fn existing_asset_for_upload(
     .map_err(PromoteError::Database)
 }
 
-async fn load_verified_upload(
-    pool: &PgPool,
+async fn load_verified_upload_for_update(
+    tx: &mut Transaction<'_, Postgres>,
     owner_id: i16,
     upload_id: Uuid,
 ) -> Result<VerifiedUpload, PromoteError> {
     let row = sqlx::query!(
         r#"
-        SELECT original_filename, expected_size, expected_blake3, media_type
+        SELECT status, original_filename, expected_size, expected_blake3, media_type
         FROM upload_sessions
         WHERE id = $1
           AND owner_id = $2
-          AND status = 'verified'
+        FOR UPDATE
         "#,
         upload_id,
         owner_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(PromoteError::Database)?
     .ok_or(PromoteError::UploadNotVerified)?;
+
+    if row.status != "verified" {
+        return Err(PromoteError::UploadNotVerified);
+    }
 
     Ok(VerifiedUpload {
         original_filename: row.original_filename,
@@ -627,12 +632,10 @@ async fn load_verified_upload(
     })
 }
 
-async fn read_verified_staged_bytes(
-    pool: &PgPool,
-    storage: &ObjectStorage,
+async fn upload_parts(
+    tx: &mut Transaction<'_, Postgres>,
     upload_id: Uuid,
-    upload: &VerifiedUpload,
-) -> Result<Vec<u8>, PromoteError> {
+) -> Result<Vec<UploadPart>, PromoteError> {
     let parts = sqlx::query!(
         r#"
         SELECT size_bytes, storage_key, blake3_hash
@@ -642,7 +645,7 @@ async fn read_verified_staged_bytes(
         "#,
         upload_id,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(PromoteError::Database)?
     .into_iter()
@@ -653,32 +656,107 @@ async fn read_verified_staged_bytes(
     })
     .collect::<Vec<_>>();
 
-    let mut hasher = Hasher::new();
-    let mut total_size = 0_i64;
-    let mut all_bytes = Vec::new();
+    Ok(parts)
+}
 
-    for part in parts {
-        let key =
-            StorageKey::new(part.storage_key).map_err(|_| PromoteError::VerificationFailed)?;
-        let bytes = storage.read(&key).await.map_err(PromoteError::Storage)?;
-        let bytes_len = i64::try_from(bytes.len()).map_err(|_| PromoteError::VerificationFailed)?;
-        if bytes_len != part.size_bytes
-            || blake3::hash(&bytes).to_hex().as_str() != part.blake3_hash
-        {
-            return Err(PromoteError::VerificationFailed);
-        }
-        total_size += bytes_len;
-        hasher.update(&bytes);
-        all_bytes.extend(bytes);
+async fn verify_staged_upload_parts(
+    tx: &mut Transaction<'_, Postgres>,
+    storage: &ObjectStorage,
+    upload_id: Uuid,
+    upload: &VerifiedUpload,
+) -> Result<(), PromoteError> {
+    let stream = verified_part_stream(storage.clone(), upload_parts(tx, upload_id).await?, upload);
+    futures_util::pin_mut!(stream);
+    while stream.try_next().await?.is_some() {}
+    Ok(())
+}
+
+async fn write_staged_upload_to_original(
+    tx: &mut Transaction<'_, Postgres>,
+    storage: &ObjectStorage,
+    upload_id: Uuid,
+    upload: &VerifiedUpload,
+    final_key: &StorageKey,
+) -> Result<(), PromoteError> {
+    let parts = upload_parts(tx, upload_id).await?;
+    let temp_key = StorageKey::staging_upload(upload_id, "promoted-original")
+        .map_err(|_| PromoteError::VerificationFailed)?;
+    storage
+        .delete(&temp_key)
+        .await
+        .map_err(PromoteError::Storage)?;
+    let stream = verified_part_stream(storage.clone(), parts, upload);
+    let write_result = storage.write_stream(&temp_key, stream).await;
+    if let Err(error) = write_result {
+        let _ = storage.delete(&temp_key).await;
+        return Err(error);
     }
 
-    if total_size != upload.expected_size
-        || hasher.finalize().to_hex().as_str() != upload.expected_blake3
-    {
-        return Err(PromoteError::VerificationFailed);
+    if let Err(error) = storage.promote(&temp_key, final_key).await {
+        let _ = storage.delete(&temp_key).await;
+        return Err(PromoteError::Storage(error));
     }
 
-    Ok(all_bytes)
+    Ok(())
+}
+
+fn verified_part_stream(
+    storage: ObjectStorage,
+    parts: Vec<UploadPart>,
+    upload: &VerifiedUpload,
+) -> impl futures_util::Stream<Item = Result<Bytes, PromoteError>> + 'static {
+    stream::try_unfold(
+        VerifiedPartStreamState {
+            storage,
+            parts,
+            next_index: 0,
+            total_size: 0,
+            hasher: Hasher::new(),
+            expected_size: upload.expected_size,
+            expected_blake3: upload.expected_blake3.clone(),
+        },
+        |mut state| async move {
+            if state.next_index == state.parts.len() {
+                if state.total_size != state.expected_size
+                    || state.hasher.finalize().to_hex().as_str() != state.expected_blake3
+                {
+                    return Err(PromoteError::VerificationFailed);
+                }
+                return Ok(None);
+            }
+
+            let part = &state.parts[state.next_index];
+            let key = StorageKey::new(part.storage_key.clone())
+                .map_err(|_| PromoteError::VerificationFailed)?;
+            let bytes = state
+                .storage
+                .read(&key)
+                .await
+                .map_err(PromoteError::Storage)?;
+            let bytes_len =
+                i64::try_from(bytes.len()).map_err(|_| PromoteError::VerificationFailed)?;
+            if bytes_len != part.size_bytes
+                || blake3::hash(&bytes).to_hex().as_str() != part.blake3_hash
+            {
+                return Err(PromoteError::VerificationFailed);
+            }
+            state.total_size += bytes_len;
+            state.hasher.update(&bytes);
+            state.next_index += 1;
+
+            Ok(Some((Bytes::from(bytes), state)))
+        },
+    )
+}
+
+struct VerifiedPartStreamState {
+    storage: ObjectStorage,
+    parts: Vec<UploadPart>,
+    next_index: usize,
+    total_size: i64,
+    hasher: Hasher,
+    expected_size: i64,
+    expected_blake3: String,
 }
 
 async fn upsert_original(
