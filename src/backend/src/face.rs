@@ -32,7 +32,8 @@ use crate::{
         ModelPackError, ModelPackKind, ModelPackManifest, validate_embedding_output,
     },
     onnx_embedder::{
-        extract_output, model_pack_file_path, normalize_channel, open_session, ordered_channels,
+        OnnxSessionOptions, model_pack_file_path, normalize_channel, open_session_with_options,
+        ordered_channels,
     },
     storage::{ObjectStorage, StorageError, StorageKey, StorageKeyError},
 };
@@ -158,6 +159,7 @@ pub trait FaceRuntime {
 pub struct OnnxFaceRuntime {
     storage_root: PathBuf,
     device: MlDevicePreference,
+    session_options: OnnxSessionOptions,
     heif_convert_path: PathBuf,
     detection_sessions: Mutex<HashMap<Uuid, Arc<Mutex<Session>>>>,
     embedding_sessions: Mutex<HashMap<Uuid, Arc<Mutex<Session>>>>,
@@ -167,7 +169,22 @@ impl OnnxFaceRuntime {
     /// Creates a lazy ONNX face runtime.
     #[must_use]
     pub fn new(storage_root: PathBuf, device: MlDevicePreference) -> Self {
-        Self::with_heif_converter(storage_root, device, "heif-convert")
+        Self::with_session_options(storage_root, device, OnnxSessionOptions::default())
+    }
+
+    /// Creates a lazy ONNX face runtime with session execution overrides.
+    #[must_use]
+    pub fn with_session_options(
+        storage_root: PathBuf,
+        device: MlDevicePreference,
+        session_options: OnnxSessionOptions,
+    ) -> Self {
+        Self::with_session_options_and_heif_converter(
+            storage_root,
+            device,
+            session_options,
+            "heif-convert",
+        )
     }
 
     /// Creates a lazy ONNX face runtime with an explicit HEIC/HEIF converter.
@@ -177,9 +194,26 @@ impl OnnxFaceRuntime {
         device: MlDevicePreference,
         heif_convert_path: impl Into<PathBuf>,
     ) -> Self {
+        Self::with_session_options_and_heif_converter(
+            storage_root,
+            device,
+            OnnxSessionOptions::default(),
+            heif_convert_path,
+        )
+    }
+
+    /// Creates a lazy face runtime with explicit session and HEIF settings.
+    #[must_use]
+    pub fn with_session_options_and_heif_converter(
+        storage_root: PathBuf,
+        device: MlDevicePreference,
+        session_options: OnnxSessionOptions,
+        heif_convert_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             storage_root,
             device,
+            session_options,
             heif_convert_path: heif_convert_path.into(),
             detection_sessions: Mutex::new(HashMap::new()),
             embedding_sessions: Mutex::new(HashMap::new()),
@@ -232,15 +266,22 @@ impl OnnxFaceRuntime {
                 height: 1.0,
             },
         };
-        let inputs = embedder.preprocess_chip(&chip)?;
         let session = self.embedding_session(request.model_pack_id, request.manifest)?;
-        let outputs = {
+        let embeddings = {
             let mut session = session
                 .lock()
                 .map_err(|_| FaceIndexError::RuntimeUnavailable)?;
-            run_onnx(&mut session, inputs, &embedder.output_names())?
+            run_face_embedding_batches(
+                &mut session,
+                embedder.as_ref(),
+                &[&chip],
+                manifest_embedding_dimension(request.manifest)?,
+            )?
         };
-        embedder.postprocess(&outputs)
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or(FaceIndexError::RuntimeUnavailable)
     }
 
     fn detection_session(
@@ -262,7 +303,11 @@ impl OnnxFaceRuntime {
             }
         }
         let path = model_pack_file_path(&self.storage_root, model_pack_id, &config.model_path)?;
-        let session = Arc::new(Mutex::new(open_session(&path, self.device)?));
+        let session = Arc::new(Mutex::new(open_session_with_options(
+            &path,
+            self.device,
+            self.session_options,
+        )?));
         let mut sessions = self
             .detection_sessions
             .lock()
@@ -293,7 +338,11 @@ impl OnnxFaceRuntime {
             }
         }
         let path = model_pack_file_path(&self.storage_root, model_pack_id, &config.model_path)?;
-        let session = Arc::new(Mutex::new(open_session(&path, self.device)?));
+        let session = Arc::new(Mutex::new(open_session_with_options(
+            &path,
+            self.device,
+            self.session_options,
+        )?));
         let mut sessions = self
             .embedding_sessions
             .lock()
@@ -336,16 +385,29 @@ impl FaceRuntime for OnnxFaceRuntime {
         let faces = detector.postprocess(&detection_outputs, &detector_ctx)?;
         let embedding_session =
             self.embedding_session(request.embedding_model_pack_id, request.embedding_manifest)?;
-        let mut indexed = Vec::with_capacity(faces.len());
+        let mut prepared = Vec::with_capacity(faces.len());
         for face in faces {
             let chip = make_face_chip(&image, face, embedder.chip_spec())?;
             let chip_image = encode_face_chip(&chip.image)?;
-            let inputs = embedder.preprocess_chip(&chip)?;
+            prepared.push((face, chip, chip_image));
+        }
+        let chip_refs = prepared.iter().map(|(_, chip, _)| chip).collect::<Vec<_>>();
+        let embeddings = {
             let mut session = embedding_session
                 .lock()
                 .map_err(|_| FaceIndexError::RuntimeUnavailable)?;
-            let outputs = run_onnx(&mut session, inputs, &embedder.output_names())?;
-            let embedding = embedder.postprocess(&outputs)?;
+            run_face_embedding_batches(
+                &mut session,
+                embedder.as_ref(),
+                &chip_refs,
+                manifest_embedding_dimension(request.embedding_manifest)?,
+            )?
+        };
+        if prepared.len() != embeddings.len() {
+            return Err(FaceIndexError::RuntimeUnavailable);
+        }
+        let mut indexed = Vec::with_capacity(prepared.len());
+        for ((face, chip, chip_image), embedding) in prepared.into_iter().zip(embeddings) {
             indexed.push(IndexedFace {
                 bbox: chip.source_bbox,
                 quality: Some(face.quality),
@@ -1113,6 +1175,7 @@ impl OnnxInputs {
 }
 
 struct OnnxOutput {
+    shape: Vec<i64>,
     values: Vec<f32>,
 }
 
@@ -1183,8 +1246,14 @@ trait FaceDetectorAdapter {
 trait FaceEmbedderAdapter {
     fn output_names(&self) -> Vec<String>;
     fn chip_spec(&self) -> FaceChipSpec;
-    fn preprocess_chip(&self, chip: &FaceChip) -> Result<OnnxInputs, FaceIndexError>;
-    fn postprocess(&self, outputs: &OnnxOutputs) -> Result<Vec<f32>, FaceIndexError>;
+    fn input_name(&self) -> &str;
+    fn preprocess_batch(&self, chips: &[&FaceChip]) -> Result<OnnxInputs, FaceIndexError>;
+    fn postprocess_batch(
+        &self,
+        outputs: &OnnxOutputs,
+        batch_size: usize,
+        embedding_dimension: usize,
+    ) -> Result<Vec<Vec<f32>>, FaceIndexError>;
 }
 
 struct DecodedBoxesDetectorAdapter<'a> {
@@ -1725,8 +1794,23 @@ impl FaceEmbedderAdapter for RawEmbeddingAdapter<'_> {
         }
     }
 
-    fn preprocess_chip(&self, chip: &FaceChip) -> Result<OnnxInputs, FaceIndexError> {
-        let (shape, values) = preprocess_chip_pixels(&chip.image, self.chip_spec())?;
+    fn input_name(&self) -> &str {
+        &self.config.input_name
+    }
+
+    fn preprocess_batch(&self, chips: &[&FaceChip]) -> Result<OnnxInputs, FaceIndexError> {
+        let Some(first) = chips.first() else {
+            return Err(FaceIndexError::RuntimeUnavailable);
+        };
+        let (mut shape, mut values) = preprocess_chip_pixels(&first.image, self.chip_spec())?;
+        for chip in &chips[1..] {
+            let (chip_shape, chip_values) = preprocess_chip_pixels(&chip.image, self.chip_spec())?;
+            if chip_shape != shape {
+                return Err(FaceIndexError::RuntimeUnavailable);
+            }
+            values.extend(chip_values);
+        }
+        shape[0] = chips.len();
         Ok(OnnxInputs::single(
             self.config.input_name.as_str(),
             shape,
@@ -1734,19 +1818,32 @@ impl FaceEmbedderAdapter for RawEmbeddingAdapter<'_> {
         ))
     }
 
-    fn postprocess(&self, outputs: &OnnxOutputs) -> Result<Vec<f32>, FaceIndexError> {
-        let mut embedding = outputs
-            .values(&self.config.output_name, "face_embedding.output_name")?
-            .to_vec();
-        if self.config.l2_normalize_output
+    fn postprocess_batch(
+        &self,
+        outputs: &OnnxOutputs,
+        batch_size: usize,
+        embedding_dimension: usize,
+    ) -> Result<Vec<Vec<f32>>, FaceIndexError> {
+        let output = outputs.tensors.get(&self.config.output_name).ok_or(
+            ModelPackError::InvalidManifest("face_embedding.output_name"),
+        )?;
+        validate_embedding_batch_output(output, batch_size, embedding_dimension)?;
+        let normalize = self.config.l2_normalize_output
             || matches!(
                 self.config.adapter.as_str(),
                 "arcface" | "sface_opencv_compat"
-            )
-        {
-            l2_normalize(&mut embedding);
+            );
+        let mut embeddings = output
+            .values
+            .chunks_exact(embedding_dimension)
+            .map(<[f32]>::to_vec)
+            .collect::<Vec<_>>();
+        if normalize {
+            for embedding in &mut embeddings {
+                l2_normalize(embedding);
+            }
         }
-        Ok(embedding)
+        Ok(embeddings)
     }
 }
 
@@ -1801,14 +1898,136 @@ fn run_onnx(
     collect_outputs(&outputs, output_names)
 }
 
+fn manifest_embedding_dimension(manifest: &ModelPackManifest) -> Result<usize, FaceIndexError> {
+    usize::try_from(manifest.embedding_dimension)
+        .ok()
+        .filter(|dimension| *dimension > 0)
+        .ok_or(ModelPackError::InvalidManifest("embedding_dimension").into())
+}
+
+fn run_face_embedding_batches(
+    session: &mut Session,
+    embedder: &dyn FaceEmbedderAdapter,
+    chips: &[&FaceChip],
+    embedding_dimension: usize,
+) -> Result<Vec<Vec<f32>>, FaceIndexError> {
+    if chips.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fixed_batch_size = model_fixed_batch_size(session, embedder)?;
+    let chunk_size = fixed_batch_size.unwrap_or(chips.len());
+    let mut embeddings = Vec::with_capacity(chips.len());
+    for chunk in chips.chunks(chunk_size) {
+        let inference_batch_size = fixed_batch_size.unwrap_or(chunk.len());
+        let mut batch = chunk.to_vec();
+        if batch.len() < inference_batch_size {
+            let padding = *batch.last().ok_or(FaceIndexError::RuntimeUnavailable)?;
+            batch.resize(inference_batch_size, padding);
+        }
+        let inputs = embedder.preprocess_batch(&batch)?;
+        let outputs = run_onnx(session, inputs, &embedder.output_names())?;
+        let mut batch_embeddings =
+            embedder.postprocess_batch(&outputs, inference_batch_size, embedding_dimension)?;
+        batch_embeddings.truncate(chunk.len());
+        embeddings.extend(batch_embeddings);
+    }
+    Ok(embeddings)
+}
+
+fn model_fixed_batch_size(
+    session: &Session,
+    embedder: &dyn FaceEmbedderAdapter,
+) -> Result<Option<usize>, FaceIndexError> {
+    let input = session
+        .inputs()
+        .iter()
+        .find(|input| input.name() == embedder.input_name())
+        .ok_or(ModelPackError::InvalidManifest("face_embedding.input_name"))?;
+    let shape = input
+        .dtype()
+        .tensor_shape()
+        .ok_or(ModelPackError::InvalidManifest("face_embedding.input_name"))?;
+    let spec = embedder.chip_spec();
+    let height = i64::from(spec.height);
+    let width = i64::from(spec.width);
+    let expected = match spec.tensor_layout {
+        FaceTensorLayout::Nchw => [3_i64, height, width],
+        FaceTensorLayout::Nhwc => [height, width, 3_i64],
+    };
+    if shape.len() != 4
+        || shape[1..]
+            .iter()
+            .zip(expected)
+            .any(|(actual, expected)| *actual != -1 && *actual != expected)
+    {
+        return Err(ModelPackError::InvalidManifest("face_embedding.input_shape").into());
+    }
+    match shape[0] {
+        -1 => Ok(None),
+        batch_size if batch_size > 0 => {
+            let batch_size =
+                usize::try_from(batch_size).map_err(|_| FaceIndexError::RuntimeUnavailable)?;
+            if batch_size > 1_000 {
+                return Err(ModelPackError::InvalidManifest("face_embedding.input_shape").into());
+            }
+            Ok(Some(batch_size))
+        }
+        _ => Err(ModelPackError::InvalidManifest("face_embedding.input_shape").into()),
+    }
+}
+
+fn validate_embedding_batch_output(
+    output: &OnnxOutput,
+    batch_size: usize,
+    embedding_dimension: usize,
+) -> Result<(), FaceIndexError> {
+    let expected_values = batch_size
+        .checked_mul(embedding_dimension)
+        .ok_or(FaceIndexError::RuntimeUnavailable)?;
+    let shape_values = output.shape.iter().try_fold(1_usize, |product, dimension| {
+        let dimension = usize::try_from(*dimension)
+            .ok()
+            .filter(|value| *value > 0)?;
+        product.checked_mul(dimension)
+    });
+    let batch_dimension_matches = output
+        .shape
+        .first()
+        .is_some_and(|dimension| usize::try_from(*dimension) == Ok(batch_size));
+    let single_flat_output = batch_size == 1
+        && output.shape.len() == 1
+        && output
+            .shape
+            .first()
+            .is_some_and(|dimension| usize::try_from(*dimension) == Ok(embedding_dimension));
+    if output.values.len() != expected_values
+        || shape_values != Some(expected_values)
+        || (!batch_dimension_matches && !single_flat_output)
+    {
+        return Err(ModelPackError::InvalidManifest("face_embedding.output_shape").into());
+    }
+    Ok(())
+}
+
 fn collect_outputs(
     outputs: &SessionOutputs<'_>,
     output_names: &[String],
 ) -> Result<OnnxOutputs, FaceIndexError> {
     let mut tensors = HashMap::with_capacity(output_names.len());
     for name in output_names {
-        let values = extract_output(outputs, name).map_err(FaceIndexError::Ml)?;
-        tensors.insert(name.clone(), OnnxOutput { values });
+        let output = outputs
+            .get(name)
+            .ok_or(ModelPackError::InvalidManifest("onnx.output_name"))?;
+        let (shape, values) = output
+            .try_extract_tensor::<f32>()
+            .map_err(|_| FaceIndexError::RuntimeUnavailable)?;
+        tensors.insert(
+            name.clone(),
+            OnnxOutput {
+                shape: shape.iter().copied().collect(),
+                values: values.to_vec(),
+            },
+        );
     }
     Ok(OnnxOutputs { tensors })
 }
@@ -2380,6 +2599,39 @@ fn is_supported_face_media_type(media_type: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn test_embedding_config() -> FaceEmbeddingModelConfig {
+        FaceEmbeddingModelConfig {
+            adapter: "raw_embedding_v1".to_owned(),
+            model_path: "models/embedding.onnx".to_owned(),
+            input_name: "face".to_owned(),
+            output_name: "embedding".to_owned(),
+            width: 2,
+            height: 1,
+            color_order: "rgb".to_owned(),
+            tensor_layout: "nchw".to_owned(),
+            alignment: "bbox_crop".to_owned(),
+            mean: [0.0; 3],
+            std: [1.0; 3],
+            match_threshold: 0.5,
+            l2_normalize_output: true,
+        }
+    }
+
+    fn test_chip(values: [[u8; 3]; 2]) -> FaceChip {
+        let mut image = RgbImage::new(2, 1);
+        image.put_pixel(0, 0, Rgb(values[0]));
+        image.put_pixel(1, 0, Rgb(values[1]));
+        FaceChip {
+            image,
+            source_bbox: FaceBox {
+                left: 0.0,
+                top: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+        }
+    }
+
     #[test]
     fn scrfd_head_shape_requires_standard_two_anchors_per_location() {
         let ctx = DetectorPreprocessCtx {
@@ -2395,5 +2647,77 @@ mod tests {
         assert!(validate_scrfd_head_shape(8, expected, expected, &ctx).is_ok());
         assert!(validate_scrfd_head_shape(8, 80 * 80, 80 * 80, &ctx).is_err());
         assert!(validate_scrfd_head_shape(8, expected * 3 / 2, expected * 3 / 2, &ctx).is_err());
+    }
+
+    #[test]
+    fn face_chip_preprocessing_builds_one_contiguous_batch_tensor() -> Result<(), FaceIndexError> {
+        let config = test_embedding_config();
+        let adapter = RawEmbeddingAdapter { config: &config };
+        let first = test_chip([[1, 2, 3], [4, 5, 6]]);
+        let second = test_chip([[7, 8, 9], [10, 11, 12]]);
+
+        let inputs = adapter.preprocess_batch(&[&first, &second])?;
+        assert_eq!(inputs.tensors.len(), 1);
+        let input = &inputs.tensors[0];
+
+        assert_eq!(input.shape, [2, 3, 1, 2]);
+        assert_eq!(input.values.len(), 12);
+        assert_eq!(
+            &input.values[..6],
+            &[
+                1.0 / 255.0,
+                4.0 / 255.0,
+                2.0 / 255.0,
+                5.0 / 255.0,
+                3.0 / 255.0,
+                6.0 / 255.0,
+            ]
+        );
+        assert_eq!(
+            &input.values[6..],
+            &[
+                7.0 / 255.0,
+                10.0 / 255.0,
+                8.0 / 255.0,
+                11.0 / 255.0,
+                9.0 / 255.0,
+                12.0 / 255.0,
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn face_embedding_batch_output_is_split_and_normalized_per_face() -> Result<(), FaceIndexError>
+    {
+        let config = test_embedding_config();
+        let adapter = RawEmbeddingAdapter { config: &config };
+        let outputs = OnnxOutputs {
+            tensors: HashMap::from([(
+                "embedding".to_owned(),
+                OnnxOutput {
+                    shape: vec![2, 2],
+                    values: vec![3.0, 4.0, 0.0, 2.0],
+                },
+            )]),
+        };
+
+        let embeddings = adapter.postprocess_batch(&outputs, 2, 2)?;
+
+        assert_eq!(embeddings.len(), 2);
+        assert!((embeddings[0][0] - 0.6).abs() < 1e-6);
+        assert!((embeddings[0][1] - 0.8).abs() < 1e-6);
+        assert_eq!(embeddings[1], [0.0, 1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn face_embedding_batch_output_rejects_aliased_batch_shape() {
+        let output = OnnxOutput {
+            shape: vec![1, 4],
+            values: vec![0.0; 4],
+        };
+
+        assert!(validate_embedding_batch_output(&output, 2, 2).is_err());
     }
 }

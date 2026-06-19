@@ -3,7 +3,7 @@
 //! V1 keeps config explicit and environment-backed. Secret-bearing config must
 //! never be logged without redaction; see `docs/style-guide.md`.
 
-use std::{env, fmt, net::SocketAddr, path::PathBuf};
+use std::{env, fmt, net::SocketAddr, path::PathBuf, thread};
 
 use ipnet::IpNet;
 use sha2::{Digest, Sha256};
@@ -31,10 +31,20 @@ pub struct Config {
     pub cookie_secure: bool,
     /// Operator-configurable DB-backed rate-limit quotas.
     pub rate_limits: RateLimitConfig,
+    /// Number of concurrent durable worker jobs in the production worker.
+    pub worker_concurrency: usize,
     /// Proxy CIDRs allowed to supply forwarded client IP headers.
     pub trusted_proxies: Vec<IpNet>,
     /// Preferred ML execution device for future runtime-backed workers.
     pub ml_device: MlDevicePreference,
+    /// Optional ONNX intra-op thread count. Unset preserves the runtime default.
+    pub ml_intra_threads: Option<usize>,
+    /// Optional ONNX inter-op thread count. Unset preserves the runtime default.
+    pub ml_inter_threads: Option<usize>,
+    /// Optional ONNX graph-parallel execution override.
+    pub ml_parallel_execution: Option<bool>,
+    /// Optional application-level cap on concurrent ML inference calls.
+    pub ml_max_concurrent_inferences: Option<usize>,
     /// Maximum encoded image bytes read into the embedding runtime.
     pub ml_max_image_bytes: usize,
     /// Semantic pgvector search execution knobs.
@@ -59,8 +69,16 @@ impl fmt::Debug for Config {
             .field("auth_secret_configured", &self.auth_secret_configured)
             .field("cookie_secure", &self.cookie_secure)
             .field("rate_limits", &self.rate_limits)
+            .field("worker_concurrency", &self.worker_concurrency)
             .field("trusted_proxies", &self.trusted_proxies)
             .field("ml_device", &self.ml_device)
+            .field("ml_intra_threads", &self.ml_intra_threads)
+            .field("ml_inter_threads", &self.ml_inter_threads)
+            .field("ml_parallel_execution", &self.ml_parallel_execution)
+            .field(
+                "ml_max_concurrent_inferences",
+                &self.ml_max_concurrent_inferences,
+            )
             .field("ml_max_image_bytes", &self.ml_max_image_bytes)
             .field("semantic_search", &self.semantic_search)
             .field("face_recognition_enabled", &self.face_recognition_enabled)
@@ -85,6 +103,12 @@ pub enum ConfigError {
     /// One configured trusted-proxy CIDR failed to parse.
     #[error("MIRROR_TRUSTED_PROXIES contains invalid CIDR: {0}")]
     InvalidTrustedProxy(String),
+    /// A positive-integer ML setting was invalid.
+    #[error("{0} must be a positive integer")]
+    InvalidPositiveInteger(&'static str),
+    /// An optional boolean ML setting was invalid.
+    #[error("{0} must be a boolean")]
+    InvalidBoolean(&'static str),
 }
 
 /// Operator-configurable semantic search behavior.
@@ -354,6 +378,8 @@ impl Config {
             .unwrap_or_else(|| AuthSecret::from_rate_limit_secret(&rate_limit_secret));
         let cookie_secure = env_bool("MIRROR_COOKIE_SECURE", true);
         let rate_limits = RateLimitConfig::from_env();
+        let worker_concurrency = optional_positive_usize_env("MIRROR_WORKER_CONCURRENCY")?
+            .unwrap_or_else(default_worker_concurrency);
         let trusted_proxies = env::var("MIRROR_TRUSTED_PROXIES")
             .ok()
             .map(|value| parse_trusted_proxies(&value))
@@ -363,6 +389,11 @@ impl Config {
             .ok()
             .and_then(|value| parse_ml_device_preference(&value))
             .unwrap_or(MlDevicePreference::GpuWithCpuFallback);
+        let ml_intra_threads = optional_positive_usize_env("MIRROR_ML_INTRA_THREADS")?;
+        let ml_inter_threads = optional_positive_usize_env("MIRROR_ML_INTER_THREADS")?;
+        let ml_parallel_execution = optional_bool_env("MIRROR_ML_PARALLEL_EXECUTION")?;
+        let ml_max_concurrent_inferences =
+            optional_positive_usize_env("MIRROR_ML_MAX_CONCURRENT_INFERENCES")?;
         let ml_max_image_bytes = env::var("MIRROR_ML_MAX_IMAGE_BYTES")
             .ok()
             .and_then(|value| parse_positive_usize(&value))
@@ -380,8 +411,13 @@ impl Config {
             auth_secret_configured,
             cookie_secure,
             rate_limits,
+            worker_concurrency,
             trusted_proxies,
             ml_device,
+            ml_intra_threads,
+            ml_inter_threads,
+            ml_parallel_execution,
+            ml_max_concurrent_inferences,
             ml_max_image_bytes,
             semantic_search,
             face_recognition_enabled,
@@ -457,6 +493,38 @@ fn parse_positive_usize(value: &str) -> Option<usize> {
     (parsed > 0).then_some(parsed)
 }
 
+fn optional_positive_usize_env(name: &'static str) -> Result<Option<usize>, ConfigError> {
+    let Some(value) = env::var(name).ok() else {
+        return Ok(None);
+    };
+    parse_positive_usize(&value)
+        .map(Some)
+        .ok_or(ConfigError::InvalidPositiveInteger(name))
+}
+
+fn optional_bool_env(name: &'static str) -> Result<Option<bool>, ConfigError> {
+    let Some(value) = env::var(name).ok() else {
+        return Ok(None);
+    };
+    parse_optional_bool_value(&value)
+        .map(Some)
+        .ok_or(ConfigError::InvalidBoolean(name))
+}
+
+fn default_worker_concurrency() -> usize {
+    thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1)
+}
+
+fn parse_optional_bool_value(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 fn env_i32(name: &str, default: i32) -> i32 {
     env::var(name)
         .ok()
@@ -521,5 +589,24 @@ mod tests {
             parse_trusted_proxies("127.0.0.1/32, not-a-cidr"),
             Err(ConfigError::InvalidTrustedProxy("not-a-cidr".to_owned()))
         );
+    }
+
+    #[test]
+    fn ml_positive_thread_settings_reject_zero_and_invalid_values() {
+        assert_eq!(parse_positive_usize("8"), Some(8));
+        assert_eq!(parse_positive_usize("0"), None);
+        assert_eq!(parse_positive_usize("many"), None);
+    }
+
+    #[test]
+    fn default_worker_concurrency_is_positive() {
+        assert!(default_worker_concurrency() > 0);
+    }
+
+    #[test]
+    fn strict_optional_bool_parser_accepts_operator_spellings() {
+        assert_eq!(parse_optional_bool_value("true"), Some(true));
+        assert_eq!(parse_optional_bool_value("off"), Some(false));
+        assert_eq!(parse_optional_bool_value("maybe"), None);
     }
 }

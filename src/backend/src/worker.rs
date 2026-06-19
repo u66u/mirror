@@ -144,6 +144,7 @@ pub fn production_job_kinds(face_recognition_enabled: bool) -> Vec<JobKind> {
     let mut kinds = vec![
         JobKind::ExtractMetadata,
         JobKind::GenerateDerivatives,
+        JobKind::EmbedAsset,
         JobKind::IntegrityScan,
     ];
     if face_recognition_enabled {

@@ -78,6 +78,11 @@ fn assignments_cannot_cross_owner_boundaries() {
 
 #[test]
 fn production_job_kinds_gate_face_indexing() {
-    assert!(!production_job_kinds(false).contains(&JobKind::IndexFaces));
-    assert!(production_job_kinds(true).contains(&JobKind::IndexFaces));
+    let without_faces = production_job_kinds(false);
+    assert!(without_faces.contains(&JobKind::EmbedAsset));
+    assert!(!without_faces.contains(&JobKind::IndexFaces));
+
+    let with_faces = production_job_kinds(true);
+    assert!(with_faces.contains(&JobKind::EmbedAsset));
+    assert!(with_faces.contains(&JobKind::IndexFaces));
 }

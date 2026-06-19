@@ -23,10 +23,24 @@ use crate::{
     storage::StorageKey,
 };
 
+/// Optional ONNX session execution overrides.
+///
+/// `None` leaves the corresponding ONNX Runtime default untouched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OnnxSessionOptions {
+    /// Threads used to parallelize work within an operator.
+    pub intra_threads: Option<usize>,
+    /// Threads used to parallelize independent graph operators.
+    pub inter_threads: Option<usize>,
+    /// Whether independent graph operators may execute in parallel.
+    pub parallel_execution: Option<bool>,
+}
+
 /// Production image/text embedder backed by ONNX Runtime.
 pub struct OnnxImageTextEmbedder {
     storage_root: PathBuf,
     device: MlDevicePreference,
+    session_options: OnnxSessionOptions,
     heif_convert_path: PathBuf,
     cache: Mutex<HashMap<Uuid, Arc<ModelPackRuntime>>>,
 }
@@ -42,7 +56,22 @@ impl OnnxImageTextEmbedder {
     /// pack so worker startup does not require any installed packs.
     #[must_use]
     pub fn new(storage_root: PathBuf, device: MlDevicePreference) -> Self {
-        Self::with_heif_converter(storage_root, device, "heif-convert")
+        Self::with_session_options(storage_root, device, OnnxSessionOptions::default())
+    }
+
+    /// Creates a lazy ONNX runtime with explicit session execution overrides.
+    #[must_use]
+    pub fn with_session_options(
+        storage_root: PathBuf,
+        device: MlDevicePreference,
+        session_options: OnnxSessionOptions,
+    ) -> Self {
+        Self::with_session_options_and_heif_converter(
+            storage_root,
+            device,
+            session_options,
+            "heif-convert",
+        )
     }
 
     /// Creates a lazy ONNX runtime with an explicit HEIC/HEIF converter.
@@ -50,6 +79,22 @@ impl OnnxImageTextEmbedder {
     pub fn with_heif_converter(
         storage_root: PathBuf,
         device: MlDevicePreference,
+        heif_convert_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self::with_session_options_and_heif_converter(
+            storage_root,
+            device,
+            OnnxSessionOptions::default(),
+            heif_convert_path,
+        )
+    }
+
+    /// Creates a lazy runtime with explicit session and HEIF conversion settings.
+    #[must_use]
+    pub fn with_session_options_and_heif_converter(
+        storage_root: PathBuf,
+        device: MlDevicePreference,
+        session_options: OnnxSessionOptions,
         heif_convert_path: impl Into<PathBuf>,
     ) -> Self {
         match device {
@@ -67,6 +112,7 @@ impl OnnxImageTextEmbedder {
         Self {
             storage_root,
             device,
+            session_options,
             heif_convert_path: heif_convert_path.into(),
             cache: Mutex::new(HashMap::new()),
         }
@@ -87,21 +133,23 @@ impl OnnxImageTextEmbedder {
         }
 
         let runtime = Arc::new(ModelPackRuntime {
-            image_session: Mutex::new(open_session(
+            image_session: Mutex::new(open_session_with_options(
                 &model_pack_file_path(
                     &self.storage_root,
                     model_pack_id,
                     &manifest.onnx.image_model_path,
                 )?,
                 self.device,
+                self.session_options,
             )?),
-            text_session: Mutex::new(open_session(
+            text_session: Mutex::new(open_session_with_options(
                 &model_pack_file_path(
                     &self.storage_root,
                     model_pack_id,
                     &manifest.onnx.text_model_path,
                 )?,
                 self.device,
+                self.session_options,
             )?),
             tokenizer: Tokenizer::from_file(model_pack_file_path(
                 &self.storage_root,
@@ -181,8 +229,27 @@ impl ImageTextEmbedder for OnnxImageTextEmbedder {
     }
 }
 
-pub(crate) fn open_session(path: &Path, device: MlDevicePreference) -> Result<Session, MlError> {
+pub(crate) fn open_session_with_options(
+    path: &Path,
+    device: MlDevicePreference,
+    options: OnnxSessionOptions,
+) -> Result<Session, MlError> {
     let mut builder = Session::builder().map_err(|_| MlError::RuntimeUnavailable)?;
+    if let Some(intra_threads) = options.intra_threads {
+        builder = builder
+            .with_intra_threads(intra_threads)
+            .map_err(|_| MlError::RuntimeUnavailable)?;
+    }
+    if let Some(inter_threads) = options.inter_threads {
+        builder = builder
+            .with_inter_threads(inter_threads)
+            .map_err(|_| MlError::RuntimeUnavailable)?;
+    }
+    if let Some(parallel_execution) = options.parallel_execution {
+        builder = builder
+            .with_parallel_execution(parallel_execution)
+            .map_err(|_| MlError::RuntimeUnavailable)?;
+    }
     match device {
         MlDevicePreference::CpuOnly => {}
         MlDevicePreference::GpuWithCpuFallback => {

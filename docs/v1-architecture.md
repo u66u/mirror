@@ -422,6 +422,16 @@ Shared ML infrastructure:
 - `MIRROR_ML_DEVICE` selects `gpu_with_cpu_fallback`, `cpu_only`, or
   `gpu_only`. GPU fallback behavior is logged explicitly so CPU fallback is not
   mistaken for normal GPU performance.
+- `MIRROR_ML_INTRA_THREADS`, `MIRROR_ML_INTER_THREADS`, and
+  `MIRROR_ML_PARALLEL_EXECUTION` optionally override ONNX Runtime threading and
+  graph-parallel execution. When unset, Mirror leaves the loaded ONNX Runtime
+  defaults untouched.
+- `MIRROR_ML_MAX_CONCURRENT_INFERENCES` optionally caps concurrent runtime
+  calls at the Mirror boundary. When unset, Mirror does not install an
+  application-level inference semaphore.
+- `MIRROR_WORKER_CONCURRENCY` optionally sets the number of durable job lanes in
+  the production worker. When unset, the worker uses the host's reported
+  available parallelism.
 - Advanced user-supplied models are allowed only if they provide a compatible
   manifest and pass self-tests.
 

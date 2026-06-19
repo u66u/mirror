@@ -33,11 +33,11 @@ const MAX_REINDEX_ERROR_MESSAGE_CHARS: usize = 1_000;
 ///
 /// `ImageTextEmbedder` implementations are synchronous because many ML runtimes
 /// expose blocking APIs. This wrapper moves those calls onto Tokio's blocking
-/// pool and bounds concurrent inference.
+/// pool and can optionally bound concurrent inference.
 #[derive(Clone)]
 pub struct MlRuntime<E: ?Sized> {
     embedder: Arc<E>,
-    permits: Arc<Semaphore>,
+    permits: Option<Arc<Semaphore>>,
     max_image_bytes: usize,
 }
 
@@ -58,7 +58,22 @@ impl<E: ?Sized> MlRuntime<E> {
     ) -> Self {
         Self {
             embedder,
-            permits: Arc::new(Semaphore::new(max_concurrent_embeddings.get())),
+            permits: Some(Arc::new(Semaphore::new(max_concurrent_embeddings.get()))),
+            max_image_bytes: max_image_bytes.max(1),
+        }
+    }
+
+    /// Creates a runtime with an optional inference-concurrency cap.
+    ///
+    /// `None` leaves concurrency uncapped at this application boundary.
+    pub fn with_optional_concurrency_and_max_image_bytes(
+        embedder: Arc<E>,
+        max_concurrent_embeddings: Option<NonZeroUsize>,
+        max_image_bytes: usize,
+    ) -> Self {
+        Self {
+            embedder,
+            permits: max_concurrent_embeddings.map(|limit| Arc::new(Semaphore::new(limit.get()))),
             max_image_bytes: max_image_bytes.max(1),
         }
     }
@@ -75,12 +90,7 @@ where
         model_pack_id: Uuid,
         manifest: ModelPackManifest,
     ) -> Result<Vec<f32>, MlError> {
-        let permit = self
-            .permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| MlError::RuntimeUnavailable)?;
+        let permit = acquire_inference_permit(&self.permits).await?;
 
         let embedder = self.embedder.clone();
 
@@ -104,12 +114,7 @@ where
         model_pack_id: Uuid,
         manifest: ModelPackManifest,
     ) -> Result<Vec<f32>, MlError> {
-        let permit = self
-            .permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| MlError::RuntimeUnavailable)?;
+        let permit = acquire_inference_permit(&self.permits).await?;
 
         let embedder = self.embedder.clone();
 
@@ -125,6 +130,19 @@ where
         .await
         .map_err(|_| MlError::RuntimeUnavailable)?
     }
+}
+
+async fn acquire_inference_permit(
+    permits: &Option<Arc<Semaphore>>,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, MlError> {
+    let Some(permits) = permits else {
+        return Ok(None);
+    };
+    Arc::clone(permits)
+        .acquire_owned()
+        .await
+        .map(Some)
+        .map_err(|_| MlError::RuntimeUnavailable)
 }
 
 /// Image embedding request passed to the configured runtime.

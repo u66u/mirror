@@ -12,7 +12,7 @@ use mirror_backend::{
     face::{OnnxFaceRuntime, SharedFaceRuntime},
     http,
     ml::{ImageTextEmbedder, SharedImageTextRuntime},
-    onnx_embedder::OnnxImageTextEmbedder,
+    onnx_embedder::{OnnxImageTextEmbedder, OnnxSessionOptions},
     runtime::io_other,
     state::AppState,
     storage::ObjectStorage,
@@ -37,18 +37,28 @@ async fn main() -> std::io::Result<()> {
         setup,
         storage,
     };
-    let embedder: Arc<dyn ImageTextEmbedder + Send + Sync> = Arc::new(OnnxImageTextEmbedder::new(
-        config.storage_root.clone(),
-        config.ml_device,
-    ));
-    let ml_runtime = SharedImageTextRuntime::with_max_image_bytes(
+    let session_options = OnnxSessionOptions {
+        intra_threads: config.ml_intra_threads,
+        inter_threads: config.ml_inter_threads,
+        parallel_execution: config.ml_parallel_execution,
+    };
+    let embedder: Arc<dyn ImageTextEmbedder + Send + Sync> =
+        Arc::new(OnnxImageTextEmbedder::with_session_options(
+            config.storage_root.clone(),
+            config.ml_device,
+            session_options,
+        ));
+    let ml_runtime = SharedImageTextRuntime::with_optional_concurrency_and_max_image_bytes(
         embedder,
-        NonZeroUsize::MIN,
+        config
+            .ml_max_concurrent_inferences
+            .and_then(NonZeroUsize::new),
         config.ml_max_image_bytes,
     );
-    let face_runtime: SharedFaceRuntime = Arc::new(OnnxFaceRuntime::new(
+    let face_runtime: SharedFaceRuntime = Arc::new(OnnxFaceRuntime::with_session_options(
         config.storage_root.clone(),
         config.ml_device,
+        session_options,
     ));
     let state_data = web::Data::new(state.clone());
     let ml_runtime_data = web::Data::new(ml_runtime);
