@@ -158,7 +158,7 @@ impl ImageTextEmbedder for OnnxImageTextEmbedder {
     }
 }
 
-fn open_session(path: &Path, device: MlDevicePreference) -> Result<Session, MlError> {
+pub(crate) fn open_session(path: &Path, device: MlDevicePreference) -> Result<Session, MlError> {
     let mut builder = Session::builder().map_err(|_| MlError::RuntimeUnavailable)?;
     match device {
         MlDevicePreference::CpuOnly => {}
@@ -178,7 +178,7 @@ fn open_session(path: &Path, device: MlDevicePreference) -> Result<Session, MlEr
         .map_err(|_| MlError::RuntimeUnavailable)
 }
 
-fn extract_output(
+pub(crate) fn extract_output(
     outputs: &ort::session::SessionOutputs<'_>,
     output_name: &str,
 ) -> Result<Vec<f32>, MlError> {
@@ -191,7 +191,7 @@ fn extract_output(
     Ok(values.to_vec())
 }
 
-fn model_pack_file_path(
+pub(crate) fn model_pack_file_path(
     storage_root: &Path,
     model_pack_id: Uuid,
     relative_path: &str,
@@ -209,7 +209,7 @@ fn validate_semantic_onnx_manifest(manifest: &ModelPackManifest) -> Result<(), M
     Ok(())
 }
 
-fn preprocess_image_for_onnx(
+pub(crate) fn preprocess_image_for_onnx(
     bytes: &[u8],
     media_type: &str,
     manifest: &ModelPackManifest,
@@ -239,8 +239,12 @@ fn preprocess_image_for_onnx(
                 let y = usize::try_from(y).map_err(|_| MlError::RuntimeUnavailable)?;
                 let channels = ordered_channels(pixel.0, bgr);
                 for (channel, raw) in channels.iter().enumerate() {
-                    values[channel * width * height + y * width + x] =
-                        normalize_channel(*raw, channel, manifest);
+                    values[channel * width * height + y * width + x] = normalize_channel(
+                        *raw,
+                        manifest.image_preprocess.mean,
+                        manifest.image_preprocess.std,
+                        channel,
+                    );
                 }
             }
             Ok((vec![1, 3, height, width], values))
@@ -252,7 +256,12 @@ fn preprocess_image_for_onnx(
                 let base = (y * width + x) * 3;
                 let channels = ordered_channels(pixel.0, bgr);
                 for (channel, raw) in channels.iter().enumerate() {
-                    values[base + channel] = normalize_channel(*raw, channel, manifest);
+                    values[base + channel] = normalize_channel(
+                        *raw,
+                        manifest.image_preprocess.mean,
+                        manifest.image_preprocess.std,
+                        channel,
+                    );
                 }
             }
             Ok((vec![1, height, width, 3], values))
@@ -261,109 +270,11 @@ fn preprocess_image_for_onnx(
     }
 }
 
-fn ordered_channels(rgb: [u8; 3], bgr: bool) -> [u8; 3] {
+pub(crate) fn ordered_channels(rgb: [u8; 3], bgr: bool) -> [u8; 3] {
     if bgr { [rgb[2], rgb[1], rgb[0]] } else { rgb }
 }
 
-fn normalize_channel(raw: u8, channel: usize, manifest: &ModelPackManifest) -> f32 {
+pub(crate) fn normalize_channel(raw: u8, mean: [f32; 3], std: [f32; 3], channel: usize) -> f32 {
     let scaled = f32::from(raw) / 255.0;
-    (scaled - manifest.image_preprocess.mean[channel]) / manifest.image_preprocess.std[channel]
-}
-
-#[cfg(test)]
-mod tests {
-    use image::{ImageBuffer, ImageFormat, Rgb};
-
-    use super::*;
-    use crate::models::{ModelPackFileManifest, ModelPackSelfTestManifest, OnnxModelPackConfig};
-
-    #[test]
-    fn preprocess_image_honors_nchw_rgb_normalization() -> Result<(), Box<dyn std::error::Error>> {
-        let manifest = test_manifest("nchw", "rgb");
-        let bytes = png_bytes([[255, 0, 0], [0, 128, 255]])?;
-
-        let (shape, values) = preprocess_image_for_onnx(&bytes, "image/png", &manifest)?;
-
-        assert_eq!(shape, vec![1, 3, 1, 2]);
-        assert_eq!(values, vec![1.0, 0.0, 0.0, 128.0 / 255.0, 0.0, 1.0]);
-        Ok(())
-    }
-
-    #[test]
-    fn preprocess_image_honors_nhwc_bgr_normalization() -> Result<(), Box<dyn std::error::Error>> {
-        let mut manifest = test_manifest("nhwc", "bgr");
-        manifest.image_preprocess.mean = [0.5, 0.5, 0.5];
-        manifest.image_preprocess.std = [0.5, 0.5, 0.5];
-        let bytes = png_bytes([[255, 0, 0], [0, 128, 255]])?;
-
-        let (shape, values) = preprocess_image_for_onnx(&bytes, "image/png", &manifest)?;
-
-        assert_eq!(shape, vec![1, 1, 2, 3]);
-        assert_eq!(
-            values,
-            vec![-1.0, -1.0, 1.0, 1.0, (128.0 / 255.0 - 0.5) / 0.5, -1.0]
-        );
-        Ok(())
-    }
-
-    fn png_bytes(pixels: [[u8; 3]; 2]) -> Result<Vec<u8>, image::ImageError> {
-        let mut image = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(2, 1);
-        image.put_pixel(0, 0, Rgb(pixels[0]));
-        image.put_pixel(1, 0, Rgb(pixels[1]));
-        let mut cursor = std::io::Cursor::new(Vec::new());
-        image.write_to(&mut cursor, ImageFormat::Png)?;
-        Ok(cursor.into_inner())
-    }
-
-    fn test_manifest(layout: &str, color_order: &str) -> ModelPackManifest {
-        ModelPackManifest {
-            kind: "semantic_image_text".to_owned(),
-            runtime: "onnx".to_owned(),
-            model_key: "test".to_owned(),
-            model_revision: "1".to_owned(),
-            license: "test".to_owned(),
-            embedding_dimension: 3,
-            distance_metric: "cosine".to_owned(),
-            onnx: OnnxModelPackConfig {
-                image_model_path: "image.onnx".to_owned(),
-                text_model_path: "text.onnx".to_owned(),
-                tokenizer_path: "tokenizer.json".to_owned(),
-                image_input_name: "image".to_owned(),
-                image_output_name: "image_embedding".to_owned(),
-                text_input_ids_name: "input_ids".to_owned(),
-                text_attention_mask_name: "attention_mask".to_owned(),
-                text_output_name: "text_embedding".to_owned(),
-            },
-            image_preprocess: crate::models::ImagePreprocessConfig {
-                width: 2,
-                height: 1,
-                color_order: color_order.to_owned(),
-                tensor_layout: layout.to_owned(),
-                mean: [0.0, 0.0, 0.0],
-                std: [1.0, 1.0, 1.0],
-            },
-            files: vec![
-                ModelPackFileManifest {
-                    path: "image.onnx".to_owned(),
-                    sha256: "0".repeat(64),
-                    size_bytes: 1,
-                },
-                ModelPackFileManifest {
-                    path: "text.onnx".to_owned(),
-                    sha256: "0".repeat(64),
-                    size_bytes: 1,
-                },
-                ModelPackFileManifest {
-                    path: "tokenizer.json".to_owned(),
-                    sha256: "0".repeat(64),
-                    size_bytes: 1,
-                },
-            ],
-            self_tests: vec![ModelPackSelfTestManifest {
-                name: "image".to_owned(),
-                input_path: "image.png".to_owned(),
-                expected_output_sha256: "0".repeat(64),
-            }],
-        }
-    }
+    (scaled - mean[channel]) / std[channel]
 }

@@ -12,6 +12,7 @@ pub mod error;
 pub mod exports;
 pub mod health;
 pub mod model_packs;
+pub mod people;
 pub mod search;
 pub mod setup;
 pub mod shares;
@@ -45,6 +46,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(model_packs::activate_model_pack_route)
         .service(model_packs::start_model_reindex_route)
         .service(model_packs::list_model_reindex_runs_route)
+        .service(people::list_people_route)
+        .service(people::rename_person_route)
+        .service(people::hide_person_route)
+        .service(people::merge_people_route)
+        .service(people::split_faces_route)
+        .service(people::unassign_faces_route)
         .service(search::search_route)
         .service(shares::create_share_route)
         .service(shares::revoke_share_route)

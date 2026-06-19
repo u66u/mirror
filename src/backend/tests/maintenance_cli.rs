@@ -298,6 +298,8 @@ fn write_cli_model_pack() -> TestResult<TempDir> {
             mean: [0.5, 0.5, 0.5],
             std: [0.5, 0.5, 0.5],
         },
+        face_detection: None,
+        face_embedding: None,
         files: vec![
             cli_file_manifest("models/image_encoder.onnx", b"image")?,
             cli_file_manifest("models/text_encoder.onnx", b"text")?,

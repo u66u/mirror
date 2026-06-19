@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::{
     assets::{self, PromotedUpload},
     config::RateLimitQuota,
+    face,
     http::{auth, error::ApiError},
     rate_limit::{self, QuotaInput},
     state::AppState,
@@ -158,6 +159,11 @@ pub async fn complete_upload_route(
     let upload = uploads::complete_upload(pool, storage, current.owner_id(), upload_id).await?;
     let promoted =
         assets::promote_verified_upload(pool, storage, current.owner_id(), upload_id).await?;
+    if state.config.face_recognition_enabled {
+        face::enqueue_face_index(pool, promoted.asset_internal_id)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+    }
 
     Ok(HttpResponse::Ok().json(CompleteUploadResponse { upload, promoted }))
 }

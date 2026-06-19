@@ -268,6 +268,8 @@ pub fn valid_model_pack_manifest() -> ModelPackManifest {
         distance_metric: "cosine".to_owned(),
         onnx: valid_onnx_config(),
         image_preprocess: valid_image_preprocess(),
+        face_detection: None,
+        face_embedding: None,
         files: vec![
             ModelPackFileManifest {
                 path: "models/image_encoder.onnx".to_owned(),
@@ -319,9 +321,54 @@ pub fn valid_image_preprocess() -> ImagePreprocessConfig {
     }
 }
 
+#[allow(dead_code)] // T506: shared face detector fixture config.
+pub fn valid_face_detection_config() -> mirror_backend::models::FaceDetectionModelConfig {
+    mirror_backend::models::FaceDetectionModelConfig {
+        model_path: "models/face_detector.onnx".to_owned(),
+        input_name: "image".to_owned(),
+        boxes_output_name: "boxes".to_owned(),
+        scores_output_name: "scores".to_owned(),
+        landmarks_output_name: None,
+        box_coordinate_space: "normalized".to_owned(),
+        box_format: "xywh".to_owned(),
+        score_threshold: 0.5,
+        nms_threshold: 0.3,
+        max_faces: 100,
+    }
+}
+
+#[allow(dead_code)] // T506: shared face embedding fixture config.
+pub fn valid_face_embedding_config() -> mirror_backend::models::FaceEmbeddingModelConfig {
+    mirror_backend::models::FaceEmbeddingModelConfig {
+        model_path: "models/face_embedding.onnx".to_owned(),
+        input_name: "face".to_owned(),
+        output_name: "embedding".to_owned(),
+        width: 112,
+        height: 112,
+        color_order: "rgb".to_owned(),
+        tensor_layout: "nchw".to_owned(),
+        alignment: "five_point".to_owned(),
+        mean: [0.5, 0.5, 0.5],
+        std: [0.5, 0.5, 0.5],
+        match_threshold: 0.75,
+    }
+}
+
 impl From<VideoToolError> for TestError {
     fn from(error: VideoToolError) -> Self {
         Self::new("video tool failed", error)
+    }
+}
+
+impl From<mirror_backend::face::FaceIndexError> for TestError {
+    fn from(error: mirror_backend::face::FaceIndexError) -> Self {
+        Self::new("face index failed", error)
+    }
+}
+
+impl From<mirror_backend::people::PeopleReviewError> for TestError {
+    fn from(error: mirror_backend::people::PeopleReviewError) -> Self {
+        Self::new("people review failed", error)
     }
 }
 

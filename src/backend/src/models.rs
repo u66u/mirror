@@ -14,7 +14,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -122,6 +122,12 @@ pub struct ModelPackManifest {
     pub onnx: OnnxModelPackConfig,
     /// Image preprocessing contract for image inputs.
     pub image_preprocess: ImagePreprocessConfig,
+    /// Face detection contract for face model packs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_detection: Option<FaceDetectionModelConfig>,
+    /// Face embedding contract for face model packs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_embedding: Option<FaceEmbeddingModelConfig>,
     /// Files included in the model pack.
     pub files: Vec<ModelPackFileManifest>,
     /// Golden self-tests that must pass before activation.
@@ -164,6 +170,63 @@ pub struct ImagePreprocessConfig {
     pub mean: [f32; 3],
     /// Per-channel input standard deviation.
     pub std: [f32; 3],
+}
+
+/// ONNX face detector output contract.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct FaceDetectionModelConfig {
+    /// ONNX model used for face detection.
+    pub model_path: String,
+    /// Image tensor input name.
+    pub input_name: String,
+    /// Face box tensor output name.
+    pub boxes_output_name: String,
+    /// Face score tensor output name.
+    pub scores_output_name: String,
+    /// Optional landmarks tensor output name.
+    pub landmarks_output_name: Option<String>,
+    /// Box coordinate space: `normalized` or `pixel`.
+    pub box_coordinate_space: String,
+    /// Box format: `xywh` or `xyxy`.
+    pub box_format: String,
+    /// Minimum score accepted into the face pipeline.
+    pub score_threshold: f32,
+    /// IoU threshold used by NMS.
+    pub nms_threshold: f32,
+    /// Maximum faces stored per asset.
+    pub max_faces: i32,
+}
+
+/// ONNX face embedding input/output contract.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct FaceEmbeddingModelConfig {
+    /// ONNX model used for face identity embeddings.
+    pub model_path: String,
+    /// Face crop tensor input name.
+    pub input_name: String,
+    /// Face embedding tensor output name.
+    pub output_name: String,
+    /// Face crop target width.
+    pub width: u32,
+    /// Face crop target height.
+    pub height: u32,
+    /// Channel order expected by the embedding model.
+    pub color_order: String,
+    /// Tensor layout expected by the embedding model.
+    pub tensor_layout: String,
+    /// Face crop preparation: `bbox_crop` or `five_point`.
+    #[serde(default = "default_face_alignment")]
+    pub alignment: String,
+    /// Per-channel input mean.
+    pub mean: [f32; 3],
+    /// Per-channel input standard deviation.
+    pub std: [f32; 3],
+    /// Cosine similarity threshold for auto-assigning to an existing person.
+    pub match_threshold: f32,
+}
+
+fn default_face_alignment() -> String {
+    "five_point".to_owned()
 }
 
 /// One model-pack file selected by path and checksum.
@@ -613,7 +676,6 @@ pub async fn activate_model_pack(
     if row.self_test_status != "passed" {
         return Err(ModelPackError::SelfTestRequired);
     }
-
     sqlx::query!(
         r#"
         UPDATE model_packs
@@ -668,6 +730,7 @@ pub async fn start_model_reindex(
     if row.self_test_status != "passed" {
         return Err(ModelPackError::SelfTestRequired);
     }
+    let model_kind = row.kind;
 
     let asset_ids: Vec<Uuid> = sqlx::query_scalar!(
         r#"
@@ -704,12 +767,26 @@ pub async fn start_model_reindex(
         "#,
         run_id,
         model_pack_id,
-        row.kind,
+        model_kind,
         status,
         total_assets
     )
     .fetch_one(&mut *tx)
     .await?;
+
+    let face_pair = match model_kind.as_str() {
+        "semantic_image_text" => None,
+        "face_identity" => Some((model_pack_id, model_pack_id)),
+        "face_detection" => Some((
+            model_pack_id,
+            active_face_counterpart(&mut tx, &["face_embedding", "face_identity"]).await?,
+        )),
+        "face_embedding" => Some((
+            active_face_counterpart(&mut tx, &["face_detection", "face_identity"]).await?,
+            model_pack_id,
+        )),
+        _ => return Err(ModelPackError::InvalidManifest("kind")),
+    };
 
     for asset_id in asset_ids {
         sqlx::query!(
@@ -722,17 +799,30 @@ pub async fn start_model_reindex(
         )
         .execute(&mut *tx)
         .await?;
+        let (kind, payload) =
+            if let Some((detection_model_pack_id, embedding_model_pack_id)) = face_pair {
+                (
+                    JobKind::IndexFaces,
+                    json!({
+                        "asset_id": asset_id,
+                        "detection_model_pack_id": detection_model_pack_id,
+                        "embedding_model_pack_id": embedding_model_pack_id,
+                        "reindex_run_id": run_id,
+                    }),
+                )
+            } else {
+                (
+                    JobKind::EmbedAsset,
+                    json!({
+                        "asset_id": asset_id,
+                        "model_pack_id": model_pack_id,
+                        "reindex_run_id": run_id,
+                    }),
+                )
+            };
         jobs::enqueue_in_tx(
             &mut tx,
-            JobSpec::immediate(
-                JobKind::EmbedAsset,
-                json!({
-                    "asset_id": asset_id,
-                    "model_pack_id": model_pack_id,
-                    "reindex_run_id": run_id,
-                }),
-                format!("model-reindex:{run_id}:{asset_id}"),
-            ),
+            JobSpec::immediate(kind, payload, format!("model-reindex:{run_id}:{asset_id}")),
         )
         .await?;
     }
@@ -747,6 +837,27 @@ pub async fn start_model_reindex(
         processed_assets: row.processed_assets,
         failed_assets: row.failed_assets,
     })
+}
+
+async fn active_face_counterpart(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    kinds: &[&str],
+) -> Result<Uuid, ModelPackError> {
+    let row = sqlx::query(
+        r#"
+        SELECT id
+        FROM model_packs
+        WHERE kind = ANY($1)
+          AND status = 'active'
+          AND self_test_status = 'passed'
+        ORDER BY activated_at DESC NULLS LAST, updated_at DESC, id ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(kinds)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|row| row.get("id")).ok_or(ModelPackError::NotFound)
 }
 
 /// Lists recent reindex runs for one model pack.
@@ -943,6 +1054,39 @@ pub fn validate_model_pack_manifest(
         "onnx.text_model_path",
     )?;
     require_manifest_file(&paths, &manifest.onnx.tokenizer_path, "onnx.tokenizer_path")?;
+    match kind {
+        ModelPackKind::SemanticImageText => {}
+        ModelPackKind::FaceDetection => {
+            let config = manifest
+                .face_detection
+                .as_ref()
+                .ok_or(ModelPackError::InvalidManifest("face_detection"))?;
+            validate_face_detection_config(config)?;
+            require_manifest_file(&paths, &config.model_path, "face_detection.model_path")?;
+        }
+        ModelPackKind::FaceEmbedding => {
+            let config = manifest
+                .face_embedding
+                .as_ref()
+                .ok_or(ModelPackError::InvalidManifest("face_embedding"))?;
+            validate_face_embedding_config(config)?;
+            require_manifest_file(&paths, &config.model_path, "face_embedding.model_path")?;
+        }
+        ModelPackKind::FaceIdentity => {
+            let detection = manifest
+                .face_detection
+                .as_ref()
+                .ok_or(ModelPackError::InvalidManifest("face_detection"))?;
+            let embedding = manifest
+                .face_embedding
+                .as_ref()
+                .ok_or(ModelPackError::InvalidManifest("face_embedding"))?;
+            validate_face_detection_config(detection)?;
+            validate_face_embedding_config(embedding)?;
+            require_manifest_file(&paths, &detection.model_path, "face_detection.model_path")?;
+            require_manifest_file(&paths, &embedding.model_path, "face_embedding.model_path")?;
+        }
+    }
 
     Ok(ValidatedModelPackManifest {
         kind,
@@ -964,6 +1108,95 @@ fn validate_onnx_config(config: &OnnxModelPackConfig) -> Result<(), ModelPackErr
         "onnx.text_attention_mask_name",
     )?;
     require_text(&config.text_output_name, 120, "onnx.text_output_name")?;
+    Ok(())
+}
+
+fn validate_face_detection_config(config: &FaceDetectionModelConfig) -> Result<(), ModelPackError> {
+    validate_pack_path(&config.model_path, "face_detection.model_path")?;
+    require_text(&config.input_name, 120, "face_detection.input_name")?;
+    require_text(
+        &config.boxes_output_name,
+        120,
+        "face_detection.boxes_output_name",
+    )?;
+    require_text(
+        &config.scores_output_name,
+        120,
+        "face_detection.scores_output_name",
+    )?;
+    if let Some(name) = &config.landmarks_output_name {
+        require_text(name, 120, "face_detection.landmarks_output_name")?;
+    }
+    match config.box_coordinate_space.as_str() {
+        "normalized" | "pixel" => {}
+        _ => {
+            return Err(ModelPackError::InvalidManifest(
+                "face_detection.box_coordinate_space",
+            ));
+        }
+    }
+    match config.box_format.as_str() {
+        "xywh" | "xyxy" => {}
+        _ => return Err(ModelPackError::InvalidManifest("face_detection.box_format")),
+    }
+    if !(0.0..=1.0).contains(&config.score_threshold)
+        || !(0.0..=1.0).contains(&config.nms_threshold)
+        || !(1..=1_000).contains(&config.max_faces)
+    {
+        return Err(ModelPackError::InvalidManifest("face_detection.thresholds"));
+    }
+    Ok(())
+}
+
+fn validate_face_embedding_config(config: &FaceEmbeddingModelConfig) -> Result<(), ModelPackError> {
+    validate_pack_path(&config.model_path, "face_embedding.model_path")?;
+    require_text(&config.input_name, 120, "face_embedding.input_name")?;
+    require_text(&config.output_name, 120, "face_embedding.output_name")?;
+    if config.width == 0 || config.width > 4096 {
+        return Err(ModelPackError::InvalidManifest("face_embedding.width"));
+    }
+    if config.height == 0 || config.height > 4096 {
+        return Err(ModelPackError::InvalidManifest("face_embedding.height"));
+    }
+    match config.color_order.as_str() {
+        "rgb" | "bgr" => {}
+        _ => {
+            return Err(ModelPackError::InvalidManifest(
+                "face_embedding.color_order",
+            ));
+        }
+    }
+    match config.tensor_layout.as_str() {
+        "nchw" | "nhwc" => {}
+        _ => {
+            return Err(ModelPackError::InvalidManifest(
+                "face_embedding.tensor_layout",
+            ));
+        }
+    }
+    match config.alignment.as_str() {
+        "bbox_crop" | "five_point" => {}
+        _ => return Err(ModelPackError::InvalidManifest("face_embedding.alignment")),
+    }
+    if config
+        .mean
+        .iter()
+        .any(|value| !value.is_finite() || value.abs() > 1_000.0)
+    {
+        return Err(ModelPackError::InvalidManifest("face_embedding.mean"));
+    }
+    if config
+        .std
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0 || *value > 1_000.0)
+    {
+        return Err(ModelPackError::InvalidManifest("face_embedding.std"));
+    }
+    if !(0.0..=1.0).contains(&config.match_threshold) {
+        return Err(ModelPackError::InvalidManifest(
+            "face_embedding.match_threshold",
+        ));
+    }
     Ok(())
 }
 

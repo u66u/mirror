@@ -2,6 +2,7 @@ use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 use mirror_backend::{
     assets::promote_verified_upload,
+    face::{FaceRuntime, FaceRuntimeRequest, IndexedFace, SharedFaceRuntime},
     jobs::{self, JobKind, JobSpec, enqueue_in_tx},
     media::RustImageProcessor,
     ml::{
@@ -30,6 +31,7 @@ use support::{
 async fn worker_runs_queued_media_jobs_to_completion() -> TestResult {
     let deps = storage_test_deps().await?;
     let ml_runtime = fake_ml_runtime();
+    let face_runtime = fake_face_runtime();
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "worker.jpg").await?;
     promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
 
@@ -40,6 +42,7 @@ async fn worker_runs_queued_media_jobs_to_completion() -> TestResult {
             image_processor: &FakeImageProcessor,
             video_processor: &FakeVideoProcessor,
             ml_runtime: &ml_runtime,
+            face_runtime: &face_runtime,
             job_kinds: &MEDIA_JOB_KINDS,
         },
         "worker-a",
@@ -53,6 +56,7 @@ async fn worker_runs_queued_media_jobs_to_completion() -> TestResult {
             image_processor: &FakeImageProcessor,
             video_processor: &FakeVideoProcessor,
             ml_runtime: &ml_runtime,
+            face_runtime: &face_runtime,
             job_kinds: &MEDIA_JOB_KINDS,
         },
         "worker-a",
@@ -74,6 +78,7 @@ async fn worker_runs_queued_media_jobs_to_completion() -> TestResult {
 async fn worker_records_handler_failure_as_dead_job_at_max_attempts() -> TestResult {
     let deps = storage_test_deps().await?;
     let ml_runtime = fake_ml_runtime();
+    let face_runtime = fake_face_runtime();
     let mut tx = deps.pool.begin().await?;
     enqueue_in_tx(
         &mut tx,
@@ -96,6 +101,7 @@ async fn worker_records_handler_failure_as_dead_job_at_max_attempts() -> TestRes
             image_processor: &RustImageProcessor,
             video_processor: &FakeVideoProcessor,
             ml_runtime: &ml_runtime,
+            face_runtime: &face_runtime,
             job_kinds: &MEDIA_JOB_KINDS,
         },
         "worker-a",
@@ -114,6 +120,7 @@ async fn worker_records_handler_failure_as_dead_job_at_max_attempts() -> TestRes
 async fn worker_times_out_slow_media_and_records_retry() -> TestResult {
     let deps = storage_test_deps().await?;
     let ml_runtime = fake_ml_runtime();
+    let face_runtime = fake_face_runtime();
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "timeout.jpg").await?;
     promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
     sqlx::query!("DELETE FROM jobs WHERE kind = 'generate_derivatives'")
@@ -134,6 +141,7 @@ async fn worker_times_out_slow_media_and_records_retry() -> TestResult {
             },
             video_processor: &FakeVideoProcessor,
             ml_runtime: &ml_runtime,
+            face_runtime: &face_runtime,
             job_kinds: &MEDIA_JOB_KINDS,
         },
         "worker-timeout",
@@ -163,6 +171,7 @@ async fn worker_heartbeat_prevents_slow_job_reclaim() -> TestResult {
     let pool = deps.pool.clone();
     let storage = deps.storage.clone();
     let ml_runtime = fake_ml_runtime();
+    let face_runtime = fake_face_runtime();
     let policy = WorkerPolicy::new(
         Duration::from_millis(80),
         Duration::from_secs(1),
@@ -178,6 +187,7 @@ async fn worker_heartbeat_prevents_slow_job_reclaim() -> TestResult {
                 },
                 video_processor: &FakeVideoProcessor,
                 ml_runtime: &ml_runtime,
+                face_runtime: &face_runtime,
                 job_kinds: &MEDIA_JOB_KINDS,
             },
             "worker-heartbeat",
@@ -201,6 +211,7 @@ async fn worker_heartbeat_prevents_slow_job_reclaim() -> TestResult {
 async fn worker_runs_embed_asset_job_to_semantic_index() -> TestResult {
     let deps = storage_test_deps().await?;
     let ml_runtime = fake_ml_runtime();
+    let face_runtime = fake_face_runtime();
     let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "embed.jpg").await?;
     let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
     sqlx::query!("DELETE FROM jobs").execute(&deps.pool).await?;
@@ -218,6 +229,7 @@ async fn worker_runs_embed_asset_job_to_semantic_index() -> TestResult {
             image_processor: &FakeImageProcessor,
             video_processor: &FakeVideoProcessor,
             ml_runtime: &ml_runtime,
+            face_runtime: &face_runtime,
             job_kinds: &ALL_JOB_KINDS,
         },
         "worker-embed",
@@ -264,6 +276,7 @@ async fn worker_dead_lettered_embed_job_records_reindex_failure() -> TestResult 
         .execute(&deps.pool)
         .await?;
     let ml_runtime = MlRuntime::new(Arc::new(FailingImageTextEmbedder), NonZeroUsize::MIN);
+    let face_runtime = fake_face_runtime();
 
     let step = run_once(
         &deps.pool,
@@ -272,6 +285,7 @@ async fn worker_dead_lettered_embed_job_records_reindex_failure() -> TestResult 
             image_processor: &FakeImageProcessor,
             video_processor: &FakeVideoProcessor,
             ml_runtime: &ml_runtime,
+            face_runtime: &face_runtime,
             job_kinds: &ALL_JOB_KINDS,
         },
         "worker-dead-embed",
@@ -352,6 +366,7 @@ async fn worker_records_oversized_embed_input_as_terminal_reindex_failure() -> T
         NonZeroUsize::MIN,
         8,
     );
+    let face_runtime = fake_face_runtime();
 
     let step = run_once(
         &deps.pool,
@@ -360,6 +375,7 @@ async fn worker_records_oversized_embed_input_as_terminal_reindex_failure() -> T
             image_processor: &FakeImageProcessor,
             video_processor: &FakeVideoProcessor,
             ml_runtime: &ml_runtime,
+            face_runtime: &face_runtime,
             job_kinds: &ALL_JOB_KINDS,
         },
         "worker-large-embed",
@@ -467,6 +483,21 @@ const ALL_JOB_KINDS: [JobKind; 3] = [
     JobKind::GenerateDerivatives,
     JobKind::EmbedAsset,
 ];
+
+fn fake_face_runtime() -> SharedFaceRuntime {
+    Arc::new(FakeFaceRuntime)
+}
+
+struct FakeFaceRuntime;
+
+impl FaceRuntime for FakeFaceRuntime {
+    fn detect_and_embed(
+        &self,
+        _request: FaceRuntimeRequest<'_>,
+    ) -> Result<Vec<IndexedFace>, mirror_backend::face::FaceIndexError> {
+        Ok(Vec::new())
+    }
+}
 
 struct FailingImageTextEmbedder;
 

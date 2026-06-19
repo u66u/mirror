@@ -12,7 +12,10 @@ use mirror_backend::{
 use uuid::Uuid;
 
 mod support;
-use support::{TestResult, fresh_owner_pool, valid_image_preprocess, valid_onnx_config};
+use support::{
+    TestResult, fresh_owner_pool, valid_face_detection_config, valid_face_embedding_config,
+    valid_image_preprocess, valid_onnx_config,
+};
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
@@ -354,6 +357,8 @@ fn semantic_manifest_with_dimension(
         distance_metric: distance_metric.to_owned(),
         onnx: valid_onnx_config(),
         image_preprocess: valid_image_preprocess(),
+        face_detection: None,
+        face_embedding: None,
         files: vec![
             ModelPackFileManifest {
                 path: "models/image_encoder.onnx".to_owned(),
@@ -384,6 +389,18 @@ fn face_manifest() -> ModelPackManifest {
     manifest.kind = "face_identity".to_owned();
     manifest.model_key = "test-face".to_owned();
     manifest.model_revision = format!("face-{}", Uuid::now_v7());
+    manifest.face_detection = Some(valid_face_detection_config());
+    manifest.face_embedding = Some(valid_face_embedding_config());
+    manifest.files.push(ModelPackFileManifest {
+        path: "models/face_detector.onnx".to_owned(),
+        sha256: "e".repeat(64),
+        size_bytes: 10,
+    });
+    manifest.files.push(ModelPackFileManifest {
+        path: "models/face_embedding.onnx".to_owned(),
+        sha256: "f".repeat(64),
+        size_bytes: 10,
+    });
     manifest
 }
 

@@ -140,8 +140,9 @@ Status values:
 - Caveat: Model downloads are executable-adjacent supply-chain inputs and model
   license changes can affect distribution.
 - Mitigation: Pinned revisions, checksums, license metadata, schema validation,
-  and golden self-tests before activation. Real face-runtime model contracts are
-  deferred to `docs/v2-backend-features.md`.
+  and golden self-tests before activation. Face model packs use the same
+  manifest/install/self-test gate and remain disabled until the owner enables
+  face recognition.
 
 ## C013: Embedding Revision Mixing
 

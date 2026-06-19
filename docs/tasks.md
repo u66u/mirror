@@ -1539,8 +1539,8 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 - Touched subsystems: backend, ml-worker, search, people
 - Deliverables:
   - SigLIP2 semantic asset embeddings.
-  - Backend people/face storage and review foundation. Real AuraFace/OpenCV
-    face runtime is V2.
+  - Backend people/face storage, ONNX face runtime, clustering, and review
+    routes.
   - People cluster review.
   - Web/Android search and people surfaces. (Out of current backend-only
     scope.)
@@ -1612,6 +1612,12 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       merge/split, hide, unassign, and owner-boundary rejection.
     - Added disabled-by-default `IndexFaces` worker job kind gated by
       `MIRROR_FACE_RECOGNITION_ENABLED`.
+    - Added ONNX face detection/embedding runtime support with detector boxes,
+      scores, optional 5-point landmarks, ArcFace-style alignment, embedding
+      extraction, cosine-threshold clustering, and concrete model-pack
+      revision storage.
+    - Added backend people review routes for listing clusters, rename/trust,
+      merge, split selected faces, unassign faces, and hide clusters.
   - Commands:
     - `docker compose -f infra/compose.yaml config` -> passed.
     - `make gate-backend` -> passed.
@@ -1665,9 +1671,9 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
   - Scope notes:
     - Real model runtime that produces image/text embeddings is tracked by
       T503.
-    - Real AuraFace/OpenCV face detection/embedding runtime is tracked in
-      `docs/v2-backend-features.md`; backend storage/review foundations are
-      complete for V1.
+    - Face recognition is implemented as an ONNX-first model-pack runtime for
+      V1; e2e accuracy/performance validation still depends on curated model
+      fixtures.
     - Web/Android search and people UI are deferred by current backend-only
       scope.
 
@@ -1902,8 +1908,8 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
 - Caveats/footguns:
   - Face recognition is privacy-sensitive and must stay owner-local.
   - Do not mix face embeddings with semantic image/text embeddings.
-  - Real AuraFace/OpenCV detection/alignment/embedding runtime is V2; V1 owns
-    only backend storage, model-pack kinds, job boundary, and review logic.
+  - Face runtime remains owner-disabled by default and requires a self-tested
+    active face model pack before indexing.
   - Avoid building web/Android people UI in this task.
 - Completion evidence:
   - Backend implementation:
@@ -1921,6 +1927,19 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
     - Added pure people review/clustering functions for rename/trust, merge,
       split, hide, and unassign; clusters are not trusted identity unless owner
       named/reviewed.
+    - Added production `OnnxFaceRuntime` for face detection and embedding from
+      installed model-pack files. It supports detector boxes/scores, optional
+      5-point landmarks, ArcFace-style aligned crops for embedding models, and
+      bbox crop fallback only when the manifest explicitly selects it.
+    - Face index jobs now load active combined or split face model packs, read
+      originals from storage, run blocking inference off the async reactor,
+      validate embeddings, persist face occurrences with detection model-pack
+      IDs, store face embeddings separately from semantic embeddings, and
+      auto-assign to existing people by cosine threshold or create unreviewed
+      people clusters.
+    - Added backend people-album HTTP routes for list, rename/trust,
+      merge, split, unassign, and hide. Mutating routes use unsafe owner auth
+      so browser sessions require CSRF.
     - No web/Android people UI was added.
   - Commands:
     - `make gate-backend` -> passed
@@ -1949,6 +1968,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       rejection without a real face model.
     - Worker unit test proves face indexing is absent from default production
       job kinds and present only when enabled.
+    - Face index DB test proves a promoted original with an active face model
+      pack writes a face occurrence, face embedding, person row, person-face
+      assignment, and detection model-pack ID through the job handler.
+    - People DB test covers persisted list, rename/trust, and hide behavior.
 
 ### T507: Upload And Object Integrity Worker
 

@@ -9,7 +9,8 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::{
-    face, integrity,
+    face::{self, SharedFaceRuntime},
+    integrity,
     jobs::{self, JobError, JobKind},
     media::{self, ImageProcessor},
     ml::{self, ImageTextEmbedder, MlRuntime},
@@ -131,6 +132,8 @@ pub struct WorkerHandlers<'a, I, V, E> {
     pub video_processor: &'a V,
     /// Semantic image/text runtime.
     pub ml_runtime: &'a MlRuntime<E>,
+    /// Face detection/embedding runtime.
+    pub face_runtime: &'a SharedFaceRuntime,
     /// Job kinds this worker is allowed to lease.
     pub job_kinds: &'a [JobKind],
 }
@@ -191,9 +194,11 @@ where
                     .await
                     .map_err(WorkerError::Ml)
             }
-            JobKind::IndexFaces => face::run_face_index_job(&job)
-                .await
-                .map_err(WorkerError::Face),
+            JobKind::IndexFaces => {
+                face::run_face_index_job(pool, handlers.storage, handlers.face_runtime, &job)
+                    .await
+                    .map_err(WorkerError::Face)
+            }
             JobKind::IntegrityScan => integrity::run_integrity_job(pool, handlers.storage, &job)
                 .await
                 .map_err(WorkerError::Integrity),
@@ -283,15 +288,4 @@ async fn fail_leased_job(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn production_job_kinds_gate_face_indexing() {
-        assert!(!production_job_kinds(false).contains(&JobKind::IndexFaces));
-        assert!(production_job_kinds(true).contains(&JobKind::IndexFaces));
-    }
 }

@@ -5,6 +5,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
+use sqlx::{PgPool, Row};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -57,7 +59,7 @@ pub struct PeopleReviewState {
 }
 
 /// People review invariant failure.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum PeopleReviewError {
     /// Person ID is unknown.
     #[error("person not found")]
@@ -71,6 +73,37 @@ pub enum PeopleReviewError {
     /// Person display name is empty or too long.
     #[error("person display name is invalid")]
     InvalidDisplayName,
+    /// Database failed.
+    #[error("people database error")]
+    Database(#[from] sqlx::Error),
+}
+
+impl PartialEq for PeopleReviewError {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::PersonNotFound, Self::PersonNotFound)
+                | (Self::FaceNotFound, Self::FaceNotFound)
+                | (Self::OwnerMismatch, Self::OwnerMismatch)
+                | (Self::InvalidDisplayName, Self::InvalidDisplayName)
+                | (Self::Database(_), Self::Database(_))
+        )
+    }
+}
+
+impl Eq for PeopleReviewError {}
+
+/// Owner-local people album summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersonSummary {
+    /// Person cluster ID.
+    pub person_id: Uuid,
+    /// Owner-supplied display name.
+    pub display_name: Option<String>,
+    /// Review state.
+    pub review_status: String,
+    /// Number of visible assigned faces.
+    pub face_count: i64,
 }
 
 impl PeopleReviewState {
@@ -267,84 +300,275 @@ pub fn is_user_trusted_identity(person: &PersonCluster) -> bool {
     person.review_status == PersonReviewStatus::Reviewed && person.display_name.is_some()
 }
 
+/// Lists owner-local people clusters.
+pub async fn list_people(
+    pool: &PgPool,
+    owner_id: i16,
+) -> Result<Vec<PersonSummary>, PeopleReviewError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT p.id, p.display_name, p.review_status, count(pf.face_occurrence_id) AS face_count
+        FROM people p
+        LEFT JOIN person_faces pf
+          ON pf.person_id = p.id
+         AND pf.owner_id = p.owner_id
+         AND pf.review_state = 'assigned'
+        WHERE p.owner_id = $1
+          AND p.review_status <> 'hidden'
+        GROUP BY p.id, p.display_name, p.review_status
+        ORDER BY p.review_status ASC, p.display_name ASC NULLS LAST, face_count DESC, p.created_at DESC
+        "#,
+    )
+    .bind(owner_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PersonSummary {
+            person_id: row.get("id"),
+            display_name: row.get("display_name"),
+            review_status: row.get("review_status"),
+            face_count: row.get("face_count"),
+        })
+        .collect())
+}
+
+/// Renames and trusts a persisted person cluster.
+pub async fn rename_person(
+    pool: &PgPool,
+    owner_id: i16,
+    person_id: Uuid,
+    name: &str,
+) -> Result<(), PeopleReviewError> {
+    let name = normalize_person_name(name)?;
+    let result = sqlx::query(
+        r#"
+        UPDATE people
+        SET display_name = $1, review_status = 'reviewed', updated_at = now()
+        WHERE id = $2 AND owner_id = $3 AND review_status <> 'hidden'
+        "#,
+    )
+    .bind(name)
+    .bind(person_id)
+    .bind(owner_id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(PeopleReviewError::PersonNotFound);
+    }
+    Ok(())
+}
+
+/// Hides a persisted person cluster and its assigned faces.
+pub async fn hide_person(
+    pool: &PgPool,
+    owner_id: i16,
+    person_id: Uuid,
+) -> Result<(), PeopleReviewError> {
+    let mut tx = pool.begin().await?;
+    let result = sqlx::query(
+        r#"
+        UPDATE people
+        SET review_status = 'hidden', updated_at = now()
+        WHERE id = $1 AND owner_id = $2
+        "#,
+    )
+    .bind(person_id)
+    .bind(owner_id)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(PeopleReviewError::PersonNotFound);
+    }
+    sqlx::query(
+        r#"
+        UPDATE person_faces
+        SET review_state = 'hidden', updated_at = now()
+        WHERE person_id = $1 AND owner_id = $2
+        "#,
+    )
+    .bind(person_id)
+    .bind(owner_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE face_occurrences fo
+        SET review_state = 'hidden', updated_at = now()
+        FROM person_faces pf
+        WHERE pf.face_occurrence_id = fo.id
+          AND pf.owner_id = fo.owner_id
+          AND pf.person_id = $1
+          AND pf.owner_id = $2
+        "#,
+    )
+    .bind(person_id)
+    .bind(owner_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Merges a source person into a target person.
+pub async fn merge_people(
+    pool: &PgPool,
+    owner_id: i16,
+    target_id: Uuid,
+    source_id: Uuid,
+) -> Result<(), PeopleReviewError> {
+    if target_id == source_id {
+        return Err(PeopleReviewError::PersonNotFound);
+    }
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, display_name, review_status
+        FROM people
+        WHERE owner_id = $1 AND id = ANY($2)
+        FOR UPDATE
+        "#,
+    )
+    .bind(owner_id)
+    .bind(&[target_id, source_id][..])
+    .fetch_all(&mut *tx)
+    .await?;
+    if rows.len() != 2 {
+        return Err(PeopleReviewError::PersonNotFound);
+    }
+    let source_name = rows
+        .iter()
+        .find(|row| row.get::<Uuid, _>("id") == source_id)
+        .and_then(|row| row.get::<Option<String>, _>("display_name"));
+    let source_reviewed = rows.iter().any(|row| {
+        row.get::<Uuid, _>("id") == source_id && row.get::<String, _>("review_status") == "reviewed"
+    });
+    sqlx::query(
+        r#"
+        UPDATE person_faces
+        SET person_id = $1, updated_at = now()
+        WHERE person_id = $2 AND owner_id = $3
+        "#,
+    )
+    .bind(target_id)
+    .bind(source_id)
+    .bind(owner_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE people
+        SET
+            display_name = COALESCE(display_name, $1),
+            review_status = CASE WHEN $2 THEN 'reviewed' ELSE review_status END,
+            updated_at = now()
+        WHERE id = $3 AND owner_id = $4
+        "#,
+    )
+    .bind(source_name)
+    .bind(source_reviewed)
+    .bind(target_id)
+    .bind(owner_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM people WHERE id = $1 AND owner_id = $2")
+        .bind(source_id)
+        .bind(owner_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Splits selected faces from an existing person into a new unreviewed cluster.
+pub async fn split_faces(
+    pool: &PgPool,
+    owner_id: i16,
+    source_id: Uuid,
+    face_ids: &[Uuid],
+) -> Result<Uuid, PeopleReviewError> {
+    if face_ids.is_empty() {
+        return Err(PeopleReviewError::FaceNotFound);
+    }
+    let new_person_id = Uuid::now_v7();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO people (id, owner_id, display_name, review_status)
+        VALUES ($1, $2, NULL, 'unreviewed')
+        "#,
+    )
+    .bind(new_person_id)
+    .bind(owner_id)
+    .execute(&mut *tx)
+    .await?;
+    let result = sqlx::query(
+        r#"
+        UPDATE person_faces
+        SET person_id = $1, updated_at = now()
+        WHERE person_id = $2
+          AND owner_id = $3
+          AND face_occurrence_id = ANY($4)
+        "#,
+    )
+    .bind(new_person_id)
+    .bind(source_id)
+    .bind(owner_id)
+    .bind(face_ids)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() != face_ids.len() as u64 {
+        return Err(PeopleReviewError::FaceNotFound);
+    }
+    tx.commit().await?;
+    Ok(new_person_id)
+}
+
+/// Removes persisted face assignments.
+pub async fn unassign_faces(
+    pool: &PgPool,
+    owner_id: i16,
+    face_ids: &[Uuid],
+) -> Result<(), PeopleReviewError> {
+    if face_ids.is_empty() {
+        return Err(PeopleReviewError::FaceNotFound);
+    }
+    let mut tx = pool.begin().await?;
+    let result = sqlx::query(
+        r#"
+        DELETE FROM person_faces
+        WHERE owner_id = $1
+          AND face_occurrence_id = ANY($2)
+        "#,
+    )
+    .bind(owner_id)
+    .bind(face_ids)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() != face_ids.len() as u64 {
+        return Err(PeopleReviewError::FaceNotFound);
+    }
+    sqlx::query(
+        r#"
+        UPDATE face_occurrences
+        SET review_state = 'unassigned', updated_at = now()
+        WHERE owner_id = $1
+          AND id = ANY($2)
+        "#,
+    )
+    .bind(owner_id)
+    .bind(face_ids)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 fn normalize_person_name(name: &str) -> Result<String, PeopleReviewError> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 120 {
         return Err(PeopleReviewError::InvalidDisplayName);
     }
     Ok(name.to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rename_controls_trusted_identity_state() -> Result<(), PeopleReviewError> {
-        let mut state = PeopleReviewState::default();
-        let person_id = Uuid::now_v7();
-        state.add_person(person_id, 1, None, PersonReviewStatus::Unreviewed);
-
-        assert!(!is_user_trusted_identity(&state.people[&person_id]));
-        state.rename_person(person_id, " Ada ")?;
-
-        let person = &state.people[&person_id];
-        assert_eq!(person.display_name.as_deref(), Some("Ada"));
-        assert!(is_user_trusted_identity(person));
-        Ok(())
-    }
-
-    #[test]
-    fn merge_split_hide_and_unassign_preserve_face_assignments() -> Result<(), PeopleReviewError> {
-        let mut state = PeopleReviewState::default();
-        let first_person = Uuid::now_v7();
-        let second_person = Uuid::now_v7();
-        let split_person = Uuid::now_v7();
-        let first_face = Uuid::now_v7();
-        let second_face = Uuid::now_v7();
-        state.add_person(
-            first_person,
-            1,
-            Some("Ada".to_owned()),
-            PersonReviewStatus::Reviewed,
-        );
-        state.add_person(second_person, 1, None, PersonReviewStatus::Unreviewed);
-        state.add_face(first_face, 1);
-        state.add_face(second_face, 1);
-        state.assign_face(first_person, first_face)?;
-        state.assign_face(second_person, second_face)?;
-
-        state.merge_people(first_person, second_person)?;
-        assert!(!state.people.contains_key(&second_person));
-        assert_eq!(state.faces[&second_face].person_id, Some(first_person));
-
-        state.split_faces(first_person, split_person, &BTreeSet::from([second_face]))?;
-        assert_eq!(state.faces[&second_face].person_id, Some(split_person));
-        assert_eq!(
-            state.people[&split_person].review_status,
-            PersonReviewStatus::Unreviewed
-        );
-
-        state.hide_person(split_person)?;
-        assert!(state.faces[&second_face].hidden);
-
-        state.unassign_faces(&BTreeSet::from([second_face]))?;
-        assert_eq!(state.faces[&second_face].person_id, None);
-        assert!(!state.faces[&second_face].hidden);
-        Ok(())
-    }
-
-    #[test]
-    fn assignments_cannot_cross_owner_boundaries() {
-        let mut state = PeopleReviewState::default();
-        let person_id = Uuid::now_v7();
-        let face_id = Uuid::now_v7();
-        state.add_person(person_id, 1, None, PersonReviewStatus::Unreviewed);
-        state.add_face(face_id, 2);
-
-        assert_eq!(
-            state.assign_face(person_id, face_id),
-            Err(PeopleReviewError::OwnerMismatch)
-        );
-    }
 }

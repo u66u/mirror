@@ -1,11 +1,23 @@
-use mirror_backend::models::{
-    ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest, install_model_pack,
+use std::sync::Arc;
+
+use mirror_backend::{
+    face::{self, FaceBox, FaceRuntime, FaceRuntimeRequest, IndexedFace, SharedFaceRuntime},
+    jobs::{self, JobKind},
+    models::{
+        ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest, activate_model_pack,
+        install_model_pack, record_model_pack_self_test,
+    },
 };
 use pgvector::Vector;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod support;
-use support::{TestResult, fresh_owner_pool, valid_image_preprocess, valid_onnx_config};
+use support::{
+    TestResult, create_promoted_asset, fresh_owner_pool, storage_test_deps, valid_image_preprocess,
+    valid_onnx_config,
+};
+use support::{valid_face_detection_config, valid_face_embedding_config};
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
@@ -101,6 +113,64 @@ async fn face_tables_preserve_owner_boundaries_and_asset_cascades() -> TestResul
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
+async fn face_index_job_persists_embeddings_and_people_assignment() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let pack = install_model_pack(&deps.pool, face_identity_manifest()).await?;
+    record_model_pack_self_test(&deps.pool, pack.model_pack_id, true, None).await?;
+    activate_model_pack(&deps.pool, pack.model_pack_id).await?;
+    let asset = create_promoted_asset(&deps, "face-job.jpg").await?;
+    face::enqueue_face_index(&deps.pool, asset.internal_id).await?;
+    let job = jobs::lease_next_for_kinds(
+        &deps.pool,
+        "face-worker",
+        OffsetDateTime::UNIX_EPOCH,
+        &[JobKind::IndexFaces],
+    )
+    .await?
+    .ok_or_else(|| std::io::Error::other("index_faces job was not leased"))?;
+    let runtime = fake_people_face_runtime(vec![1.0, 0.0, 0.0]);
+
+    face::run_face_index_job(&deps.pool, &deps.storage, &runtime, &job).await?;
+
+    let face_count: i64 = sqlx::query_scalar("SELECT count(*) FROM face_occurrences")
+        .fetch_one(&deps.pool)
+        .await?;
+    let embedding_count: i64 = sqlx::query_scalar("SELECT count(*) FROM face_embeddings")
+        .fetch_one(&deps.pool)
+        .await?;
+    let people_count: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+        .fetch_one(&deps.pool)
+        .await?;
+    let assigned_count: i64 = sqlx::query_scalar("SELECT count(*) FROM person_faces")
+        .fetch_one(&deps.pool)
+        .await?;
+    let detection_pack_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT detection_model_pack_id FROM face_occurrences LIMIT 1")
+            .fetch_one(&deps.pool)
+            .await?;
+
+    assert_eq!(face_count, 1);
+    assert_eq!(embedding_count, 1);
+    assert_eq!(people_count, 1);
+    assert_eq!(assigned_count, 1);
+    assert_eq!(detection_pack_id, Some(pack.model_pack_id));
+
+    let people = mirror_backend::people::list_people(&deps.pool, 1).await?;
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].face_count, 1);
+    let person_id = people[0].person_id;
+    mirror_backend::people::rename_person(&deps.pool, 1, person_id, " Ada ").await?;
+    let people = mirror_backend::people::list_people(&deps.pool, 1).await?;
+    assert_eq!(people[0].display_name.as_deref(), Some("Ada"));
+    assert_eq!(people[0].review_status, "reviewed");
+    mirror_backend::people::hide_person(&deps.pool, 1, person_id).await?;
+    let people = mirror_backend::people::list_people(&deps.pool, 1).await?;
+    assert!(people.is_empty());
+    Ok(())
+}
+
 fn face_embedding_manifest() -> ModelPackManifest {
     ModelPackManifest {
         kind: "face_embedding".to_owned(),
@@ -112,6 +182,8 @@ fn face_embedding_manifest() -> ModelPackManifest {
         distance_metric: "cosine".to_owned(),
         onnx: valid_onnx_config(),
         image_preprocess: valid_image_preprocess(),
+        face_detection: Some(valid_face_detection_config()),
+        face_embedding: Some(valid_face_embedding_config()),
         files: vec![
             ModelPackFileManifest {
                 path: "models/image_encoder.onnx".to_owned(),
@@ -128,12 +200,56 @@ fn face_embedding_manifest() -> ModelPackManifest {
                 sha256: "c".repeat(64),
                 size_bytes: 10,
             },
+            ModelPackFileManifest {
+                path: "models/face_detector.onnx".to_owned(),
+                sha256: "e".repeat(64),
+                size_bytes: 10,
+            },
+            ModelPackFileManifest {
+                path: "models/face_embedding.onnx".to_owned(),
+                sha256: "f".repeat(64),
+                size_bytes: 10,
+            },
         ],
         self_tests: vec![ModelPackSelfTestManifest {
             name: "face_fixture".to_owned(),
             input_path: "fixtures/face.jpg".to_owned(),
             expected_output_sha256: "d".repeat(64),
         }],
+    }
+}
+
+fn face_identity_manifest() -> ModelPackManifest {
+    let mut manifest = face_embedding_manifest();
+    manifest.kind = "face_identity".to_owned();
+    manifest.model_key = "test-face-identity".to_owned();
+    manifest.model_revision = format!("face-identity-{}", Uuid::now_v7());
+    manifest
+}
+
+fn fake_people_face_runtime(embedding: Vec<f32>) -> SharedFaceRuntime {
+    Arc::new(FakeFaceRuntime { embedding })
+}
+
+struct FakeFaceRuntime {
+    embedding: Vec<f32>,
+}
+
+impl FaceRuntime for FakeFaceRuntime {
+    fn detect_and_embed(
+        &self,
+        _request: FaceRuntimeRequest<'_>,
+    ) -> Result<Vec<IndexedFace>, mirror_backend::face::FaceIndexError> {
+        Ok(vec![IndexedFace {
+            bbox: FaceBox {
+                left: 0.1,
+                top: 0.2,
+                width: 0.3,
+                height: 0.4,
+            },
+            quality: Some(0.95),
+            embedding: self.embedding.clone(),
+        }])
     }
 }
 

@@ -637,6 +637,8 @@ fn file_install_manifest_with_expected(
         distance_metric: "cosine".to_owned(),
         onnx: valid_onnx_config(),
         image_preprocess: valid_image_preprocess(),
+        face_detection: None,
+        face_embedding: None,
         files: vec![
             file_manifest("models/image_encoder.onnx", b"image")?,
             file_manifest("models/text_encoder.onnx", b"text")?,

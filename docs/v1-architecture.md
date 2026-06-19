@@ -414,10 +414,11 @@ Shared ML infrastructure:
   records `runtime` so Candle, OpenVINO, TensorRT, or a Python worker can be
   added later for a concrete model, but backend/domain code must depend on
   task outputs rather than ONNX sessions.
-- The production backend ONNX runtime is `OnnxImageTextEmbedder`. It lazily
-  opens image/text ONNX sessions from installed files under
-  `model-packs/{model_pack_id}/`, loads the declared tokenizer JSON, and emits
-  only task-level image/text embedding vectors through `ImageTextEmbedder`.
+- The production backend ONNX runtimes are task-level adapters. The semantic
+  path uses `OnnxImageTextEmbedder`; the people path uses `OnnxFaceRuntime`.
+  Both lazily open ONNX sessions from installed files under
+  `model-packs/{model_pack_id}/` and emit task outputs rather than exposing
+  ONNX/session handles to backend feature code.
 - `MIRROR_ML_DEVICE` selects `gpu_with_cpu_fallback`, `cpu_only`, or
   `gpu_only`. GPU fallback behavior is logged explicitly so CPU fallback is not
   mistaken for normal GPU performance.
@@ -482,10 +483,16 @@ Semantic search:
 People albums:
 
 - V1 backend stores owner-local face occurrences, face embeddings, people
-  clusters, and review state. Real AuraFace/OpenCV detection/alignment/runtime
-  support is tracked as a V2 backend feature.
+  clusters, and review state. The ONNX face runtime detects faces, reads
+  detector confidence and optional 5-point landmarks, aligns faces to the
+  embedding model input when landmarks are available, embeds identity vectors,
+  clusters by cosine threshold, and lets the owner name, merge, split, unassign,
+  or hide clusters.
+- Curated face packs should prefer a proven detector plus recognition pair
+  such as OpenCV YuNet/SFace, SCRFD/ArcFace, or AuraFace-compatible ArcFace
+  embeddings, packaged as pinned ONNX model-pack files with golden self-tests.
 - Pipeline target: detect face, align/crop, embed, cluster, let owner
-  name/merge/split or hide clusters.
+  name/merge/split/unassign or hide clusters.
 - Face recognition is user-enabled and can be disabled independently from
   semantic search.
 - People labels are private library metadata and are not exposed in share pages

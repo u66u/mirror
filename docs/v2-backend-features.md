@@ -21,12 +21,3 @@ blockers unless the product scope changes.
   audit downloads before enabling this route.
 - Preserve V1 default behavior: public shares expose privacy-filtered metadata
   and derivatives, not full originals.
-
-## Face Recognition Runtime
-
-- Add the real face detection/alignment/embedding runtime after the model-pack
-  contract defines detection outputs, crop/alignment inputs, embedding tensor
-  names, thresholds, and fixture expectations.
-- Keep face data owner-local and disabled by default.
-- Reuse the existing V1 tables and review functions for people clusters,
-  merge/split/hide/rename, and unassigned faces.

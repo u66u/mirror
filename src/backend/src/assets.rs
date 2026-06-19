@@ -20,6 +20,9 @@ use crate::storage::{ObjectStorage, StorageKey};
 pub struct PromotedUpload {
     /// Stable public asset ID used by first-party API routes.
     pub asset_id: Uuid,
+    /// Internal asset row ID used by backend jobs.
+    #[serde(skip)]
+    pub asset_internal_id: Uuid,
 }
 
 /// Asset timeline listing input.
@@ -254,6 +257,7 @@ pub async fn promote_verified_upload(
 
     Ok(PromotedUpload {
         asset_id: asset_public_id,
+        asset_internal_id: asset_id,
     })
 }
 
@@ -574,9 +578,9 @@ async fn existing_asset_for_upload(
     pool: &PgPool,
     upload_id: Uuid,
 ) -> Result<Option<PromotedUpload>, PromoteError> {
-    sqlx::query_scalar!(
+    sqlx::query!(
         r#"
-        SELECT a.public_id
+        SELECT a.id, a.public_id
         FROM asset_sources s
         JOIN assets a ON a.id = s.asset_id
         WHERE s.upload_id = $1
@@ -585,7 +589,12 @@ async fn existing_asset_for_upload(
     )
     .fetch_optional(pool)
     .await
-    .map(|row| row.map(|asset_id| PromotedUpload { asset_id }))
+    .map(|row| {
+        row.map(|row| PromotedUpload {
+            asset_id: row.public_id,
+            asset_internal_id: row.id,
+        })
+    })
     .map_err(PromoteError::Database)
 }
 

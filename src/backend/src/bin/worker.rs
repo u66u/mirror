@@ -5,6 +5,7 @@ use std::{io, num::NonZeroUsize, sync::Arc, time::Duration as StdDuration};
 use mirror_backend::{
     config::Config,
     db,
+    face::{OnnxFaceRuntime, SharedFaceRuntime},
     media::HeifImageProcessor,
     ml::MlRuntime,
     onnx_embedder::OnnxImageTextEmbedder,
@@ -40,6 +41,10 @@ async fn main() -> io::Result<()> {
         NonZeroUsize::MIN,
         config.ml_max_image_bytes,
     );
+    let face_runtime: SharedFaceRuntime = Arc::new(OnnxFaceRuntime::new(
+        config.storage_root.clone(),
+        config.ml_device,
+    ));
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
     let job_kinds = worker::production_job_kinds(config.face_recognition_enabled);
 
@@ -52,6 +57,7 @@ async fn main() -> io::Result<()> {
                 image_processor: &image_processor,
                 video_processor: &video_processor,
                 ml_runtime: &ml_runtime,
+                face_runtime: &face_runtime,
                 job_kinds: &job_kinds,
             },
             &worker_id,
