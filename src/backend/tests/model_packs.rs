@@ -5,6 +5,10 @@ use mirror_backend::storage::ObjectStorage;
 use mirror_backend::{
     auth::{SessionCreateInput, SetupState, create_session},
     config::Config,
+    face::{
+        FaceIndexError, FaceRuntime, FaceRuntimeRequest, FaceSelfTestRequest, IndexedFace,
+        SharedFaceRuntime,
+    },
     http,
     ml::{ImageTextEmbedder, SharedImageTextRuntime, sha256_f32_values},
     models::{
@@ -23,8 +27,9 @@ use uuid::Uuid;
 
 mod support;
 use support::{
-    FakeImageTextEmbedder, TestResult, fresh_owner_pool, valid_image_preprocess,
-    valid_model_pack_manifest, valid_onnx_config,
+    FakeImageTextEmbedder, TestResult, fresh_owner_pool, valid_face_detection_config,
+    valid_face_embedding_config, valid_image_preprocess, valid_model_pack_manifest,
+    valid_onnx_config,
 };
 
 #[test]
@@ -90,6 +95,72 @@ fn model_pack_manifest_schema_is_generated_from_manifest_types() -> TestResult {
         .ok_or_else(|| std::io::Error::other("schema.required missing"))?;
     assert!(required.iter().any(|field| field == "files"));
     assert!(required.iter().any(|field| field == "self_tests"));
+    Ok(())
+}
+
+#[test]
+fn built_in_model_pack_presets_are_valid_json_manifests() -> TestResult {
+    for preset in mirror_backend::models::MODEL_PACK_PRESETS {
+        let body = mirror_backend::models::model_pack_preset_manifest_json(preset)?;
+        let manifest: ModelPackManifest =
+            serde_json::from_str(&body).map_err(std::io::Error::other)?;
+        validate_model_pack_manifest(&manifest)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn face_model_pack_manifest_accepts_adapter_specific_contracts() -> TestResult {
+    let mut manifest = valid_model_pack_manifest();
+    manifest.kind = "face_identity".to_owned();
+    manifest.model_key = "insightface-scrfd-arcface".to_owned();
+    manifest.embedding_dimension = 512;
+    manifest.image_preprocess.width = 640;
+    manifest.image_preprocess.height = 640;
+
+    let mut detection = valid_face_detection_config();
+    detection.adapter = "scrfd".to_owned();
+    detection.output_names = vec![
+        "score_8".to_owned(),
+        "score_16".to_owned(),
+        "score_32".to_owned(),
+        "bbox_8".to_owned(),
+        "bbox_16".to_owned(),
+        "bbox_32".to_owned(),
+        "kps_8".to_owned(),
+        "kps_16".to_owned(),
+        "kps_32".to_owned(),
+    ];
+    let mut embedding = valid_face_embedding_config();
+    embedding.adapter = "arcface".to_owned();
+    embedding.l2_normalize_output = true;
+    manifest.files.extend([
+        ModelPackFileManifest {
+            path: detection.model_path.clone(),
+            sha256: "a".repeat(64),
+            size_bytes: 10,
+        },
+        ModelPackFileManifest {
+            path: embedding.model_path.clone(),
+            sha256: "b".repeat(64),
+            size_bytes: 11,
+        },
+    ]);
+    manifest.face_detection = Some(detection);
+    manifest.face_embedding = Some(embedding);
+
+    assert!(validate_model_pack_manifest(&manifest).is_ok());
+
+    let mut invalid = manifest;
+    let face_detection = invalid
+        .face_detection
+        .as_mut()
+        .ok_or_else(|| std::io::Error::other("fixture should include face detection config"))?;
+    face_detection.adapter = "python_plugin".to_owned();
+    assert!(matches!(
+        validate_model_pack_manifest(&invalid),
+        Err(ModelPackError::InvalidManifest("face_detection.adapter"))
+    ));
     Ok(())
 }
 
@@ -505,6 +576,101 @@ async fn model_pack_self_test_run_route_records_runtime_result() -> TestResult {
 
 #[tokio::test]
 #[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn face_model_pack_self_test_run_route_uses_face_runtime() -> TestResult {
+    let pool = fresh_owner_pool().await?;
+    let storage_dir = TempDir::new()?;
+    let storage = ObjectStorage::local(storage_dir.path())?;
+    let session = create_session(
+        &pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("face-model-pack-self-test-route-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let face_runtime: SharedFaceRuntime = Arc::new(FakeSelfTestFaceRuntime);
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(web::Data::new(face_runtime))
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+
+    let mut manifest = valid_model_pack_manifest();
+    manifest.kind = "face_embedding".to_owned();
+    manifest.model_key = "test-face-embedding".to_owned();
+    manifest.embedding_dimension = 3;
+    manifest.face_detection = None;
+    manifest.face_embedding = Some(valid_face_embedding_config());
+    manifest.files.push(ModelPackFileManifest {
+        path: "models/face.onnx".to_owned(),
+        sha256: "a".repeat(64),
+        size_bytes: 1,
+    });
+    manifest.files.push(ModelPackFileManifest {
+        path: "self-tests/aligned-face.jpg".to_owned(),
+        sha256: "b".repeat(64),
+        size_bytes: 1,
+    });
+    manifest.self_tests = vec![ModelPackSelfTestManifest {
+        name: "aligned_face_embedding".to_owned(),
+        input_path: "self-tests/aligned-face.jpg".to_owned(),
+        expected_output_sha256: sha256_f32_values(&[7.0, 8.0, 9.0]),
+    }];
+    manifest
+        .face_embedding
+        .as_mut()
+        .ok_or_else(|| std::io::Error::other("face embedding missing"))?
+        .model_path = "models/face.onnx".to_owned();
+    let install = actix_test::TestRequest::post()
+        .uri("/model-packs")
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .set_json(&manifest)
+        .to_request();
+    let install_response = actix_test::call_service(&app, install).await;
+    assert_eq!(install_response.status(), StatusCode::CREATED);
+    let installed: Value = actix_test::read_body_json(install_response).await;
+    let model_pack_id = Uuid::parse_str(
+        installed["model_pack_id"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("model_pack_id missing"))?,
+    )
+    .map_err(std::io::Error::other)?;
+    let input_key = mirror_backend::storage::StorageKey::model_pack_file(
+        model_pack_id,
+        "self-tests/aligned-face.jpg",
+    )?;
+    storage.write(&input_key, b"x".to_vec()).await?;
+
+    let run = actix_test::TestRequest::post()
+        .uri(&format!("/model-packs/{model_pack_id}/self-test/run"))
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .insert_header(("x-csrf-token", session.csrf_token.expose()))
+        .to_request();
+    let response = actix_test::call_service(&app, run).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = actix_test::read_body_json(response).await;
+    assert_eq!(body["self_test_status"], "passed");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
 async fn model_reindex_queues_embedding_jobs_for_active_assets_only() -> TestResult {
     let pool = fresh_owner_pool().await?;
     let pack = install_model_pack(&pool, valid_model_pack_manifest()).await?;
@@ -716,4 +882,22 @@ async fn insert_model_pack_asset(pool: &sqlx::PgPool, trashed: bool) -> TestResu
     .execute(pool)
     .await?;
     Ok(asset_id)
+}
+
+struct FakeSelfTestFaceRuntime;
+
+impl FaceRuntime for FakeSelfTestFaceRuntime {
+    fn detect_and_embed(
+        &self,
+        _request: FaceRuntimeRequest<'_>,
+    ) -> Result<Vec<IndexedFace>, FaceIndexError> {
+        Ok(Vec::new())
+    }
+
+    fn self_test_output(
+        &self,
+        _request: FaceSelfTestRequest<'_>,
+    ) -> Result<Vec<f32>, FaceIndexError> {
+        Ok(vec![7.0, 8.0, 9.0])
+    }
 }

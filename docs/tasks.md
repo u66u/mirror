@@ -1616,8 +1616,14 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       scores, optional 5-point landmarks, ArcFace-style alignment, embedding
       extraction, cosine-threshold clustering, and concrete model-pack
       revision storage.
-    - Added backend people review routes for listing clusters, rename/trust,
-      merge, split selected faces, unassign faces, and hide clusters.
+    - Refactored the ONNX face runtime around internal detector/embedder
+      adapters so model-specific preprocessing/postprocessing is not hard-coded
+      in the orchestration loop. Added built-in adapter keys for decoded
+      boxes, OpenCV-compatible YuNet, SCRFD, raw embeddings,
+      OpenCV-compatible SFace, and ArcFace-style embeddings.
+    - Added backend people review routes for listing clusters, listing assigned
+      faces for a person, listing unassigned review faces, rename/trust, merge,
+      split selected faces, unassign faces, and hide clusters.
   - Commands:
     - `docker compose -f infra/compose.yaml config` -> passed.
     - `make gate-backend` -> passed.
@@ -1937,9 +1943,10 @@ Risk levels: `Low`, `Medium`, `High`, `Critical`.
       IDs, store face embeddings separately from semantic embeddings, and
       auto-assign to existing people by cosine threshold or create unreviewed
       people clusters.
-    - Added backend people-album HTTP routes for list, rename/trust,
-      merge, split, unassign, and hide. Mutating routes use unsafe owner auth
-      so browser sessions require CSRF.
+    - Added backend people-album HTTP routes for list, person face listings,
+      unassigned review face listings, rename/trust, merge, split, unassign,
+      and hide. Mutating routes use unsafe owner auth so browser sessions
+      require CSRF.
     - No web/Android people UI was added.
   - Commands:
     - `make gate-backend` -> passed

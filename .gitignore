@@ -10,3 +10,6 @@ __pycache__/
 **/build/
 local.properties
 .sqlx
+.venv*
+.codex
+.notes

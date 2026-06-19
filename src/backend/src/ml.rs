@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     jobs::{JobKind, LeasedJob},
+    media::MediaToolError,
     models::{
         ModelPackError, ModelPackKind, ModelPackManifest, ValidatedEmbedding,
         record_reindex_asset_result, validate_embedding_output, validate_model_pack_manifest,
@@ -184,6 +185,9 @@ pub enum MlError {
     /// Encoded original is not a decodable still image for the selected media type.
     #[error("invalid ml image input")]
     InvalidImage,
+    /// Still-image conversion failed before embedding.
+    #[error("ml image conversion error")]
+    ImageConversion(MediaToolError),
     /// Original storage key is invalid.
     #[error("invalid ml storage key")]
     InvalidStorageKey(#[from] StorageKeyError),
@@ -753,10 +757,10 @@ fn valid_text_query(query: &str) -> Result<&str, MlError> {
 }
 
 fn is_supported_still_image_media_type(media_type: &str) -> bool {
-    // Keep this strict. GIF and WebP can be animated; enable them only after
-    // the runtime explicitly rejects animated variants or defines first-frame
-    // embedding semantics.
-    matches!(media_type, "image/jpeg" | "image/png")
+    matches!(
+        media_type,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/heic" | "image/heif"
+    )
 }
 
 fn self_test_media_type(path: &str) -> Result<&'static str, MlError> {
@@ -764,6 +768,14 @@ fn self_test_media_type(path: &str) -> Result<&'static str, MlError> {
         Ok("image/jpeg")
     } else if path.ends_with(".png") {
         Ok("image/png")
+    } else if path.ends_with(".gif") {
+        Ok("image/gif")
+    } else if path.ends_with(".webp") {
+        Ok("image/webp")
+    } else if path.ends_with(".heic") {
+        Ok("image/heic")
+    } else if path.ends_with(".heif") {
+        Ok("image/heif")
     } else {
         Err(ModelPackError::InvalidManifest("self_test.input_path").into())
     }
@@ -775,6 +787,7 @@ fn self_test_runtime_failure(error: &MlError) -> bool {
         MlError::RuntimeUnavailable
             | MlError::ImageTooLarge
             | MlError::InvalidImage
+            | MlError::ImageConversion(_)
             | MlError::Model(ModelPackError::InvalidEmbedding(_))
     )
 }
@@ -805,6 +818,7 @@ fn is_terminal_reindex_failure(error: &MlError) -> bool {
         | MlError::UnsupportedMediaType
         | MlError::ImageTooLarge
         | MlError::InvalidImage
+        | MlError::ImageConversion(_)
         | MlError::InvalidStorageKey(_) => true,
 
         MlError::Model(

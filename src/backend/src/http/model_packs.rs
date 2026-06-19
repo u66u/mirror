@@ -5,9 +5,10 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
+    face::{self, SharedFaceRuntime},
     http::{auth, error::ApiError},
     ml::{self, SharedImageTextRuntime},
-    models::{self, ModelPackManifest},
+    models::{self, ModelPackKind, ModelPackManifest},
     rate_limit::{self, QuotaInput},
     state::AppState,
 };
@@ -84,14 +85,32 @@ pub async fn run_model_pack_self_test_route(
     let storage = storage(&state)?;
     let owner = auth::require_unsafe_owner(pool, &req).await?;
     reject_blocked_model_pack_admin(&state, pool, &req, owner).await?;
-    let Some(runtime) = req.app_data::<web::Data<SharedImageTextRuntime>>() else {
-        return Err(ApiError::ServiceUnavailable(
-            "ml_runtime_unavailable",
-            "ml runtime is unavailable",
-        ));
+    let model_pack_id = path.into_inner();
+    let kind = models::model_pack_kind(pool, model_pack_id).await?;
+    let pack = match kind {
+        ModelPackKind::SemanticImageText => {
+            let Some(runtime) = req.app_data::<web::Data<SharedImageTextRuntime>>() else {
+                return Err(ApiError::ServiceUnavailable(
+                    "ml_runtime_unavailable",
+                    "ml runtime is unavailable",
+                ));
+            };
+            ml::run_model_pack_self_tests(pool, storage, runtime.get_ref(), model_pack_id).await?
+        }
+        ModelPackKind::FaceIdentity
+        | ModelPackKind::FaceDetection
+        | ModelPackKind::FaceEmbedding => {
+            let Some(runtime) = req.app_data::<web::Data<SharedFaceRuntime>>() else {
+                return Err(ApiError::ServiceUnavailable(
+                    "face_runtime_unavailable",
+                    "face runtime is unavailable",
+                ));
+            };
+            face::run_face_model_pack_self_tests(pool, storage, runtime.get_ref(), model_pack_id)
+                .await
+                .map_err(map_face_self_test_error)?
+        }
     };
-    let pack =
-        ml::run_model_pack_self_tests(pool, storage, runtime.get_ref(), path.into_inner()).await?;
 
     Ok(HttpResponse::Ok().json(pack))
 }
@@ -109,6 +128,25 @@ pub async fn activate_model_pack_route(
     let pack = models::activate_model_pack(pool, path.into_inner()).await?;
 
     Ok(HttpResponse::Ok().json(pack))
+}
+
+fn map_face_self_test_error(error: face::FaceIndexError) -> ApiError {
+    match error {
+        face::FaceIndexError::NotFound => {
+            ApiError::NotFound("model_pack_not_found", "model pack not found")
+        }
+        face::FaceIndexError::RuntimeUnavailable => {
+            ApiError::ServiceUnavailable("face_runtime_unavailable", "face runtime is unavailable")
+        }
+        face::FaceIndexError::UnsupportedMediaType
+        | face::FaceIndexError::Model(models::ModelPackError::InvalidManifest(_)) => {
+            ApiError::BadRequest("invalid_model_pack", "invalid model pack")
+        }
+        other => {
+            tracing::error!(?other, "face model-pack self-test failed");
+            ApiError::Internal
+        }
+    }
 }
 
 /// Starts a reindex run for a self-tested model pack.

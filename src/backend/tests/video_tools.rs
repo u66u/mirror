@@ -53,8 +53,8 @@ fn ffmpeg_video_processor_probes_and_generates_bounded_poster() -> TestResult {
 fn video_processor_kills_probe_that_exceeds_deadline() -> TestResult {
     let temp_dir = TempDir::new()?;
     let probe = temp_dir.path().join("slow-probe");
-    write_executable_script(&probe, "#!/bin/sh\nexec sleep 1\n")?;
-    let processor = FfmpegVideoProcessor::new(&probe, "ffmpeg", Duration::from_millis(20));
+    write_executable_script(&probe, "#!/bin/sh\nexec sleep 60\n")?;
+    let processor = FfmpegVideoProcessor::new(&probe, "ffmpeg", Duration::from_nanos(1));
 
     let result = processor.inspect(Path::new("unused-input"));
 

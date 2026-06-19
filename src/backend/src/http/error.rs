@@ -191,7 +191,7 @@ map_api_errors! {
     impl From<MlError> for ApiError;
     MlError::InvalidTextQuery | MlError::SemanticIndex(SemanticIndexError::InvalidLimit) => Self::BadRequest("invalid_search", "invalid search"),
     MlError::NotFound | MlError::RuntimeUnavailable => Self::ServiceUnavailable("semantic_search_unavailable", "semantic search is unavailable"),
-    @internal => MlError::UnsupportedJobKind | MlError::InvalidJobPayload | MlError::UnsupportedMediaType | MlError::ImageTooLarge | MlError::InvalidImage | MlError::InvalidStorageKey(_) | MlError::Storage(_) | MlError::Model(_) | MlError::SemanticIndex(_) | MlError::Database(_)
+    @internal => MlError::UnsupportedJobKind | MlError::InvalidJobPayload | MlError::UnsupportedMediaType | MlError::ImageTooLarge | MlError::InvalidImage | MlError::ImageConversion(_) | MlError::InvalidStorageKey(_) | MlError::Storage(_) | MlError::Model(_) | MlError::SemanticIndex(_) | MlError::Database(_)
 }
 
 map_api_errors! {

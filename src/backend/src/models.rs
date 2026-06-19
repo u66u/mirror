@@ -25,6 +25,13 @@ use crate::storage::{ObjectStorage, StorageKey, StorageKeyError};
 /// Manifest filename expected at the root of a local model-pack directory.
 pub const MODEL_PACK_MANIFEST_FILENAME: &str = "manifest.json";
 
+/// Built-in JSON-only model-pack presets.
+pub const MODEL_PACK_PRESETS: &[&str] = &[
+    "opencv_yunet_detection_2023mar",
+    "opencv_sface_embedding_2021dec",
+    "insightface_buffalo_l_scrfd_arcface",
+];
+
 /// Supported model task kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
@@ -175,6 +182,10 @@ pub struct ImagePreprocessConfig {
 /// ONNX face detector output contract.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct FaceDetectionModelConfig {
+    /// Built-in detector adapter kind, for example `decoded_boxes_v1`,
+    /// `scrfd`, or `yunet_opencv_compat`.
+    #[serde(default = "default_face_detector_adapter")]
+    pub adapter: String,
     /// ONNX model used for face detection.
     pub model_path: String,
     /// Image tensor input name.
@@ -185,12 +196,19 @@ pub struct FaceDetectionModelConfig {
     pub scores_output_name: String,
     /// Optional landmarks tensor output name.
     pub landmarks_output_name: Option<String>,
+    /// Optional adapter-specific output names. SCRFD/YuNet adapters use this
+    /// for multi-head outputs when model files do not use conventional names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_names: Vec<String>,
     /// Box coordinate space: `normalized` or `pixel`.
     pub box_coordinate_space: String,
     /// Box format: `xywh` or `xyxy`.
     pub box_format: String,
     /// Minimum score accepted into the face pipeline.
     pub score_threshold: f32,
+    /// Minimum normalized width/height accepted into the face pipeline.
+    #[serde(default)]
+    pub min_face_size_ratio: f32,
     /// IoU threshold used by NMS.
     pub nms_threshold: f32,
     /// Maximum faces stored per asset.
@@ -200,6 +218,10 @@ pub struct FaceDetectionModelConfig {
 /// ONNX face embedding input/output contract.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct FaceEmbeddingModelConfig {
+    /// Built-in embedding adapter kind, for example `raw_embedding_v1`,
+    /// `arcface`, or `sface_opencv_compat`.
+    #[serde(default = "default_face_embedding_adapter")]
+    pub adapter: String,
     /// ONNX model used for face identity embeddings.
     pub model_path: String,
     /// Face crop tensor input name.
@@ -223,6 +245,17 @@ pub struct FaceEmbeddingModelConfig {
     pub std: [f32; 3],
     /// Cosine similarity threshold for auto-assigning to an existing person.
     pub match_threshold: f32,
+    /// Whether the runtime L2-normalizes output before storage/matching.
+    #[serde(default)]
+    pub l2_normalize_output: bool,
+}
+
+fn default_face_detector_adapter() -> String {
+    "decoded_boxes_v1".to_owned()
+}
+
+fn default_face_embedding_adapter() -> String {
+    "raw_embedding_v1".to_owned()
 }
 
 fn default_face_alignment() -> String {
@@ -427,6 +460,203 @@ pub fn model_pack_manifest_schema_json() -> Result<serde_json::Value, ModelPackE
     serde_json::to_value(schema_for!(ModelPackManifest)).map_err(ModelPackError::Json)
 }
 
+/// Returns one built-in model-pack preset manifest.
+///
+/// Presets are JSON authoring templates. Operators must replace file sizes and
+/// SHA-256 values with the exact model/self-test files they install.
+pub fn model_pack_preset_manifest(name: &str) -> Result<ModelPackManifest, ModelPackError> {
+    match name {
+        "opencv_yunet_detection_2023mar" => Ok(opencv_yunet_detection_preset()),
+        "opencv_sface_embedding_2021dec" => Ok(opencv_sface_embedding_preset()),
+        "insightface_buffalo_l_scrfd_arcface" => Ok(insightface_scrfd_arcface_preset()),
+        _ => Err(ModelPackError::NotFound),
+    }
+}
+
+/// Returns one built-in model-pack preset as pretty JSON.
+pub fn model_pack_preset_manifest_json(name: &str) -> Result<String, ModelPackError> {
+    let manifest = model_pack_preset_manifest(name)?;
+    serde_json::to_string_pretty(&manifest).map_err(ModelPackError::Json)
+}
+
+fn opencv_yunet_detection_preset() -> ModelPackManifest {
+    let model_path = "models/face_detection_yunet_2023mar.onnx".to_owned();
+    ModelPackManifest {
+        kind: "face_detection".to_owned(),
+        runtime: "onnx".to_owned(),
+        model_key: "opencv-yunet".to_owned(),
+        model_revision: "2023mar".to_owned(),
+        license: "Apache-2.0".to_owned(),
+        embedding_dimension: 1,
+        distance_metric: "cosine".to_owned(),
+        onnx: preset_onnx_config(&model_path),
+        image_preprocess: ImagePreprocessConfig {
+            width: 320,
+            height: 320,
+            color_order: "rgb".to_owned(),
+            tensor_layout: "nchw".to_owned(),
+            mean: [0.0, 0.0, 0.0],
+            std: [1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0],
+        },
+        face_detection: Some(FaceDetectionModelConfig {
+            adapter: "yunet_opencv_compat".to_owned(),
+            model_path: model_path.clone(),
+            input_name: "input".to_owned(),
+            boxes_output_name: "unused_boxes".to_owned(),
+            scores_output_name: "unused_scores".to_owned(),
+            landmarks_output_name: None,
+            output_names: Vec::new(),
+            box_coordinate_space: "pixel".to_owned(),
+            box_format: "xywh".to_owned(),
+            score_threshold: 0.3,
+            min_face_size_ratio: 0.15,
+            nms_threshold: 0.3,
+            max_faces: 8,
+        }),
+        face_embedding: None,
+        files: preset_files(&[&model_path, "self-tests/face.jpg"]),
+        self_tests: preset_self_tests(),
+    }
+}
+
+fn opencv_sface_embedding_preset() -> ModelPackManifest {
+    let model_path = "models/face_recognition_sface_2021dec.onnx".to_owned();
+    ModelPackManifest {
+        kind: "face_embedding".to_owned(),
+        runtime: "onnx".to_owned(),
+        model_key: "opencv-sface".to_owned(),
+        model_revision: "2021dec".to_owned(),
+        license: "Apache-2.0".to_owned(),
+        embedding_dimension: 128,
+        distance_metric: "cosine".to_owned(),
+        onnx: preset_onnx_config(&model_path),
+        image_preprocess: ImagePreprocessConfig {
+            width: 112,
+            height: 112,
+            color_order: "rgb".to_owned(),
+            tensor_layout: "nchw".to_owned(),
+            mean: [0.0, 0.0, 0.0],
+            std: [1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0],
+        },
+        face_detection: None,
+        face_embedding: Some(FaceEmbeddingModelConfig {
+            adapter: "sface_opencv_compat".to_owned(),
+            model_path: model_path.clone(),
+            input_name: "data".to_owned(),
+            output_name: "fc1".to_owned(),
+            width: 112,
+            height: 112,
+            color_order: "rgb".to_owned(),
+            tensor_layout: "nchw".to_owned(),
+            alignment: "five_point".to_owned(),
+            mean: [0.0, 0.0, 0.0],
+            std: [1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0],
+            match_threshold: 0.363,
+            l2_normalize_output: true,
+        }),
+        files: preset_files(&[&model_path, "self-tests/aligned-face.jpg"]),
+        self_tests: preset_self_tests(),
+    }
+}
+
+fn insightface_scrfd_arcface_preset() -> ModelPackManifest {
+    let detector_path = "models/det_10g.onnx".to_owned();
+    let embedder_path = "models/w600k_r50.onnx".to_owned();
+    ModelPackManifest {
+        kind: "face_identity".to_owned(),
+        runtime: "onnx".to_owned(),
+        model_key: "insightface-buffalo-l".to_owned(),
+        model_revision: "scrfd10g-w600k-r50".to_owned(),
+        license: "model-license-required".to_owned(),
+        embedding_dimension: 512,
+        distance_metric: "cosine".to_owned(),
+        onnx: preset_onnx_config(&detector_path),
+        image_preprocess: ImagePreprocessConfig {
+            width: 640,
+            height: 640,
+            color_order: "rgb".to_owned(),
+            tensor_layout: "nchw".to_owned(),
+            mean: [0.5, 0.5, 0.5],
+            std: [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0],
+        },
+        face_detection: Some(FaceDetectionModelConfig {
+            adapter: "scrfd".to_owned(),
+            model_path: detector_path.clone(),
+            input_name: "input.1".to_owned(),
+            boxes_output_name: "unused_boxes".to_owned(),
+            scores_output_name: "unused_scores".to_owned(),
+            landmarks_output_name: None,
+            output_names: vec![
+                "448".to_owned(),
+                "471".to_owned(),
+                "494".to_owned(),
+                "451".to_owned(),
+                "474".to_owned(),
+                "497".to_owned(),
+                "454".to_owned(),
+                "477".to_owned(),
+                "500".to_owned(),
+            ],
+            box_coordinate_space: "pixel".to_owned(),
+            box_format: "xyxy".to_owned(),
+            score_threshold: 0.5,
+            min_face_size_ratio: 0.15,
+            nms_threshold: 0.4,
+            max_faces: 16,
+        }),
+        face_embedding: Some(FaceEmbeddingModelConfig {
+            adapter: "arcface".to_owned(),
+            model_path: embedder_path.clone(),
+            input_name: "input.1".to_owned(),
+            output_name: "683".to_owned(),
+            width: 112,
+            height: 112,
+            color_order: "rgb".to_owned(),
+            tensor_layout: "nchw".to_owned(),
+            alignment: "five_point".to_owned(),
+            mean: [0.5, 0.5, 0.5],
+            std: [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0],
+            match_threshold: 0.55,
+            l2_normalize_output: true,
+        }),
+        files: preset_files(&[&detector_path, &embedder_path, "self-tests/face.jpg"]),
+        self_tests: preset_self_tests(),
+    }
+}
+
+fn preset_onnx_config(model_path: &str) -> OnnxModelPackConfig {
+    OnnxModelPackConfig {
+        image_model_path: model_path.to_owned(),
+        text_model_path: model_path.to_owned(),
+        tokenizer_path: "self-tests/face.jpg".to_owned(),
+        image_input_name: "unused_image".to_owned(),
+        image_output_name: "unused_image_output".to_owned(),
+        text_input_ids_name: "unused_input_ids".to_owned(),
+        text_attention_mask_name: "unused_attention_mask".to_owned(),
+        text_output_name: "unused_text_output".to_owned(),
+    }
+}
+
+fn preset_files(paths: &[&str]) -> Vec<ModelPackFileManifest> {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| ModelPackFileManifest {
+            path: (*path).to_owned(),
+            sha256: format!("{index:064x}"),
+            size_bytes: 1,
+        })
+        .collect()
+}
+
+fn preset_self_tests() -> Vec<ModelPackSelfTestManifest> {
+    vec![ModelPackSelfTestManifest {
+        name: "face_fixture".to_owned(),
+        input_path: "self-tests/face.jpg".to_owned(),
+        expected_output_sha256: "0".repeat(64),
+    }]
+}
+
 /// Validates a local model-pack directory without touching storage or Postgres.
 ///
 /// The directory must contain `manifest.json`. Every manifest file entry is
@@ -564,6 +794,25 @@ pub async fn list_model_packs(pool: &PgPool) -> Result<Vec<ModelPackSummary>, Mo
     .await
     .map(|rows| rows.into_iter().map(ModelPackSummary::from).collect())
     .map_err(ModelPackError::Database)
+}
+
+/// Loads one installed model pack's task kind.
+pub async fn model_pack_kind(
+    pool: &PgPool,
+    model_pack_id: Uuid,
+) -> Result<ModelPackKind, ModelPackError> {
+    let kind = sqlx::query_scalar!(
+        r#"
+        SELECT kind
+        FROM model_packs
+        WHERE id = $1
+        "#,
+        model_pack_id
+    )
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ModelPackError::NotFound)?;
+    parse_kind(&kind)
 }
 
 /// Verifies and copies all files for an installed model pack into durable
@@ -1043,19 +1292,20 @@ pub fn validate_model_pack_manifest(
         )?;
     }
 
-    require_manifest_file(
-        &paths,
-        &manifest.onnx.image_model_path,
-        "onnx.image_model_path",
-    )?;
-    require_manifest_file(
-        &paths,
-        &manifest.onnx.text_model_path,
-        "onnx.text_model_path",
-    )?;
-    require_manifest_file(&paths, &manifest.onnx.tokenizer_path, "onnx.tokenizer_path")?;
     match kind {
-        ModelPackKind::SemanticImageText => {}
+        ModelPackKind::SemanticImageText => {
+            require_manifest_file(
+                &paths,
+                &manifest.onnx.image_model_path,
+                "onnx.image_model_path",
+            )?;
+            require_manifest_file(
+                &paths,
+                &manifest.onnx.text_model_path,
+                "onnx.text_model_path",
+            )?;
+            require_manifest_file(&paths, &manifest.onnx.tokenizer_path, "onnx.tokenizer_path")?;
+        }
         ModelPackKind::FaceDetection => {
             let config = manifest
                 .face_detection
@@ -1112,6 +1362,10 @@ fn validate_onnx_config(config: &OnnxModelPackConfig) -> Result<(), ModelPackErr
 }
 
 fn validate_face_detection_config(config: &FaceDetectionModelConfig) -> Result<(), ModelPackError> {
+    match config.adapter.as_str() {
+        "decoded_boxes_v1" | "scrfd" | "yunet_opencv_compat" => {}
+        _ => return Err(ModelPackError::InvalidManifest("face_detection.adapter")),
+    }
     validate_pack_path(&config.model_path, "face_detection.model_path")?;
     require_text(&config.input_name, 120, "face_detection.input_name")?;
     require_text(
@@ -1127,6 +1381,9 @@ fn validate_face_detection_config(config: &FaceDetectionModelConfig) -> Result<(
     if let Some(name) = &config.landmarks_output_name {
         require_text(name, 120, "face_detection.landmarks_output_name")?;
     }
+    for name in &config.output_names {
+        require_text(name, 120, "face_detection.output_names")?;
+    }
     match config.box_coordinate_space.as_str() {
         "normalized" | "pixel" => {}
         _ => {
@@ -1140,6 +1397,7 @@ fn validate_face_detection_config(config: &FaceDetectionModelConfig) -> Result<(
         _ => return Err(ModelPackError::InvalidManifest("face_detection.box_format")),
     }
     if !(0.0..=1.0).contains(&config.score_threshold)
+        || !(0.0..=1.0).contains(&config.min_face_size_ratio)
         || !(0.0..=1.0).contains(&config.nms_threshold)
         || !(1..=1_000).contains(&config.max_faces)
     {
@@ -1149,6 +1407,10 @@ fn validate_face_detection_config(config: &FaceDetectionModelConfig) -> Result<(
 }
 
 fn validate_face_embedding_config(config: &FaceEmbeddingModelConfig) -> Result<(), ModelPackError> {
+    match config.adapter.as_str() {
+        "raw_embedding_v1" | "arcface" | "sface_opencv_compat" => {}
+        _ => return Err(ModelPackError::InvalidManifest("face_embedding.adapter")),
+    }
     validate_pack_path(&config.model_path, "face_embedding.model_path")?;
     require_text(&config.input_name, 120, "face_embedding.input_name")?;
     require_text(&config.output_name, 120, "face_embedding.output_name")?;

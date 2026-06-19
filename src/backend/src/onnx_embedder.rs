@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use image::{ImageFormat, imageops::FilterType};
+use image::imageops::FilterType;
 use ort::{session::Session, value::Tensor};
 use tokenizers::Tokenizer;
 use tracing::{info, warn};
@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     config::MlDevicePreference,
+    media::{MediaToolError, decode_still_image, normalize_still_image_for_image_crate},
     ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder, MlError},
     models::{ModelPackError, ModelPackKind, ModelPackManifest, ModelRuntime},
     storage::StorageKey,
@@ -26,6 +27,7 @@ use crate::{
 pub struct OnnxImageTextEmbedder {
     storage_root: PathBuf,
     device: MlDevicePreference,
+    heif_convert_path: PathBuf,
     cache: Mutex<HashMap<Uuid, Arc<ModelPackRuntime>>>,
 }
 
@@ -40,6 +42,16 @@ impl OnnxImageTextEmbedder {
     /// pack so worker startup does not require any installed packs.
     #[must_use]
     pub fn new(storage_root: PathBuf, device: MlDevicePreference) -> Self {
+        Self::with_heif_converter(storage_root, device, "heif-convert")
+    }
+
+    /// Creates a lazy ONNX runtime with an explicit HEIC/HEIF converter.
+    #[must_use]
+    pub fn with_heif_converter(
+        storage_root: PathBuf,
+        device: MlDevicePreference,
+        heif_convert_path: impl Into<PathBuf>,
+    ) -> Self {
         match device {
             MlDevicePreference::GpuWithCpuFallback => {
                 info!("ONNX runtime configured for GPU with explicit CPU fallback");
@@ -55,6 +67,7 @@ impl OnnxImageTextEmbedder {
         Self {
             storage_root,
             device,
+            heif_convert_path: heif_convert_path.into(),
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -104,8 +117,12 @@ impl OnnxImageTextEmbedder {
 impl ImageTextEmbedder for OnnxImageTextEmbedder {
     fn embed_image(&self, request: EmbedImageRequest<'_>) -> Result<Vec<f32>, MlError> {
         let runtime = self.runtime_for(request.model_pack_id, request.manifest)?;
-        let (shape, values) =
-            preprocess_image_for_onnx(request.bytes, request.media_type, request.manifest)?;
+        let (shape, values) = preprocess_image_for_onnx(
+            request.bytes,
+            request.media_type,
+            request.manifest,
+            &self.heif_convert_path,
+        )?;
         let input = Tensor::from_array((shape, values)).map_err(|_| MlError::RuntimeUnavailable)?;
         let mut session = runtime
             .image_session
@@ -213,14 +230,12 @@ pub(crate) fn preprocess_image_for_onnx(
     bytes: &[u8],
     media_type: &str,
     manifest: &ModelPackManifest,
+    heif_convert_path: &Path,
 ) -> Result<(Vec<usize>, Vec<f32>), MlError> {
-    let image_format = match media_type {
-        "image/jpeg" => ImageFormat::Jpeg,
-        "image/png" => ImageFormat::Png,
-        _ => return Err(MlError::UnsupportedMediaType),
-    };
-    let decoded = image::load_from_memory_with_format(bytes, image_format)
-        .map_err(|_| MlError::InvalidImage)?;
+    let (bytes, media_type) =
+        normalize_still_image_for_image_crate(bytes, media_type, heif_convert_path)
+            .map_err(ml_image_error)?;
+    let decoded = decode_still_image(&bytes, media_type).map_err(ml_image_error)?;
     let resized = decoded.resize_exact(
         manifest.image_preprocess.width,
         manifest.image_preprocess.height,
@@ -267,6 +282,14 @@ pub(crate) fn preprocess_image_for_onnx(
             Ok((vec![1, height, width, 3], values))
         }
         _ => Err(ModelPackError::InvalidManifest("image_preprocess.tensor_layout").into()),
+    }
+}
+
+fn ml_image_error(error: MediaToolError) -> MlError {
+    match error {
+        MediaToolError::UnsupportedMediaType => MlError::UnsupportedMediaType,
+        MediaToolError::Image(_) => MlError::InvalidImage,
+        other => MlError::ImageConversion(other),
     }
 }
 

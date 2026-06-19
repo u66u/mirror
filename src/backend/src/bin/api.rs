@@ -2,13 +2,17 @@
 //!
 //! This binary owns Actix startup, HTTP middleware, and process configuration.
 
-use std::io;
+use std::{io, num::NonZeroUsize, sync::Arc};
 
 use actix_web::{App, HttpServer, web};
 use mirror_backend::{
     auth::{self, SetupState},
     config::Config,
-    db, http,
+    db,
+    face::{OnnxFaceRuntime, SharedFaceRuntime},
+    http,
+    ml::{ImageTextEmbedder, SharedImageTextRuntime},
+    onnx_embedder::OnnxImageTextEmbedder,
     runtime::io_other,
     state::AppState,
     storage::ObjectStorage,
@@ -30,13 +34,31 @@ async fn main() -> std::io::Result<()> {
         setup,
         storage,
     };
+    let embedder: Arc<dyn ImageTextEmbedder + Send + Sync> = Arc::new(OnnxImageTextEmbedder::new(
+        config.storage_root.clone(),
+        config.ml_device,
+    ));
+    let ml_runtime = SharedImageTextRuntime::with_max_image_bytes(
+        embedder,
+        NonZeroUsize::MIN,
+        config.ml_max_image_bytes,
+    );
+    let face_runtime: SharedFaceRuntime = Arc::new(OnnxFaceRuntime::new(
+        config.storage_root.clone(),
+        config.ml_device,
+    ));
+    let state_data = web::Data::new(state.clone());
+    let ml_runtime_data = web::Data::new(ml_runtime);
+    let face_runtime_data = web::Data::new(face_runtime);
 
     let bind_addr = config.bind_addr;
     info!(%bind_addr, "starting mirror api");
 
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(state.clone()))
+            .app_data(state_data.clone())
+            .app_data(ml_runtime_data.clone())
+            .app_data(face_runtime_data.clone())
             .wrap(TracingLogger::default())
             .configure(http::configure)
     })

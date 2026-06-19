@@ -1,14 +1,21 @@
 use std::sync::Arc;
 
+use actix_web::{App, cookie::Cookie, http::StatusCode, test as actix_test, web};
 use mirror_backend::{
+    auth::{SessionCreateInput, SetupState, create_session},
+    config::Config,
     face::{self, FaceBox, FaceRuntime, FaceRuntimeRequest, IndexedFace, SharedFaceRuntime},
+    http,
     jobs::{self, JobKind},
     models::{
         ModelPackFileManifest, ModelPackManifest, ModelPackSelfTestManifest, activate_model_pack,
         install_model_pack, record_model_pack_self_test,
     },
+    state::AppState,
+    storage::StorageKey,
 };
 use pgvector::Vector;
+use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -171,6 +178,149 @@ async fn face_index_job_persists_embeddings_and_people_assignment() -> TestResul
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database with pgvector"]
+async fn people_album_routes_list_assigned_and_unassigned_faces() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let assigned_asset = create_promoted_asset(&deps, "assigned-face.jpg").await?;
+    let unassigned_asset = create_promoted_asset(&deps, "unassigned-face.jpg").await?;
+    let person_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO people (id, owner_id, display_name, review_status)
+        VALUES ($1, 1, 'Ada', 'reviewed')
+        "#,
+    )
+    .bind(person_id)
+    .execute(&deps.pool)
+    .await?;
+    let assigned_face =
+        insert_face_occurrence(&deps.pool, assigned_asset.internal_id, "assigned", 0.10).await?;
+    let chip_key = StorageKey::face_chip(assigned_face, "webp", "test-face-chip-v1")?;
+    deps.storage.write(&chip_key, b"chip-webp".to_vec()).await?;
+    sqlx::query(
+        r#"
+        UPDATE face_occurrences
+        SET chip_storage_key = $1, chip_width = 112, chip_height = 112, chip_format = 'webp'
+        WHERE id = $2
+        "#,
+    )
+    .bind(chip_key.as_str())
+    .bind(assigned_face)
+    .execute(&deps.pool)
+    .await?;
+    let unassigned_face =
+        insert_face_occurrence(&deps.pool, unassigned_asset.internal_id, "unassigned", 0.55)
+            .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO person_faces (person_id, face_occurrence_id, owner_id)
+        VALUES ($1, $2, 1)
+        "#,
+    )
+    .bind(person_id)
+    .bind(assigned_face)
+    .execute(&deps.pool)
+    .await?;
+
+    let assigned =
+        mirror_backend::people::list_person_faces(&deps.pool, 1, person_id, Some(10)).await?;
+    assert_eq!(assigned.len(), 1);
+    assert_eq!(assigned[0].face_id, assigned_face);
+    assert_eq!(assigned[0].asset_id, assigned_asset.public_id);
+    assert_eq!(assigned[0].review_state, "assigned");
+    assert_eq!(assigned[0].bbox.left, 0.10);
+    assert!(assigned[0].chip_available);
+
+    let unassigned = mirror_backend::people::list_unassigned_faces(&deps.pool, 1, Some(10)).await?;
+    assert_eq!(unassigned.len(), 1);
+    assert_eq!(unassigned[0].face_id, unassigned_face);
+    assert_eq!(unassigned[0].asset_id, unassigned_asset.public_id);
+    assert_eq!(unassigned[0].review_state, "unassigned");
+
+    let session = create_session(
+        &deps.pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("people-album-route-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env(),
+                db: Some(deps.pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(deps.storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+
+    let assigned_request = actix_test::TestRequest::get()
+        .uri(&format!("/people/{person_id}/faces?limit=5"))
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .to_request();
+    let assigned_response = actix_test::call_service(&app, assigned_request).await;
+    assert_eq!(assigned_response.status(), StatusCode::OK);
+    let assigned_body: Value = actix_test::read_body_json(assigned_response).await;
+    assert_eq!(assigned_body.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        assigned_body[0]["face_id"].as_str(),
+        Some(assigned_face.to_string().as_str())
+    );
+    assert_eq!(
+        assigned_body[0]["asset_id"].as_str(),
+        Some(assigned_asset.public_id.to_string().as_str())
+    );
+    assert_eq!(assigned_body[0]["chip_available"].as_bool(), Some(true));
+
+    let chip_request = actix_test::TestRequest::get()
+        .uri(&format!("/people/faces/{assigned_face}/chip"))
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .to_request();
+    let chip_response = actix_test::call_service(&app, chip_request).await;
+    assert_eq!(chip_response.status(), StatusCode::OK);
+    assert_eq!(
+        chip_response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/webp")
+    );
+    let chip_body = actix_test::read_body(chip_response).await;
+    assert_eq!(&chip_body[..], b"chip-webp");
+
+    let unassigned_request = actix_test::TestRequest::get()
+        .uri("/people/faces/unassigned?limit=5")
+        .cookie(Cookie::new(
+            "mirror_session",
+            session.token.expose().to_owned(),
+        ))
+        .to_request();
+    let unassigned_response = actix_test::call_service(&app, unassigned_request).await;
+    assert_eq!(unassigned_response.status(), StatusCode::OK);
+    let unassigned_body: Value = actix_test::read_body_json(unassigned_response).await;
+    assert_eq!(unassigned_body.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        unassigned_body[0]["face_id"].as_str(),
+        Some(unassigned_face.to_string().as_str())
+    );
+    assert_eq!(
+        unassigned_body[0]["asset_id"].as_str(),
+        Some(unassigned_asset.public_id.to_string().as_str())
+    );
+    Ok(())
+}
+
 fn face_embedding_manifest() -> ModelPackManifest {
     ModelPackManifest {
         kind: "face_embedding".to_owned(),
@@ -249,8 +399,34 @@ impl FaceRuntime for FakeFaceRuntime {
             },
             quality: Some(0.95),
             embedding: self.embedding.clone(),
+            chip: None,
         }])
     }
+}
+
+async fn insert_face_occurrence(
+    pool: &sqlx::PgPool,
+    asset_id: Uuid,
+    review_state: &str,
+    left: f32,
+) -> TestResult<Uuid> {
+    let face_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO face_occurrences (
+            id, asset_id, owner_id, detection_model_pack_id,
+            bbox_left, bbox_top, bbox_width, bbox_height, quality, review_state
+        )
+        VALUES ($1, $2, 1, NULL, $3, 0.20, 0.30, 0.40, 0.90, $4)
+        "#,
+    )
+    .bind(face_id)
+    .bind(asset_id)
+    .bind(left)
+    .bind(review_state)
+    .execute(pool)
+    .await?;
+    Ok(face_id)
 }
 
 async fn insert_asset(pool: &sqlx::PgPool) -> TestResult<Uuid> {

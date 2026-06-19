@@ -154,26 +154,12 @@ impl HeifImageProcessor {
     pub fn production() -> Self {
         Self::new("heif-convert")
     }
-
-    fn bytes_for_image_crate(
-        &self,
-        bytes: &[u8],
-        media_type: &str,
-    ) -> Result<(Vec<u8>, &'static str), MediaToolError> {
-        if is_heif_media_type(media_type) {
-            Ok((
-                convert_heif_to_png(&self.heif_convert_path, bytes)?,
-                "image/png",
-            ))
-        } else {
-            Ok((bytes.to_vec(), media_type_for_image_crate(media_type)?))
-        }
-    }
 }
 
 impl ImageProcessor for HeifImageProcessor {
     fn inspect(&self, bytes: &[u8], media_type: &str) -> Result<ImageInfo, MediaToolError> {
-        let (bytes, media_type) = self.bytes_for_image_crate(bytes, media_type)?;
+        let (bytes, media_type) =
+            normalize_still_image_for_image_crate(bytes, media_type, &self.heif_convert_path)?;
         self.inner.inspect(&bytes, media_type)
     }
 
@@ -183,7 +169,8 @@ impl ImageProcessor for HeifImageProcessor {
         media_type: &str,
         kind: DerivativeKind,
     ) -> Result<GeneratedDerivative, MediaToolError> {
-        let (bytes, media_type) = self.bytes_for_image_crate(bytes, media_type)?;
+        let (bytes, media_type) =
+            normalize_still_image_for_image_crate(bytes, media_type, &self.heif_convert_path)?;
         self.inner.generate(&bytes, media_type, kind)
     }
 }
@@ -705,7 +692,11 @@ fn ensure_loaded_size(original: &AssetOriginal, loaded: usize) -> Result<(), Med
     Ok(())
 }
 
-fn decode_image(bytes: &[u8], media_type: &str) -> Result<image::DynamicImage, MediaToolError> {
+/// Decodes one `image`-crate-supported still image with Mirror's safety limits.
+pub fn decode_still_image(
+    bytes: &[u8],
+    media_type: &str,
+) -> Result<image::DynamicImage, MediaToolError> {
     let format = match media_type_for_image_crate(media_type)? {
         "image/jpeg" => ImageFormat::Jpeg,
         "image/png" => ImageFormat::Png,
@@ -721,6 +712,25 @@ fn decode_image(bytes: &[u8], media_type: &str) -> Result<image::DynamicImage, M
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(limits);
     reader.decode().map_err(From::from)
+}
+
+fn decode_image(bytes: &[u8], media_type: &str) -> Result<image::DynamicImage, MediaToolError> {
+    decode_still_image(bytes, media_type)
+}
+
+/// Converts HEIC/HEIF into PNG bytes and passes native `image` formats through.
+///
+/// The returned media type is safe to pass to [`decode_still_image`].
+pub fn normalize_still_image_for_image_crate(
+    bytes: &[u8],
+    media_type: &str,
+    heif_convert_path: &Path,
+) -> Result<(Vec<u8>, &'static str), MediaToolError> {
+    if is_heif_media_type(media_type) {
+        Ok((convert_heif_to_png(heif_convert_path, bytes)?, "image/png"))
+    } else {
+        Ok((bytes.to_vec(), media_type_for_image_crate(media_type)?))
+    }
 }
 
 fn media_type_for_image_crate(media_type: &str) -> Result<&'static str, MediaToolError> {

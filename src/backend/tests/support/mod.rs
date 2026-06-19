@@ -324,14 +324,17 @@ pub fn valid_image_preprocess() -> ImagePreprocessConfig {
 #[allow(dead_code)] // T506: shared face detector fixture config.
 pub fn valid_face_detection_config() -> mirror_backend::models::FaceDetectionModelConfig {
     mirror_backend::models::FaceDetectionModelConfig {
+        adapter: "decoded_boxes_v1".to_owned(),
         model_path: "models/face_detector.onnx".to_owned(),
         input_name: "image".to_owned(),
         boxes_output_name: "boxes".to_owned(),
         scores_output_name: "scores".to_owned(),
         landmarks_output_name: None,
+        output_names: Vec::new(),
         box_coordinate_space: "normalized".to_owned(),
         box_format: "xywh".to_owned(),
         score_threshold: 0.5,
+        min_face_size_ratio: 0.0,
         nms_threshold: 0.3,
         max_faces: 100,
     }
@@ -340,6 +343,7 @@ pub fn valid_face_detection_config() -> mirror_backend::models::FaceDetectionMod
 #[allow(dead_code)] // T506: shared face embedding fixture config.
 pub fn valid_face_embedding_config() -> mirror_backend::models::FaceEmbeddingModelConfig {
     mirror_backend::models::FaceEmbeddingModelConfig {
+        adapter: "raw_embedding_v1".to_owned(),
         model_path: "models/face_embedding.onnx".to_owned(),
         input_name: "face".to_owned(),
         output_name: "embedding".to_owned(),
@@ -351,6 +355,7 @@ pub fn valid_face_embedding_config() -> mirror_backend::models::FaceEmbeddingMod
         mean: [0.5, 0.5, 0.5],
         std: [0.5, 0.5, 0.5],
         match_threshold: 0.75,
+        l2_normalize_output: false,
     }
 }
 

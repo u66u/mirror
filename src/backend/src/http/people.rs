@@ -31,6 +31,13 @@ pub struct FaceSelectionRequest {
     pub face_ids: Vec<Uuid>,
 }
 
+/// Face list query parameters.
+#[derive(Debug, Deserialize)]
+pub struct FaceListQuery {
+    /// Optional page size, clamped by the people module.
+    pub limit: Option<i64>,
+}
+
 /// Split response.
 #[derive(Debug, Serialize)]
 pub struct SplitFacesResponse {
@@ -55,6 +62,77 @@ pub async fn list_people_route(
         .await
         .map_err(map_people_error)?;
     Ok(HttpResponse::Ok().json(people))
+}
+
+/// Lists visible faces assigned to one owner-local person.
+#[get("/people/{person_id}/faces")]
+pub async fn list_person_faces_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    query: web::Query<FaceListQuery>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let owner = auth::require_owner(pool, &req).await?;
+    let faces = people::list_person_faces(pool, owner.owner_id(), path.into_inner(), query.limit)
+        .await
+        .map_err(map_people_error)?;
+    Ok(HttpResponse::Ok().json(faces))
+}
+
+/// Lists owner-local faces waiting for people review.
+#[get("/people/faces/unassigned")]
+pub async fn list_unassigned_faces_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    query: web::Query<FaceListQuery>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let owner = auth::require_owner(pool, &req).await?;
+    let faces = people::list_unassigned_faces(pool, owner.owner_id(), query.limit)
+        .await
+        .map_err(map_people_error)?;
+    Ok(HttpResponse::Ok().json(faces))
+}
+
+/// Serves one generated face chip.
+#[get("/people/faces/{face_id}/chip")]
+pub async fn get_face_chip_route(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let Some(storage) = state.storage.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "storage_unavailable",
+            "storage is unavailable",
+        ));
+    };
+    let owner = auth::require_owner(pool, &req).await?;
+    let chip = people::get_face_chip(pool, owner.owner_id(), path.into_inner())
+        .await
+        .map_err(map_people_error)?;
+    let bytes = storage
+        .read_bounded(&chip.storage_key, 2 * 1024 * 1024)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(HttpResponse::Ok().content_type(chip.media_type).body(bytes))
 }
 
 /// Renames and trusts one people cluster.
@@ -187,6 +265,14 @@ fn map_people_error(error: PeopleReviewError) -> ApiError {
                 action = "people_http_error",
                 ?error,
                 "people database error"
+            );
+            ApiError::Internal
+        }
+        PeopleReviewError::StorageKey(error) => {
+            tracing::error!(
+                action = "people_http_error",
+                ?error,
+                "people storage key error"
             );
             ApiError::Internal
         }

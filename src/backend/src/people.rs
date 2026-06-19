@@ -8,7 +8,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use sqlx::{PgPool, Row};
 use thiserror::Error;
+use time::OffsetDateTime;
 use uuid::Uuid;
+
+use crate::storage::{StorageKey, StorageKeyError};
+
+const DEFAULT_FACE_LIST_LIMIT: i64 = 100;
+const MAX_FACE_LIST_LIMIT: i64 = 500;
 
 /// Review status for a person cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +82,9 @@ pub enum PeopleReviewError {
     /// Database failed.
     #[error("people database error")]
     Database(#[from] sqlx::Error),
+    /// Stored face chip key is invalid.
+    #[error("people storage key error")]
+    StorageKey(#[from] StorageKeyError),
 }
 
 impl PartialEq for PeopleReviewError {
@@ -104,6 +113,49 @@ pub struct PersonSummary {
     pub review_status: String,
     /// Number of visible assigned faces.
     pub face_count: i64,
+}
+
+/// Public bounding-box view for a detected face.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct FaceBounds {
+    /// Left coordinate in `0.0..=1.0`.
+    pub left: f32,
+    /// Top coordinate in `0.0..=1.0`.
+    pub top: f32,
+    /// Width in `0.0..=1.0`.
+    pub width: f32,
+    /// Height in `0.0..=1.0`.
+    pub height: f32,
+}
+
+/// One face occurrence in a people album or review queue.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FaceAlbumItem {
+    /// Face occurrence ID used by review mutations.
+    pub face_id: Uuid,
+    /// Public asset ID containing the face.
+    pub asset_id: Uuid,
+    /// Asset creation time for album ordering.
+    pub asset_created_at: OffsetDateTime,
+    /// Original media type.
+    pub media_type: String,
+    /// Normalized face bounds within the asset.
+    pub bbox: FaceBounds,
+    /// Detector confidence if available.
+    pub quality: Option<f32>,
+    /// Face review state.
+    pub review_state: String,
+    /// Whether a generated face chip is available.
+    pub chip_available: bool,
+}
+
+/// Stored face chip object metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaceChipObject {
+    /// Storage key containing the generated chip.
+    pub storage_key: StorageKey,
+    /// HTTP media type for the encoded chip.
+    pub media_type: &'static str,
 }
 
 impl PeopleReviewState {
@@ -332,6 +384,189 @@ pub async fn list_people(
             face_count: row.get("face_count"),
         })
         .collect())
+}
+
+/// Lists visible assigned faces for one owner-local person cluster.
+pub async fn list_person_faces(
+    pool: &PgPool,
+    owner_id: i16,
+    person_id: Uuid,
+    limit: Option<i64>,
+) -> Result<Vec<FaceAlbumItem>, PeopleReviewError> {
+    ensure_visible_person(pool, owner_id, person_id).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            fo.id AS face_id,
+            a.public_id AS asset_public_id,
+            a.created_at AS asset_created_at,
+            o.media_type,
+            fo.bbox_left,
+            fo.bbox_top,
+            fo.bbox_width,
+            fo.bbox_height,
+            fo.quality,
+            fo.review_state,
+            fo.chip_storage_key IS NOT NULL AS chip_available
+        FROM person_faces pf
+        JOIN face_occurrences fo
+          ON fo.id = pf.face_occurrence_id
+         AND fo.owner_id = pf.owner_id
+        JOIN assets a
+          ON a.id = fo.asset_id
+         AND a.owner_id = fo.owner_id
+        JOIN originals o
+          ON o.id = a.original_id
+        WHERE pf.owner_id = $1
+          AND pf.person_id = $2
+          AND pf.review_state = 'assigned'
+          AND fo.review_state = 'assigned'
+          AND a.trashed_at IS NULL
+        ORDER BY a.created_at DESC, fo.created_at DESC, fo.id DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(owner_id)
+    .bind(person_id)
+    .bind(face_list_limit(limit))
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(face_album_item_from_row).collect()
+}
+
+/// Lists owner-local faces that are not assigned to a visible person.
+pub async fn list_unassigned_faces(
+    pool: &PgPool,
+    owner_id: i16,
+    limit: Option<i64>,
+) -> Result<Vec<FaceAlbumItem>, PeopleReviewError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            fo.id AS face_id,
+            a.public_id AS asset_public_id,
+            a.created_at AS asset_created_at,
+            o.media_type,
+            fo.bbox_left,
+            fo.bbox_top,
+            fo.bbox_width,
+            fo.bbox_height,
+            fo.quality,
+            fo.review_state,
+            fo.chip_storage_key IS NOT NULL AS chip_available
+        FROM face_occurrences fo
+        JOIN assets a
+          ON a.id = fo.asset_id
+         AND a.owner_id = fo.owner_id
+        JOIN originals o
+          ON o.id = a.original_id
+        LEFT JOIN person_faces pf
+          ON pf.face_occurrence_id = fo.id
+         AND pf.owner_id = fo.owner_id
+        WHERE fo.owner_id = $1
+          AND fo.review_state = 'unassigned'
+          AND pf.face_occurrence_id IS NULL
+          AND a.trashed_at IS NULL
+        ORDER BY a.created_at DESC, fo.created_at DESC, fo.id DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(owner_id)
+    .bind(face_list_limit(limit))
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(face_album_item_from_row).collect()
+}
+
+/// Resolves a generated face chip for an owner-visible face.
+pub async fn get_face_chip(
+    pool: &PgPool,
+    owner_id: i16,
+    face_id: Uuid,
+) -> Result<FaceChipObject, PeopleReviewError> {
+    let row = sqlx::query(
+        r#"
+        SELECT fo.chip_storage_key, fo.chip_format
+        FROM face_occurrences fo
+        JOIN assets a
+          ON a.id = fo.asset_id
+         AND a.owner_id = fo.owner_id
+        WHERE fo.owner_id = $1
+          AND fo.id = $2
+          AND fo.review_state <> 'hidden'
+          AND fo.chip_storage_key IS NOT NULL
+          AND a.trashed_at IS NULL
+        "#,
+    )
+    .bind(owner_id)
+    .bind(face_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Err(PeopleReviewError::FaceNotFound);
+    };
+    let format: String = row.get("chip_format");
+    let media_type = match format.as_str() {
+        "webp" => "image/webp",
+        _ => return Err(StorageKeyError::UnsafePath.into()),
+    };
+    Ok(FaceChipObject {
+        storage_key: StorageKey::new(row.get::<String, _>("chip_storage_key"))?,
+        media_type,
+    })
+}
+
+async fn ensure_visible_person(
+    pool: &PgPool,
+    owner_id: i16,
+    person_id: Uuid,
+) -> Result<(), PeopleReviewError> {
+    let exists: Option<bool> = sqlx::query_scalar(
+        r#"
+        SELECT true
+        FROM people
+        WHERE id = $1
+          AND owner_id = $2
+          AND review_status <> 'hidden'
+        "#,
+    )
+    .bind(person_id)
+    .bind(owner_id)
+    .fetch_optional(pool)
+    .await?;
+    if exists.unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(PeopleReviewError::PersonNotFound)
+    }
+}
+
+fn face_album_item_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<FaceAlbumItem, PeopleReviewError> {
+    Ok(FaceAlbumItem {
+        face_id: row.get("face_id"),
+        asset_id: row.get("asset_public_id"),
+        asset_created_at: row.get("asset_created_at"),
+        media_type: row.get("media_type"),
+        bbox: FaceBounds {
+            left: row.get("bbox_left"),
+            top: row.get("bbox_top"),
+            width: row.get("bbox_width"),
+            height: row.get("bbox_height"),
+        },
+        quality: row.get("quality"),
+        review_state: row.get("review_state"),
+        chip_available: row.get("chip_available"),
+    })
+}
+
+fn face_list_limit(limit: Option<i64>) -> i64 {
+    limit
+        .unwrap_or(DEFAULT_FACE_LIST_LIMIT)
+        .clamp(1, MAX_FACE_LIST_LIMIT)
 }
 
 /// Renames and trusts a persisted person cluster.

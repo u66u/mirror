@@ -21,7 +21,7 @@ use mirror_backend::{
 use uuid::Uuid;
 
 const USAGE: &str = "\
-Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--restore-plan SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--retention-plan] [--run-backup PG_DUMP_PATH] [--run-restore SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--run-retention] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID] [--enqueue-integrity-scan] [--ensure-semantic-ann-index MODEL_PACK_ID] [--model-pack-schema] [--validate-model-pack DIR]
+Usage: maintenance [--delete-orphan KEY ...] [--apply] [--backup-plan PG_DUMP_PATH] [--restore-plan SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--retention-plan] [--run-backup PG_DUMP_PATH] [--run-restore SNAPSHOT_ID RESTORE_TARGET PG_DUMP_PATH] [--run-retention] [--repository-hint HINT] [--restore-check BACKUP_RUN_ID] [--enqueue-integrity-scan] [--ensure-semantic-ann-index MODEL_PACK_ID] [--model-pack-schema] [--model-pack-presets] [--model-pack-preset NAME] [--validate-model-pack DIR]
 
 Scans originals by default without modifying storage.
 --delete-orphan KEY  Select a currently reported orphan for remediation.
@@ -41,6 +41,9 @@ Scans originals by default without modifying storage.
 --ensure-semantic-ann-index MODEL_PACK_ID
                      Create the opt-in HNSW ANN index for one semantic model pack.
 --model-pack-schema  Print generated model-pack manifest JSON Schema.
+--model-pack-presets Print built-in model-pack preset names.
+--model-pack-preset NAME
+                     Print one built-in model-pack preset manifest as JSON.
 --validate-model-pack DIR
                      Validate local model-pack manifest and files without API/DB.
 ";
@@ -60,6 +63,8 @@ struct Options {
     enqueue_integrity_scan: bool,
     ensure_semantic_ann_index: Option<Uuid>,
     print_model_pack_schema: bool,
+    print_model_pack_presets: bool,
+    print_model_pack_preset: Option<String>,
     validate_model_pack_dir: Option<std::path::PathBuf>,
 }
 
@@ -75,6 +80,17 @@ async fn main() -> io::Result<()> {
     if options.print_model_pack_schema {
         let schema = models::model_pack_manifest_schema_json().map_err(io_other)?;
         let body = serde_json::to_string_pretty(&schema).map_err(io_other)?;
+        println!("{body}");
+        return Ok(());
+    }
+    if options.print_model_pack_presets {
+        for preset in models::MODEL_PACK_PRESETS {
+            println!("{preset}");
+        }
+        return Ok(());
+    }
+    if let Some(preset) = options.print_model_pack_preset.as_deref() {
+        let body = models::model_pack_preset_manifest_json(preset).map_err(io_other)?;
         println!("{body}");
         return Ok(());
     }
@@ -251,6 +267,8 @@ fn parse_args() -> Result<Option<Options>, CliError> {
     let mut enqueue_integrity_scan = false;
     let mut ensure_semantic_ann_index = None;
     let mut print_model_pack_schema = false;
+    let mut print_model_pack_presets = false;
+    let mut print_model_pack_preset = None;
     let mut validate_model_pack_dir = None;
     let mut args = env::args().skip(1);
 
@@ -314,6 +332,11 @@ fn parse_args() -> Result<Option<Options>, CliError> {
                 );
             }
             "--model-pack-schema" => print_model_pack_schema = true,
+            "--model-pack-presets" => print_model_pack_presets = true,
+            "--model-pack-preset" => {
+                print_model_pack_preset =
+                    Some(args.next().ok_or(CliError::MissingModelPackPreset)?);
+            }
             "--validate-model-pack" => {
                 let raw_path = args.next().ok_or(CliError::MissingModelPackDir)?;
                 validate_model_pack_dir = Some(std::path::PathBuf::from(raw_path));
@@ -341,6 +364,8 @@ fn parse_args() -> Result<Option<Options>, CliError> {
         enqueue_integrity_scan,
         ensure_semantic_ann_index,
         print_model_pack_schema,
+        print_model_pack_presets,
+        print_model_pack_preset,
         validate_model_pack_dir,
     }))
 }
@@ -372,6 +397,8 @@ enum CliError {
     MissingRestoreCheckId,
     #[error("--ensure-semantic-ann-index requires MODEL_PACK_ID")]
     MissingModelPackId,
+    #[error("--model-pack-preset requires NAME")]
+    MissingModelPackPreset,
     #[error("--validate-model-pack requires DIR")]
     MissingModelPackDir,
     #[error("invalid backup run ID: {0}")]

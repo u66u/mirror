@@ -135,6 +135,41 @@ fn maintenance_prints_generated_model_pack_schema_without_database() -> TestResu
 }
 
 #[test]
+fn maintenance_prints_json_model_pack_presets_without_database() -> TestResult {
+    let list = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .arg("--model-pack-presets")
+        .output()?;
+    assert!(list.status.success());
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(stdout.contains("opencv_yunet_detection_2023mar"));
+    assert!(stdout.contains("insightface_buffalo_l_scrfd_arcface"));
+
+    let preset = Command::new(env!("CARGO_BIN_EXE_maintenance"))
+        .arg("--model-pack-preset")
+        .arg("insightface_buffalo_l_scrfd_arcface")
+        .output()?;
+    assert!(preset.status.success());
+    let manifest: mirror_backend::models::ModelPackManifest =
+        serde_json::from_slice(&preset.stdout).map_err(std::io::Error::other)?;
+    assert_eq!(manifest.kind, "face_identity");
+    assert_eq!(
+        manifest
+            .face_detection
+            .as_ref()
+            .map(|config| config.adapter.as_str()),
+        Some("scrfd")
+    );
+    assert_eq!(
+        manifest
+            .face_embedding
+            .as_ref()
+            .map(|config| config.adapter.as_str()),
+        Some("arcface")
+    );
+    Ok(())
+}
+
+#[test]
 fn maintenance_validates_local_model_pack_without_database() -> TestResult {
     let source_dir = write_cli_model_pack()?;
     let output = Command::new(env!("CARGO_BIN_EXE_maintenance"))

@@ -68,6 +68,19 @@ impl StorageKey {
         ))
     }
 
+    /// Builds a generated face-chip derivative key.
+    pub fn face_chip(
+        face_id: Uuid,
+        format: &str,
+        generator_version: &str,
+    ) -> Result<Self, StorageKeyError> {
+        validate_segment(format)?;
+        validate_segment(generator_version)?;
+        Self::new(format!(
+            "derivatives/{generator_version}/face-chip/{format}/{face_id}.{format}"
+        ))
+    }
+
     /// Builds a storage key for a validated model-pack file.
     pub fn model_pack_file(
         model_pack_id: Uuid,

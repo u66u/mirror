@@ -11,8 +11,8 @@ use mirror_backend::{
     jobs::{JobKind, LeasedJob},
     media::{
         DerivativeKind, HeifImageProcessor, ImageInfo, ImageProcessor, MediaError, MediaToolError,
-        RustImageProcessor, extract_metadata, extract_owner_metadata, generate_derivatives,
-        run_media_job,
+        RustImageProcessor, decode_still_image, extract_metadata, extract_owner_metadata,
+        generate_derivatives, normalize_still_image_for_image_crate, run_media_job,
     },
     storage::StorageKey,
     video::FfmpegVideoProcessor,
@@ -56,6 +56,35 @@ fn rust_image_processor_generates_bounded_webp_without_preserving_source_format(
     );
 
     Ok(())
+}
+
+#[test]
+fn shared_image_normalization_passes_native_formats_through() -> TestResult {
+    let bytes = png_fixture()?;
+
+    let (normalized, media_type) = normalize_still_image_for_image_crate(
+        &bytes,
+        "image/png",
+        std::path::Path::new("__unused_heif_convert__"),
+    )?;
+    let decoded = decode_still_image(&normalized, media_type)?;
+
+    assert_eq!(media_type, "image/png");
+    assert_eq!(normalized, bytes);
+    assert_eq!(decoded.width(), 64);
+    assert_eq!(decoded.height(), 32);
+    Ok(())
+}
+
+#[test]
+fn shared_image_normalization_uses_configured_heif_converter() {
+    let result = normalize_still_image_for_image_crate(
+        b"\0\0\0\x18ftypheic\0\0\0\0mif1heic",
+        "image/heic",
+        std::path::Path::new("__mirror_missing_heif_convert__"),
+    );
+
+    assert!(matches!(result, Err(MediaToolError::HeifToolUnavailable)));
 }
 
 #[test]

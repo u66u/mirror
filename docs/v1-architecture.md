@@ -491,8 +491,21 @@ People albums:
 - Curated face packs should prefer a proven detector plus recognition pair
   such as OpenCV YuNet/SFace, SCRFD/ArcFace, or AuraFace-compatible ArcFace
   embeddings, packaged as pinned ONNX model-pack files with golden self-tests.
+- Face model packs select built-in backend adapters, not arbitrary user code.
+  Detector adapters own detector-specific preprocessing and postprocessing
+  such as resize/pad metadata, YuNet/SCRFD head decoding, landmarks, and NMS.
+  Embedding adapters own face-chip tensor preparation and output
+  normalization. The shared ONNX runtime only opens sessions, runs declared
+  tensors, and returns task outputs.
+- V1 built-in adapter keys are `decoded_boxes_v1`, `yunet_opencv_compat`, and
+  `scrfd` for detectors, plus `raw_embedding_v1`, `sface_opencv_compat`, and
+  `arcface` for embedders. These are internal backend contracts, not a stable
+  public plugin API.
 - Pipeline target: detect face, align/crop, embed, cluster, let owner
   name/merge/split/unassign or hide clusters.
+- Backend people-album reads expose visible clusters, assigned face occurrences
+  for one person, and the unassigned face review queue. Face occurrence IDs are
+  the mutation handles; asset IDs in responses remain public asset IDs.
 - Face recognition is user-enabled and can be disabled independently from
   semantic search.
 - People labels are private library metadata and are not exposed in share pages
