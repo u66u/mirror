@@ -27,13 +27,13 @@ use crate::{
     jobs::{self, JobError, JobKind, JobSpec, LeasedJob},
     media::{MediaToolError, decode_still_image, normalize_still_image_for_image_crate},
     ml::MlError,
+    ml::onnx_embedder::{
+        OnnxSessionOptions, model_pack_file_path, normalize_channel, open_session_with_options,
+        ordered_channels,
+    },
     models::{
         self, FaceDetectionModelConfig, FaceEmbeddingModelConfig, ImagePreprocessConfig,
         ModelPackError, ModelPackKind, ModelPackManifest, validate_embedding_output,
-    },
-    onnx_embedder::{
-        OnnxSessionOptions, model_pack_file_path, normalize_channel, open_session_with_options,
-        ordered_channels,
     },
     storage::{ObjectStorage, StorageError, StorageKey, StorageKeyError},
 };

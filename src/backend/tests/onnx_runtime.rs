@@ -6,9 +6,9 @@ use std::{
 
 use mirror_backend::{
     config::MlDevicePreference,
+    ml::onnx_embedder::OnnxImageTextEmbedder,
     ml::{EmbedImageRequest, EmbedTextRequest, ImageTextEmbedder},
     models::{ModelPackManifest, validate_embedding_output},
-    onnx_embedder::OnnxImageTextEmbedder,
 };
 use uuid::Uuid;
 

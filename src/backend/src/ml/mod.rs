@@ -4,6 +4,8 @@
 //! Mirror side effects: load original, validate output, store embedding, update
 //! reindex progress.
 
+pub mod onnx_embedder;
+
 use std::{num::NonZeroUsize, sync::Arc};
 use thiserror::Error;
 

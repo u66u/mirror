@@ -16,7 +16,6 @@ pub mod jobs;
 pub mod media;
 pub mod ml;
 pub mod models;
-pub mod onnx_embedder;
 pub mod paths;
 pub mod people;
 mod public_derivatives;

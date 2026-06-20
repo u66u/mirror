@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check clippy test check-duplicate-fns db-up db-down test-db test-ml test-db-all backup-restore-drill gate-backend web-typecheck web-lint web-test web-e2e web-build gate-web android-format android-static android-test android-lint android-build android-device-test gate-android gate
+.PHONY: fmt fmt-check check check-sqlx clippy test check-duplicate-fns db-up db-down test-db test-ml test-db-all backup-restore-drill gate-backend web-typecheck web-lint web-test web-e2e web-build gate-web android-format android-static android-test android-lint android-build android-device-test gate-android gate
 
 ANDROID_JAVA_HOME ?= /usr/lib/jvm/java-17-openjdk
 ANDROID_SDK_ROOT ?= $(HOME)/Android/Sdk
@@ -13,6 +13,9 @@ fmt-check:
 
 check:
 	cargo check
+
+check-sqlx:
+	cd src/backend && set -a && . ./.env && set +a && cargo check --all-targets
 
 clippy:
 	cargo clippy --all-targets --all-features -- -D warnings

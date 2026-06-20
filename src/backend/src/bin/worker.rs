@@ -10,7 +10,7 @@ use mirror_backend::{
     jobs::JobKind,
     media::HeifImageProcessor,
     ml::MlRuntime,
-    onnx_embedder::{OnnxImageTextEmbedder, OnnxSessionOptions},
+    ml::onnx_embedder::{OnnxImageTextEmbedder, OnnxSessionOptions},
     runtime::io_other,
     storage::ObjectStorage,
     telemetry,
