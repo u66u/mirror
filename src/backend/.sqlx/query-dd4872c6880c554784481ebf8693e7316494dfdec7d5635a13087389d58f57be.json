@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE person_faces\n        SET person_id = $1, updated_at = now()\n        WHERE person_id = $2 AND owner_id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dd4872c6880c554784481ebf8693e7316494dfdec7d5635a13087389d58f57be"
+}

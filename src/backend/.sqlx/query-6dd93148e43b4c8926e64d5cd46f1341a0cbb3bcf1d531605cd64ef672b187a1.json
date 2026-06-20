@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE person_faces\n        SET person_id = $1, updated_at = now()\n        WHERE person_id = $2\n          AND owner_id = $3\n          AND face_occurrence_id = ANY($4)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int2",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6dd93148e43b4c8926e64d5cd46f1341a0cbb3bcf1d531605cd64ef672b187a1"
+}

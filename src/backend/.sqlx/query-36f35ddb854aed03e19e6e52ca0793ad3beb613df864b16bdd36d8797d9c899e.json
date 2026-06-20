@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE face_occurrences\n        SET review_state = 'unassigned', updated_at = now()\n        WHERE owner_id = $1\n          AND id = ANY($2)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int2",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "36f35ddb854aed03e19e6e52ca0793ad3beb613df864b16bdd36d8797d9c899e"
+}

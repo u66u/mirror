@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO owner_recovery_codes (\n                id,\n                owner_id,\n                code_hash,\n                code_hash_alg,\n                version\n            )\n            VALUES ($1, 1, $2, 'sha256', $3)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "60e90800f77585059570fbf2bc0a58817147e9a75378ae8ec3dc28c6a895d77d"
+}

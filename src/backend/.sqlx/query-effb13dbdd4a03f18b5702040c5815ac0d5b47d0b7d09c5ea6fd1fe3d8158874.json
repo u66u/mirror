@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE integrity_scan_runs\n        SET status = 'failed', error_message = $2, completed_at = now(), updated_at = now()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "effb13dbdd4a03f18b5702040c5815ac0d5b47d0b7d09c5ea6fd1fe3d8158874"
+}

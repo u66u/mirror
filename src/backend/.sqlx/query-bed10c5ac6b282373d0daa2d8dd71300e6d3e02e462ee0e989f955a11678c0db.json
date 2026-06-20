@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            totp_secret_ciphertext,\n            totp_enabled_at IS NOT NULL AS \"enabled!\"\n        FROM owner_accounts\n        WHERE id = 1\n          AND disabled_at IS NULL\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "totp_secret_ciphertext",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "enabled!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "bed10c5ac6b282373d0daa2d8dd71300e6d3e02e462ee0e989f955a11678c0db"
+}

@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check clippy test check-duplicate-fns db-up db-down test-db backup-restore-drill gate-backend web-typecheck web-lint web-test web-e2e web-build gate-web android-format android-static android-test android-lint android-build android-device-test gate-android gate
+.PHONY: fmt fmt-check check clippy test check-duplicate-fns db-up db-down test-db test-ml test-db-all backup-restore-drill gate-backend web-typecheck web-lint web-test web-e2e web-build gate-web android-format android-static android-test android-lint android-build android-device-test gate-android gate
 
 ANDROID_JAVA_HOME ?= /usr/lib/jvm/java-17-openjdk
 ANDROID_SDK_ROOT ?= $(HOME)/Android/Sdk
@@ -31,7 +31,18 @@ db-down:
 	docker compose -f infra/compose.yaml down
 
 test-db:
-	MIRROR_TEST_DATABASE_URL=$${MIRROR_TEST_DATABASE_URL:-postgres://mirror:mirror@127.0.0.1:54329/mirror_test} cargo test -p mirror-backend --tests -- --ignored --test-threads=1
+	MIRROR_TEST_DATABASE_URL=$${MIRROR_TEST_DATABASE_URL:-postgres://mirror:mirror@127.0.0.1:54329/mirror_test} cargo test -p mirror-backend --tests -- --ignored --test-threads=1 \
+		--skip backend_requests_index_real_face_fixtures_into_people_albums \
+		--skip backend_requests_index_real_insightface_fixtures_into_people_albums \
+		--skip insightface_reference_scrfd_arcface_matches_backend_outputs \
+		--skip insightface_scrfd_arcface_models_cluster_local_people_fixtures \
+		--skip opencv_reference_yunet_sface_matches_backend_outputs \
+		--skip opencv_yunet_sface_models_cluster_local_people_fixtures
+
+test-ml:
+	MIRROR_TEST_DATABASE_URL=$${MIRROR_TEST_DATABASE_URL:-postgres://mirror:mirror@127.0.0.1:54329/mirror_test} cargo test -p mirror-backend --test face_opencv_runtime -- --ignored --test-threads=1
+
+test-db-all: test-db test-ml
 
 backup-restore-drill:
 	scripts/backup_restore_drill.sh

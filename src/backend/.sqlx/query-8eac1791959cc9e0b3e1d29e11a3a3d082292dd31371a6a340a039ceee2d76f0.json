@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE owner_accounts\n        SET totp_secret_ciphertext = NULL,\n            totp_enabled_at = NULL,\n            recovery_codes_version = recovery_codes_version + 1,\n            updated_at = now()\n        WHERE id = 1\n          AND disabled_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8eac1791959cc9e0b3e1d29e11a3a3d082292dd31371a6a340a039ceee2d76f0"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO people (id, owner_id, display_name, review_status)\n        VALUES ($1, $2, NULL, 'unreviewed')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "252a90c081305f6922b915a95f063dd547be12f8cd4aa3bab999549b6a566d36"
+}

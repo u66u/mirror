@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*) AS \"count!\"\n        FROM assets a\n        JOIN originals o ON o.id = a.original_id\n        WHERE a.trashed_at IS NULL\n          AND o.media_type = ANY($1)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fb233ca92a984ef1adfed781b76e44ffff3fc8a4a7bfcf7b05da9dc8e5f608f5"
+}

@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT status, expected_size, expected_blake3, media_type\n        FROM upload_sessions\n        WHERE id = $1\n          AND owner_id = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "expected_size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "expected_blake3",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "media_type",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8c358b96d0783f97572f428dd30fd74b0c4f6ee437b412642a4c468bfaad8d68"
+}

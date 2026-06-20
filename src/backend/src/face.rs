@@ -18,7 +18,7 @@ use ort::{
 };
 use pgvector::Vector;
 use serde_json::Value;
-use sqlx::{PgPool, Row, types::Json};
+use sqlx::{PgPool, types::Json};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -713,7 +713,7 @@ async fn load_face_asset_original(
     pool: &PgPool,
     asset_id: Uuid,
 ) -> Result<Option<AssetOriginal>, FaceIndexError> {
-    let row = sqlx::query(
+    let row = sqlx::query!(
         r#"
         SELECT a.id, a.owner_id, o.storage_key, o.media_type
         FROM assets a
@@ -721,16 +721,16 @@ async fn load_face_asset_original(
         WHERE a.id = $1
           AND a.trashed_at IS NULL
         "#,
+        asset_id
     )
-    .bind(asset_id)
     .fetch_optional(pool)
     .await?;
 
     Ok(row.map(|row| AssetOriginal {
-        asset_id: row.get("id"),
-        owner_id: row.get("owner_id"),
-        storage_key: row.get("storage_key"),
-        media_type: row.get("media_type"),
+        asset_id: row.id,
+        owner_id: row.owner_id,
+        storage_key: row.storage_key,
+        media_type: row.media_type,
     }))
 }
 
@@ -775,21 +775,21 @@ async fn load_model_pack(
     requires_detection: bool,
     requires_embedding: bool,
 ) -> Result<FaceModelPack, FaceIndexError> {
-    let row = sqlx::query(
+    let row = sqlx::query!(
         r#"
-        SELECT id, manifest
+        SELECT id, manifest AS "manifest: Json<ModelPackManifest>"
         FROM model_packs
         WHERE id = $1
           AND self_test_status = 'passed'
         "#,
+        model_pack_id
     )
-    .bind(model_pack_id)
     .fetch_optional(pool)
     .await?
     .ok_or(FaceIndexError::NotFound)?;
     let pack = FaceModelPack {
-        id: row.get("id"),
-        manifest: row.get::<Json<ModelPackManifest>, _>("manifest").0,
+        id: row.id,
+        manifest: row.manifest.0,
     };
     validate_face_pack(&pack.manifest, requires_detection, requires_embedding)?;
     Ok(pack)
@@ -799,9 +799,9 @@ async fn active_model_pack(
     pool: &PgPool,
     kind: &str,
 ) -> Result<Option<FaceModelPack>, FaceIndexError> {
-    let row = sqlx::query(
+    let row = sqlx::query!(
         r#"
-        SELECT id, manifest
+        SELECT id, manifest AS "manifest: Json<ModelPackManifest>"
         FROM model_packs
         WHERE kind = $1
           AND status = 'active'
@@ -809,14 +809,14 @@ async fn active_model_pack(
         ORDER BY activated_at DESC NULLS LAST, updated_at DESC, id ASC
         LIMIT 1
         "#,
+        kind
     )
-    .bind(kind)
     .fetch_optional(pool)
     .await?;
     row.map(|row| {
         let pack = FaceModelPack {
-            id: row.get("id"),
-            manifest: row.get::<Json<ModelPackManifest>, _>("manifest").0,
+            id: row.id,
+            manifest: row.manifest.0,
         };
         let requires_detection = matches!(kind, "face_detection" | "face_identity");
         let requires_embedding = matches!(kind, "face_embedding" | "face_identity");
@@ -930,23 +930,23 @@ async fn persist_faces(
 
     let db_result = async {
         let mut tx = pool.begin().await?;
-        let locked_asset = sqlx::query_scalar::<_, Uuid>(
+        let locked_asset = sqlx::query_scalar!(
             r#"
             SELECT id
             FROM assets
             WHERE id = $1 AND owner_id = $2
             FOR UPDATE
             "#,
+            asset.asset_id,
+            asset.owner_id
         )
-        .bind(asset.asset_id)
-        .bind(asset.owner_id)
         .fetch_optional(&mut *tx)
         .await?;
         if locked_asset.is_none() {
             return Err(FaceIndexError::NotFound);
         }
 
-        let old_rows = sqlx::query(
+        let old_rows = sqlx::query!(
             r#"
             SELECT fo.id, fo.chip_storage_key
             FROM face_occurrences fo
@@ -962,20 +962,17 @@ async fn persist_faces(
               )
             FOR UPDATE
             "#,
+            asset.asset_id,
+            asset.owner_id,
+            detection_model_pack_id,
+            embedding_pack.id
         )
-        .bind(asset.asset_id)
-        .bind(asset.owner_id)
-        .bind(detection_model_pack_id)
-        .bind(embedding_pack.id)
         .fetch_all(&mut *tx)
         .await?;
-        let old_face_ids = old_rows
-            .iter()
-            .map(|row| row.get::<Uuid, _>("id"))
-            .collect::<Vec<_>>();
+        let old_face_ids = old_rows.iter().map(|row| row.id).collect::<Vec<_>>();
         let old_chip_keys = old_rows
             .iter()
-            .filter_map(|row| row.get::<Option<String>, _>("chip_storage_key"))
+            .filter_map(|row| row.chip_storage_key.clone())
             .collect::<Vec<_>>();
 
         for face in prepared_faces {
@@ -989,7 +986,7 @@ async fn persist_faces(
             .await?
             .unwrap_or_else(Uuid::now_v7);
             ensure_person(&mut tx, person_id, asset.owner_id).await?;
-            sqlx::query(
+            sqlx::query!(
                 r#"
             INSERT INTO face_occurrences (
                 id, asset_id, owner_id, detection_model_pack_id,
@@ -998,60 +995,62 @@ async fn persist_faces(
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'assigned', $10, $11, $12, $13)
             "#,
+                face.id,
+                asset.asset_id,
+                asset.owner_id,
+                detection_model_pack_id,
+                face.bbox.left,
+                face.bbox.top,
+                face.bbox.width,
+                face.bbox.height,
+                face.quality,
+                face.chip.as_ref().map(|chip| chip.storage_key.as_str()),
+                face.chip.as_ref().map(|chip| chip.width),
+                face.chip.as_ref().map(|chip| chip.height),
+                face.chip.as_ref().map(|chip| chip.format)
             )
-            .bind(face.id)
-            .bind(asset.asset_id)
-            .bind(asset.owner_id)
-            .bind(detection_model_pack_id)
-            .bind(face.bbox.left)
-            .bind(face.bbox.top)
-            .bind(face.bbox.width)
-            .bind(face.bbox.height)
-            .bind(face.quality)
-            .bind(face.chip.as_ref().map(|chip| chip.storage_key.as_str()))
-            .bind(face.chip.as_ref().map(|chip| chip.width))
-            .bind(face.chip.as_ref().map(|chip| chip.height))
-            .bind(face.chip.as_ref().map(|chip| chip.format))
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            let embedding_dimension = i32::try_from(face.embedding.len()).map_err(|_| {
+                ModelPackError::InvalidManifest("face_embedding.embedding_dimension")
+            })?;
+            let embedding = Vector::from(face.embedding);
+            sqlx::query!(
                 r#"
             INSERT INTO face_embeddings (
                 face_occurrence_id, owner_id, model_pack_id, embedding, embedding_dimension
             )
             VALUES ($1, $2, $3, $4, $5)
             "#,
+                face.id,
+                asset.owner_id,
+                embedding_pack.id,
+                embedding as _,
+                embedding_dimension
             )
-            .bind(face.id)
-            .bind(asset.owner_id)
-            .bind(embedding_pack.id)
-            .bind(Vector::from(face.embedding.clone()))
-            .bind(i32::try_from(face.embedding.len()).map_err(|_| {
-                ModelPackError::InvalidManifest("face_embedding.embedding_dimension")
-            })?)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            sqlx::query!(
                 r#"
             INSERT INTO person_faces (person_id, face_occurrence_id, owner_id)
             VALUES ($1, $2, $3)
             "#,
+                person_id,
+                face.id,
+                asset.owner_id
             )
-            .bind(person_id)
-            .bind(face.id)
-            .bind(asset.owner_id)
             .execute(&mut *tx)
             .await?;
         }
         if !old_face_ids.is_empty() {
-            sqlx::query(
+            sqlx::query!(
                 r#"
                 DELETE FROM face_occurrences
                 WHERE owner_id = $1 AND id = ANY($2)
                 "#,
+                asset.owner_id,
+                &old_face_ids
             )
-            .bind(asset.owner_id)
-            .bind(&old_face_ids)
             .execute(&mut *tx)
             .await?;
         }
@@ -1095,15 +1094,15 @@ async fn ensure_person(
     person_id: Uuid,
     owner_id: i16,
 ) -> Result<(), FaceIndexError> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO people (id, owner_id, display_name, review_status)
         VALUES ($1, $2, NULL, 'unreviewed')
         ON CONFLICT (id) DO NOTHING
         "#,
+        person_id,
+        owner_id
     )
-    .bind(person_id)
-    .bind(owner_id)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -1123,7 +1122,7 @@ async fn best_person_match(
     })?;
     let query_embedding = Vector::from(embedding.to_vec());
     let max_distance = f64::from(1.0_f32 - threshold);
-    sqlx::query_scalar::<_, Uuid>(
+    sqlx::query_scalar!(
         r#"
         SELECT pf.person_id
         FROM person_faces pf
@@ -1142,12 +1141,12 @@ async fn best_person_match(
         ORDER BY fe.embedding <=> $3 ASC, pf.person_id ASC
         LIMIT 1
         "#,
+        owner_id,
+        model_pack_id,
+        query_embedding as _,
+        embedding_dimension,
+        max_distance
     )
-    .bind(owner_id)
-    .bind(model_pack_id)
-    .bind(query_embedding)
-    .bind(embedding_dimension)
-    .bind(max_distance)
     .fetch_optional(&mut **tx)
     .await
     .map_err(FaceIndexError::Database)

@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO model_reindex_runs (\n            id,\n            model_pack_id,\n            kind,\n            status,\n            total_assets,\n            queued_assets,\n            completed_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $5, CASE WHEN $4 = 'succeeded' THEN now() ELSE NULL END)\n        RETURNING id, model_pack_id, status, total_assets, queued_assets, processed_assets, failed_assets\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "model_pack_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "total_assets",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "queued_assets",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "processed_assets",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "failed_assets",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0a9495a0a766b2a588935bacbf464681246fbf676e9923e71f925431c90e821e"
+}

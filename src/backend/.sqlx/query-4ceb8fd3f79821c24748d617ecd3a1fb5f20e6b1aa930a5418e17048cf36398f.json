@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE upload_sessions\n        SET status = 'cancelled',\n            cancelled_at = COALESCE(cancelled_at, now()),\n            updated_at = now()\n        WHERE id = $1\n          AND owner_id = $2\n          AND status = 'open'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4ceb8fd3f79821c24748d617ecd3a1fb5f20e6b1aa930a5418e17048cf36398f"
+}

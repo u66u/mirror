@@ -327,10 +327,12 @@ async fn semantic_search_ann(
 ) -> Result<Vec<(Uuid, f64)>, SemanticIndexError> {
     let ef_search = options.ann_ef_search.clamp(1, 1_000).to_string();
     let mut tx = pool.begin().await?;
-    sqlx::query_scalar::<_, String>("SELECT set_config('hnsw.ef_search', $1, true)")
-        .bind(ef_search)
-        .fetch_one(&mut *tx)
-        .await?;
+    sqlx::query_scalar!(
+        r#"SELECT set_config('hnsw.ef_search', $1, true) AS "setting!""#,
+        ef_search
+    )
+    .fetch_one(&mut *tx)
+    .await?;
 
     let dimension = spec.embedding_dimension;
     let operator = distance_operator(spec.distance_metric);

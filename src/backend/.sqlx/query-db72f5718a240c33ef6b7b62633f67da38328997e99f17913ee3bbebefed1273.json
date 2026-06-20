@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            sh.public_id,\n            v.asset_public_id as \"asset_public_id!\",\n            v.media_type as \"media_type!\",\n            v.thumbnail_format as \"thumbnail_format?\",\n            v.thumbnail_width as \"thumbnail_width?\",\n            v.thumbnail_height as \"thumbnail_height?\",\n            v.preview_format as \"preview_format?\",\n            v.preview_width as \"preview_width?\",\n            v.preview_height as \"preview_height?\",\n            sh.allow_original_download,\n            sh.expires_at\n        FROM asset_shares sh\n        JOIN asset_display_view v ON v.asset_id = sh.asset_id\n        WHERE sh.token_hash = $1\n          AND sh.revoked_at IS NULL\n          AND sh.expires_at > now()\n          AND v.trashed_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "public_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "asset_public_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "media_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "thumbnail_format?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "thumbnail_width?",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "thumbnail_height?",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "preview_format?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "preview_width?",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "preview_height?",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "allow_original_download",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "db72f5718a240c33ef6b7b62633f67da38328997e99f17913ee3bbebefed1273"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE sessions\n        SET last_seen_at = now()\n        WHERE token_hash = $1\n          AND revoked_at IS NULL\n          AND expires_at > now()\n        RETURNING id, owner_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "owner_id",
+        "type_info": "Int2"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1ea6cc94372ebc1380894fc4cfe60b9ac35c74f12da314cc55c3f02eb5580ad5"
+}

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO sessions (\n            id,\n            owner_id,\n            token_hash,\n            csrf_token_hash,\n            expires_at,\n            user_agent,\n            device_name\n        )\n        VALUES ($1, $2, $3, $4, now() + interval '30 days', $5, $6)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2",
+        "Bytea",
+        "Bytea",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ef2114f8ef1c212511729fa968601bd7bd5246d63297aef47a10e57daf032cf9"
+}

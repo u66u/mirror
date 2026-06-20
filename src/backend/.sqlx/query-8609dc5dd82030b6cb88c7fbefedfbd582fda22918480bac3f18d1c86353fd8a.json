@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE people\n        SET\n            display_name = COALESCE(display_name, $1),\n            review_status = CASE WHEN $2 THEN 'reviewed' ELSE review_status END,\n            updated_at = now()\n        WHERE id = $3 AND owner_id = $4\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool",
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8609dc5dd82030b6cb88c7fbefedfbd582fda22918480bac3f18d1c86353fd8a"
+}

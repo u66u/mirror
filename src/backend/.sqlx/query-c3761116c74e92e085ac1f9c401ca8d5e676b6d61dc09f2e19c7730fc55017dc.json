@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE model_packs\n        SET\n            self_test_status = CASE WHEN $2 THEN 'passed' ELSE 'failed' END,\n            self_test_error = CASE WHEN $2 THEN NULL ELSE $3 END,\n            updated_at = now()\n        WHERE id = $1\n        RETURNING id, status, self_test_status\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "self_test_status",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c3761116c74e92e085ac1f9c401ca8d5e676b6d61dc09f2e19c7730fc55017dc"
+}

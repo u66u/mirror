@@ -32,12 +32,14 @@ Additional backend gates when applicable:
 cargo deny check
 cargo sqlx prepare --check
 make test-db
+make test-ml
 ```
 
 Use `cargo sqlx prepare --check` once SQLx query macros are introduced. Before
 that, opt-in migration tests and runtime SQLx integration tests are the gate.
-Run DB-backed tests through explicit targets such as `make test-db`; default
-`cargo test` should not require Docker/Postgres.
+Run DB-backed tests through `make test-db`; default `cargo test` should not
+require Docker/Postgres. Run local ONNX/model-fixture tests separately through
+`make test-ml`; `make test-db-all` runs both opt-in suites serially.
 
 Backend security/data tasks must also include negative tests for the failure
 mode they are designed to prevent.

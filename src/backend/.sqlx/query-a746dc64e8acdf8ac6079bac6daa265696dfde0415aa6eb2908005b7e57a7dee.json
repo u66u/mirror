@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM rate_limit_buckets\n        WHERE action = $1\n          AND key_hash = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a746dc64e8acdf8ac6079bac6daa265696dfde0415aa6eb2908005b7e57a7dee"
+}

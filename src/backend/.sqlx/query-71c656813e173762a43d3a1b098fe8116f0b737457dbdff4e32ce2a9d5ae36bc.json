@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                DELETE FROM face_occurrences\n                WHERE owner_id = $1 AND id = ANY($2)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int2",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "71c656813e173762a43d3a1b098fe8116f0b737457dbdff4e32ce2a9d5ae36bc"
+}

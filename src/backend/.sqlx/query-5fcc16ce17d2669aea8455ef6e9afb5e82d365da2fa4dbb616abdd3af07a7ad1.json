@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO model_reindex_assets (reindex_run_id, asset_id)\n                VALUES ($1, $2)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5fcc16ce17d2669aea8455ef6e9afb5e82d365da2fa4dbb616abdd3af07a7ad1"
+}

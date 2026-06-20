@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT true AS \"exists!\"\n        FROM model_reindex_assets\n        WHERE reindex_run_id = $1\n          AND asset_id = $2\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2b7ccb6162144c3ac0c720649f9d608ab0749c88fefbc7810a5eebd6735e183a"
+}

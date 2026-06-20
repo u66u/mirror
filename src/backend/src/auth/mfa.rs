@@ -11,7 +11,7 @@ use chacha20poly1305::{
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -96,18 +96,18 @@ pub enum MfaError {
 
 /// Loads current owner MFA state.
 pub async fn mfa_status(pool: &PgPool) -> Result<MfaStatus, MfaError> {
-    let row = sqlx::query(
+    let row = sqlx::query!(
         r#"
         SELECT
             totp_secret_ciphertext IS NOT NULL
-                AND totp_enabled_at IS NULL AS setup_pending,
-            totp_enabled_at IS NOT NULL AS enabled,
+                AND totp_enabled_at IS NULL AS "setup_pending!",
+            totp_enabled_at IS NOT NULL AS "enabled!",
             (
                 SELECT count(*)
                 FROM owner_recovery_codes
                 WHERE owner_id = owner_accounts.id
                   AND used_at IS NULL
-            ) AS recovery_count
+            ) AS "recovery_count!"
         FROM owner_accounts
         WHERE id = 1
           AND disabled_at IS NULL
@@ -125,15 +125,15 @@ pub async fn mfa_status(pool: &PgPool) -> Result<MfaStatus, MfaError> {
     };
 
     Ok(MfaStatus {
-        totp_enabled: row.get::<bool, _>("enabled"),
-        totp_setup_pending: row.get::<bool, _>("setup_pending"),
-        recovery_codes_remaining: row.get::<i64, _>("recovery_count"),
+        totp_enabled: row.enabled,
+        totp_setup_pending: row.setup_pending,
+        recovery_codes_remaining: row.recovery_count,
     })
 }
 
 /// Returns whether TOTP is active for owner login.
 pub async fn second_factor_enabled(pool: &PgPool) -> Result<bool, MfaError> {
-    let enabled = sqlx::query_scalar::<_, bool>(
+    let enabled = sqlx::query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -141,7 +141,7 @@ pub async fn second_factor_enabled(pool: &PgPool) -> Result<bool, MfaError> {
             WHERE id = 1
               AND disabled_at IS NULL
               AND totp_enabled_at IS NOT NULL
-        )
+        ) AS "enabled!"
         "#,
     )
     .fetch_one(pool)
@@ -155,9 +155,9 @@ pub async fn begin_totp_setup(
     auth_secret: &AuthSecret,
 ) -> Result<TotpSetupOutput, MfaError> {
     let mut tx = pool.begin().await?;
-    let enabled = sqlx::query_scalar::<_, bool>(
+    let enabled = sqlx::query_scalar!(
         r#"
-        SELECT totp_enabled_at IS NOT NULL
+        SELECT totp_enabled_at IS NOT NULL AS "enabled!"
         FROM owner_accounts
         WHERE id = 1
           AND disabled_at IS NULL
@@ -173,7 +173,7 @@ pub async fn begin_totp_setup(
 
     let secret = random_bytes::<TOTP_SECRET_BYTES>()?;
     let encrypted = encrypt_totp_secret(auth_secret, &secret)?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE owner_accounts
         SET totp_secret_ciphertext = $1,
@@ -182,8 +182,8 @@ pub async fn begin_totp_setup(
         WHERE id = 1
           AND disabled_at IS NULL
         "#,
+        encrypted
     )
-    .bind(encrypted)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -202,11 +202,11 @@ pub async fn enable_totp(
     code: &str,
 ) -> Result<RecoveryCodesOutput, MfaError> {
     let mut tx = pool.begin().await?;
-    let row = sqlx::query(
+    let row = sqlx::query!(
         r#"
         SELECT
             totp_secret_ciphertext,
-            totp_enabled_at IS NOT NULL AS enabled
+            totp_enabled_at IS NOT NULL AS "enabled!"
         FROM owner_accounts
         WHERE id = 1
           AND disabled_at IS NULL
@@ -216,18 +216,18 @@ pub async fn enable_totp(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(MfaError::TotpSetupMissing)?;
-    if row.get::<bool, _>("enabled") {
+    if row.enabled {
         return Err(MfaError::TotpAlreadyEnabled);
     }
     let encrypted = row
-        .get::<Option<Vec<u8>>, _>("totp_secret_ciphertext")
+        .totp_secret_ciphertext
         .ok_or(MfaError::TotpSetupMissing)?;
     let secret = decrypt_totp_secret(auth_secret, &encrypted)?;
     if !verify_totp_code(&secret, code, OffsetDateTime::now_utc()) {
         return Err(MfaError::InvalidSecondFactor);
     }
 
-    let version = sqlx::query_scalar::<_, i32>(
+    let version = sqlx::query_scalar!(
         r#"
         UPDATE owner_accounts
         SET totp_enabled_at = now(),
@@ -235,12 +235,12 @@ pub async fn enable_totp(
             updated_at = now()
         WHERE id = 1
           AND disabled_at IS NULL
-        RETURNING recovery_codes_version
+        RETURNING recovery_codes_version AS "recovery_codes_version!"
         "#,
     )
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM owner_recovery_codes WHERE owner_id = 1")
+    sqlx::query!("DELETE FROM owner_recovery_codes WHERE owner_id = 1")
         .execute(&mut *tx)
         .await?;
     let output = insert_recovery_codes(&mut tx, version).await?;
@@ -259,9 +259,9 @@ pub async fn disable_totp(
     }
     verify_second_factor(pool, auth_secret, second_factor).await?;
     let mut tx = pool.begin().await?;
-    let enabled = sqlx::query_scalar::<_, bool>(
+    let enabled = sqlx::query_scalar!(
         r#"
-        SELECT totp_enabled_at IS NOT NULL
+        SELECT totp_enabled_at IS NOT NULL AS "enabled!"
         FROM owner_accounts
         WHERE id = 1
           AND disabled_at IS NULL
@@ -274,7 +274,7 @@ pub async fn disable_totp(
     if !enabled {
         return Err(MfaError::TotpNotEnabled);
     }
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE owner_accounts
         SET totp_secret_ciphertext = NULL,
@@ -287,7 +287,7 @@ pub async fn disable_totp(
     )
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM owner_recovery_codes WHERE owner_id = 1")
+    sqlx::query!("DELETE FROM owner_recovery_codes WHERE owner_id = 1")
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -302,9 +302,9 @@ pub async fn rotate_recovery_codes(
 ) -> Result<RecoveryCodesOutput, MfaError> {
     verify_second_factor(pool, auth_secret, second_factor).await?;
     let mut tx = pool.begin().await?;
-    let enabled = sqlx::query_scalar::<_, bool>(
+    let enabled = sqlx::query_scalar!(
         r#"
-        SELECT totp_enabled_at IS NOT NULL
+        SELECT totp_enabled_at IS NOT NULL AS "enabled!"
         FROM owner_accounts
         WHERE id = 1
           AND disabled_at IS NULL
@@ -317,19 +317,19 @@ pub async fn rotate_recovery_codes(
     if !enabled {
         return Err(MfaError::TotpNotEnabled);
     }
-    let version = sqlx::query_scalar::<_, i32>(
+    let version = sqlx::query_scalar!(
         r#"
         UPDATE owner_accounts
         SET recovery_codes_version = recovery_codes_version + 1,
             updated_at = now()
         WHERE id = 1
           AND disabled_at IS NULL
-        RETURNING recovery_codes_version
+        RETURNING recovery_codes_version AS "recovery_codes_version!"
         "#,
     )
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM owner_recovery_codes WHERE owner_id = 1")
+    sqlx::query!("DELETE FROM owner_recovery_codes WHERE owner_id = 1")
         .execute(&mut *tx)
         .await?;
     let output = insert_recovery_codes(&mut tx, version).await?;
@@ -370,9 +370,9 @@ pub async fn verify_second_factor(
 }
 
 async fn load_totp_secret_ciphertext(pool: &PgPool) -> Result<Option<Vec<u8>>, MfaError> {
-    sqlx::query_scalar::<_, Vec<u8>>(
+    sqlx::query_scalar!(
         r#"
-        SELECT totp_secret_ciphertext
+        SELECT totp_secret_ciphertext AS "totp_secret_ciphertext!"
         FROM owner_accounts
         WHERE id = 1
           AND disabled_at IS NULL
@@ -389,7 +389,7 @@ async fn consume_recovery_code(pool: &PgPool, code: &str) -> Result<(), MfaError
         return Err(MfaError::InvalidSecondFactor);
     };
     let code_hash = recovery_code_hash(&normalized);
-    let consumed = sqlx::query_scalar::<_, Uuid>(
+    let consumed = sqlx::query_scalar!(
         r#"
         UPDATE owner_recovery_codes
         SET used_at = now()
@@ -398,8 +398,8 @@ async fn consume_recovery_code(pool: &PgPool, code: &str) -> Result<(), MfaError
           AND used_at IS NULL
         RETURNING id
         "#,
+        code_hash.as_slice()
     )
-    .bind(code_hash.as_slice())
     .fetch_optional(pool)
     .await?;
     consumed.map(|_| ()).ok_or(MfaError::InvalidSecondFactor)
@@ -415,7 +415,7 @@ async fn insert_recovery_codes(
         let code = format_recovery_code(&base32_encode(&bytes));
         let normalized = normalize_recovery_code(&code).ok_or(MfaError::RandomFailed)?;
         let code_hash = recovery_code_hash(&normalized);
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO owner_recovery_codes (
                 id,
@@ -426,10 +426,10 @@ async fn insert_recovery_codes(
             )
             VALUES ($1, 1, $2, 'sha256', $3)
             "#,
+            Uuid::now_v7(),
+            code_hash.as_slice(),
+            version
         )
-        .bind(Uuid::now_v7())
-        .bind(code_hash.as_slice())
-        .bind(version)
         .execute(&mut **tx)
         .await?;
         codes.push(code);

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE device_tokens\n        SET revoked_at = COALESCE(revoked_at, now()),\n            revocation_reason = COALESCE(revocation_reason, 'revoked')\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5e4e7ac91066c1b776c485da8c54bac3490f1a5341bc5c7a8b7ea444cfc69da5"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE owner_accounts\n        SET totp_enabled_at = now(),\n            recovery_codes_version = recovery_codes_version + 1,\n            updated_at = now()\n        WHERE id = 1\n          AND disabled_at IS NULL\n        RETURNING recovery_codes_version AS \"recovery_codes_version!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "recovery_codes_version!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1a294f26bb03a712e359147e890fcb5b412de09c2fac4cf54025ef400cbe228a"
+}

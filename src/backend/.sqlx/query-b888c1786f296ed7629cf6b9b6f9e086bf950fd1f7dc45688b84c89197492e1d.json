@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO asset_embeddings (\n            asset_id,\n            model_pack_id,\n            owner_id,\n            asset_public_id,\n            asset_created_at,\n            asset_trashed_at,\n            embedding,\n            embedding_dimension\n        )\n        SELECT\n            a.id,\n            $2,\n            a.owner_id,\n            a.public_id,\n            a.created_at,\n            a.trashed_at,\n            $3,\n            $4\n        FROM assets a\n        WHERE a.id = $1\n        ON CONFLICT (asset_id, model_pack_id)\n        DO UPDATE SET\n            owner_id = EXCLUDED.owner_id,\n            asset_public_id = EXCLUDED.asset_public_id,\n            asset_created_at = EXCLUDED.asset_created_at,\n            asset_trashed_at = EXCLUDED.asset_trashed_at,\n            embedding = EXCLUDED.embedding,\n            embedding_dimension = EXCLUDED.embedding_dimension,\n            updated_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        {
+          "Custom": {
+            "name": "vector",
+            "kind": "Simple"
+          }
+        },
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b888c1786f296ed7629cf6b9b6f9e086bf950fd1f7dc45688b84c89197492e1d"
+}

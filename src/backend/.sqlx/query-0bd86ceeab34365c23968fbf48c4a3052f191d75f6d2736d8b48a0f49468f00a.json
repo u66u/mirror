@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE model_reindex_assets\n        SET\n            status = CASE WHEN $3 THEN 'done' ELSE 'failed' END,\n            error_message = CASE WHEN $3 THEN NULL ELSE $4 END,\n            updated_at = now()\n        WHERE reindex_run_id = $1\n          AND asset_id = $2\n          AND status = 'queued'\n        RETURNING true as \"b!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "b!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0bd86ceeab34365c23968fbf48c4a3052f191d75f6d2736d8b48a0f49468f00a"
+}

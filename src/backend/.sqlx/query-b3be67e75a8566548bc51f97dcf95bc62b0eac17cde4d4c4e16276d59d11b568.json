@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE assets\n        SET favorite_at = NULL\n        WHERE owner_id = $1\n          AND public_id = $2\n          AND trashed_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int2",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b3be67e75a8566548bc51f97dcf95bc62b0eac17cde4d4c4e16276d59d11b568"
+}

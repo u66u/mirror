@@ -14,13 +14,15 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::jobs::{self, JobKind, JobSpec};
 use crate::paths::validate_relative_str;
 use crate::storage::{ObjectStorage, StorageKey, StorageKeyError};
+
+mod presets;
 
 /// Manifest filename expected at the root of a local model-pack directory.
 pub const MODEL_PACK_MANIFEST_FILENAME: &str = "manifest.json";
@@ -379,34 +381,10 @@ pub struct ValidatedEmbedding {
     values: Vec<f32>,
 }
 
-type ModelPackSummaryRow = (
-    Uuid,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    i32,
-    String,
-    OffsetDateTime,
-);
-
-impl From<ModelPackSummaryRow> for ModelPackSummary {
-    fn from(row: ModelPackSummaryRow) -> Self {
-        Self {
-            model_pack_id: row.0,
-            kind: row.1,
-            runtime: row.2,
-            model_key: row.3,
-            model_revision: row.4,
-            status: row.5,
-            self_test_status: row.6,
-            embedding_dimension: row.7,
-            distance_metric: row.8,
-            updated_at: row.9,
-        }
-    }
+#[derive(Debug)]
+struct ReindexAsset {
+    id: Uuid,
+    created_at: OffsetDateTime,
 }
 
 impl ValidatedEmbedding {
@@ -469,9 +447,9 @@ pub fn model_pack_manifest_schema_json() -> Result<serde_json::Value, ModelPackE
 /// SHA-256 values with the exact model/self-test files they install.
 pub fn model_pack_preset_manifest(name: &str) -> Result<ModelPackManifest, ModelPackError> {
     match name {
-        "opencv_yunet_detection_2023mar" => Ok(opencv_yunet_detection_preset()),
-        "opencv_sface_embedding_2021dec" => Ok(opencv_sface_embedding_preset()),
-        "insightface_buffalo_l_scrfd_arcface" => Ok(insightface_scrfd_arcface_preset()),
+        "opencv_yunet_detection_2023mar" => Ok(presets::opencv_yunet_detection()),
+        "opencv_sface_embedding_2021dec" => Ok(presets::opencv_sface_embedding()),
+        "insightface_buffalo_l_scrfd_arcface" => Ok(presets::insightface_scrfd_arcface()),
         _ => Err(ModelPackError::NotFound),
     }
 }
@@ -508,184 +486,6 @@ pub fn materialize_model_pack_preset_json(
 ) -> Result<String, ModelPackError> {
     let manifest = materialize_model_pack_preset_from_directory(name, source_dir)?;
     serde_json::to_string_pretty(&manifest).map_err(ModelPackError::Json)
-}
-
-fn opencv_yunet_detection_preset() -> ModelPackManifest {
-    let model_path = "models/face_detection_yunet_2023mar.onnx".to_owned();
-    ModelPackManifest {
-        kind: "face_detection".to_owned(),
-        runtime: "onnx".to_owned(),
-        model_key: "opencv-yunet".to_owned(),
-        model_revision: "2023mar".to_owned(),
-        license: "Apache-2.0".to_owned(),
-        embedding_dimension: 1,
-        distance_metric: "cosine".to_owned(),
-        onnx: preset_onnx_config(&model_path),
-        image_preprocess: ImagePreprocessConfig {
-            width: 320,
-            height: 320,
-            color_order: "rgb".to_owned(),
-            tensor_layout: "nchw".to_owned(),
-            mean: [0.0, 0.0, 0.0],
-            std: [1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0],
-        },
-        face_detection: Some(FaceDetectionModelConfig {
-            adapter: "yunet_opencv_compat".to_owned(),
-            model_path: model_path.clone(),
-            input_name: "input".to_owned(),
-            boxes_output_name: "unused_boxes".to_owned(),
-            scores_output_name: "unused_scores".to_owned(),
-            landmarks_output_name: None,
-            output_names: Vec::new(),
-            box_coordinate_space: "pixel".to_owned(),
-            box_format: "xywh".to_owned(),
-            score_threshold: 0.3,
-            min_face_size_ratio: 0.15,
-            nms_threshold: 0.3,
-            max_faces: 8,
-        }),
-        face_embedding: None,
-        files: preset_files(&[&model_path, "self-tests/face.jpg"]),
-        self_tests: preset_self_tests(),
-    }
-}
-
-fn opencv_sface_embedding_preset() -> ModelPackManifest {
-    let model_path = "models/face_recognition_sface_2021dec.onnx".to_owned();
-    ModelPackManifest {
-        kind: "face_embedding".to_owned(),
-        runtime: "onnx".to_owned(),
-        model_key: "opencv-sface".to_owned(),
-        model_revision: "2021dec".to_owned(),
-        license: "Apache-2.0".to_owned(),
-        embedding_dimension: 128,
-        distance_metric: "cosine".to_owned(),
-        onnx: preset_onnx_config(&model_path),
-        image_preprocess: ImagePreprocessConfig {
-            width: 112,
-            height: 112,
-            color_order: "rgb".to_owned(),
-            tensor_layout: "nchw".to_owned(),
-            mean: [0.0, 0.0, 0.0],
-            std: [1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0],
-        },
-        face_detection: None,
-        face_embedding: Some(FaceEmbeddingModelConfig {
-            adapter: "sface_opencv_compat".to_owned(),
-            model_path: model_path.clone(),
-            input_name: "data".to_owned(),
-            output_name: "fc1".to_owned(),
-            width: 112,
-            height: 112,
-            color_order: "rgb".to_owned(),
-            tensor_layout: "nchw".to_owned(),
-            alignment: "five_point".to_owned(),
-            mean: [0.0, 0.0, 0.0],
-            std: [1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0],
-            match_threshold: 0.363,
-            l2_normalize_output: true,
-        }),
-        files: preset_files(&[&model_path, "self-tests/aligned-face.jpg"]),
-        self_tests: preset_self_tests(),
-    }
-}
-
-fn insightface_scrfd_arcface_preset() -> ModelPackManifest {
-    let detector_path = "models/det_10g.onnx".to_owned();
-    let embedder_path = "models/w600k_r50.onnx".to_owned();
-    ModelPackManifest {
-        kind: "face_identity".to_owned(),
-        runtime: "onnx".to_owned(),
-        model_key: "insightface-buffalo-l".to_owned(),
-        model_revision: "scrfd10g-w600k-r50".to_owned(),
-        license: "model-license-required".to_owned(),
-        embedding_dimension: 512,
-        distance_metric: "cosine".to_owned(),
-        onnx: preset_onnx_config(&detector_path),
-        image_preprocess: ImagePreprocessConfig {
-            width: 640,
-            height: 640,
-            color_order: "rgb".to_owned(),
-            tensor_layout: "nchw".to_owned(),
-            mean: [0.5, 0.5, 0.5],
-            std: [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0],
-        },
-        face_detection: Some(FaceDetectionModelConfig {
-            adapter: "scrfd".to_owned(),
-            model_path: detector_path.clone(),
-            input_name: "input.1".to_owned(),
-            boxes_output_name: "unused_boxes".to_owned(),
-            scores_output_name: "unused_scores".to_owned(),
-            landmarks_output_name: None,
-            output_names: vec![
-                "448".to_owned(),
-                "471".to_owned(),
-                "494".to_owned(),
-                "451".to_owned(),
-                "474".to_owned(),
-                "497".to_owned(),
-                "454".to_owned(),
-                "477".to_owned(),
-                "500".to_owned(),
-            ],
-            box_coordinate_space: "pixel".to_owned(),
-            box_format: "xyxy".to_owned(),
-            score_threshold: 0.5,
-            min_face_size_ratio: 0.15,
-            nms_threshold: 0.4,
-            max_faces: 16,
-        }),
-        face_embedding: Some(FaceEmbeddingModelConfig {
-            adapter: "arcface".to_owned(),
-            model_path: embedder_path.clone(),
-            input_name: "input.1".to_owned(),
-            output_name: "683".to_owned(),
-            width: 112,
-            height: 112,
-            color_order: "rgb".to_owned(),
-            tensor_layout: "nchw".to_owned(),
-            alignment: "five_point".to_owned(),
-            mean: [0.5, 0.5, 0.5],
-            std: [0.5, 0.5, 0.5],
-            match_threshold: 0.55,
-            l2_normalize_output: true,
-        }),
-        files: preset_files(&[&detector_path, &embedder_path, "self-tests/face.jpg"]),
-        self_tests: preset_self_tests(),
-    }
-}
-
-fn preset_onnx_config(model_path: &str) -> OnnxModelPackConfig {
-    OnnxModelPackConfig {
-        image_model_path: model_path.to_owned(),
-        text_model_path: model_path.to_owned(),
-        tokenizer_path: "self-tests/face.jpg".to_owned(),
-        image_input_name: "unused_image".to_owned(),
-        image_output_name: "unused_image_output".to_owned(),
-        text_input_ids_name: "unused_input_ids".to_owned(),
-        text_attention_mask_name: "unused_attention_mask".to_owned(),
-        text_output_name: "unused_text_output".to_owned(),
-    }
-}
-
-fn preset_files(paths: &[&str]) -> Vec<ModelPackFileManifest> {
-    paths
-        .iter()
-        .enumerate()
-        .map(|(index, path)| ModelPackFileManifest {
-            path: (*path).to_owned(),
-            sha256: format!("{index:064x}"),
-            size_bytes: 1,
-        })
-        .collect()
-}
-
-fn preset_self_tests() -> Vec<ModelPackSelfTestManifest> {
-    vec![ModelPackSelfTestManifest {
-        name: "face_fixture".to_owned(),
-        input_path: "self-tests/face.jpg".to_owned(),
-        expected_output_sha256: "0".repeat(64),
-    }]
 }
 
 /// Validates a local model-pack directory without touching storage or Postgres.
@@ -804,10 +604,11 @@ pub async fn install_model_pack(
 
 /// Lists installed model packs for owner/admin surfaces.
 pub async fn list_model_packs(pool: &PgPool) -> Result<Vec<ModelPackSummary>, ModelPackError> {
-    sqlx::query_as::<_, ModelPackSummaryRow>(
+    sqlx::query_as!(
+        ModelPackSummary,
         r#"
         SELECT
-            id,
+            id AS model_pack_id,
             kind,
             runtime,
             model_key,
@@ -819,11 +620,10 @@ pub async fn list_model_packs(pool: &PgPool) -> Result<Vec<ModelPackSummary>, Mo
             updated_at
         FROM model_packs
         ORDER BY kind ASC, status = 'active' DESC, updated_at DESC, id ASC
-        "#,
+        "#
     )
     .fetch_all(pool)
     .await
-    .map(|rows| rows.into_iter().map(ModelPackSummary::from).collect())
     .map_err(ModelPackError::Database)
 }
 
@@ -956,10 +756,12 @@ pub async fn activate_model_pack(
     if row.self_test_status != "passed" {
         return Err(ModelPackError::SelfTestRequired);
     }
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('mirror_model_pack_kind'), hashtext($1))")
-        .bind(&row.kind)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtext('mirror_model_pack_kind'), hashtext($1))",
+        &row.kind
+    )
+    .execute(&mut *tx)
+    .await?;
     sqlx::query!(
         r#"
         UPDATE model_packs
@@ -1058,10 +860,10 @@ pub async fn start_model_reindex(
         "face_identity" => Some((model_pack_id, model_pack_id)),
         "face_detection" => Some((
             model_pack_id,
-            active_face_counterpart(&mut tx, &["face_embedding", "face_identity"]).await?,
+            active_face_counterpart(&mut tx, ["face_embedding", "face_identity"]).await?,
         )),
         "face_embedding" => Some((
-            active_face_counterpart(&mut tx, &["face_detection", "face_identity"]).await?,
+            active_face_counterpart(&mut tx, ["face_detection", "face_identity"]).await?,
             model_pack_id,
         )),
         _ => return Err(ModelPackError::InvalidManifest("kind")),
@@ -1073,25 +875,26 @@ pub async fn start_model_reindex(
         if assets.is_empty() {
             break;
         }
-        for (asset_id, _) in &assets {
+        for asset in &assets {
             sqlx::query!(
                 r#"
                 INSERT INTO model_reindex_assets (reindex_run_id, asset_id)
                 VALUES ($1, $2)
                 "#,
                 run_id,
-                *asset_id
+                asset.id
             )
             .execute(&mut *tx)
             .await?;
         }
-        for (asset_id, _) in &assets {
+        for asset in &assets {
+            let asset_id = asset.id;
             let (kind, payload) =
                 if let Some((detection_model_pack_id, embedding_model_pack_id)) = face_pair {
                     (
                         JobKind::IndexFaces,
                         json!({
-                            "asset_id": *asset_id,
+                            "asset_id": asset_id,
                             "detection_model_pack_id": detection_model_pack_id,
                             "embedding_model_pack_id": embedding_model_pack_id,
                             "reindex_run_id": run_id,
@@ -1101,7 +904,7 @@ pub async fn start_model_reindex(
                     (
                         JobKind::EmbedAsset,
                         json!({
-                            "asset_id": *asset_id,
+                            "asset_id": asset_id,
                             "model_pack_id": model_pack_id,
                             "reindex_run_id": run_id,
                         }),
@@ -1114,9 +917,7 @@ pub async fn start_model_reindex(
             )
             .await?;
         }
-        after = assets
-            .last()
-            .map(|(asset_id, created_at)| (*created_at, *asset_id));
+        after = assets.last().map(|asset| (asset.created_at, asset.id));
     }
 
     tx.commit().await?;
@@ -1181,16 +982,16 @@ async fn eligible_reindex_asset_count(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     media_types: &[String],
 ) -> Result<i32, ModelPackError> {
-    let count = sqlx::query_scalar::<_, i64>(
+    let count = sqlx::query_scalar!(
         r#"
-        SELECT count(*)
+        SELECT count(*) AS "count!"
         FROM assets a
         JOIN originals o ON o.id = a.original_id
         WHERE a.trashed_at IS NULL
           AND o.media_type = ANY($1)
         "#,
+        media_types
     )
-    .bind(media_types)
     .fetch_one(&mut **tx)
     .await?;
 
@@ -1201,9 +1002,10 @@ async fn eligible_reindex_assets_after(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     media_types: &[String],
     after: Option<(OffsetDateTime, Uuid)>,
-) -> Result<Vec<(Uuid, OffsetDateTime)>, ModelPackError> {
+) -> Result<Vec<ReindexAsset>, ModelPackError> {
     if let Some((created_at, asset_id)) = after {
-        sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
+        sqlx::query_as!(
+            ReindexAsset,
             r#"
             SELECT a.id, a.created_at
             FROM assets a
@@ -1214,16 +1016,17 @@ async fn eligible_reindex_assets_after(
             ORDER BY a.created_at ASC, a.id ASC
             LIMIT $4
             "#,
+            media_types,
+            created_at,
+            asset_id,
+            REINDEX_ASSET_BATCH_SIZE
         )
-        .bind(media_types)
-        .bind(created_at)
-        .bind(asset_id)
-        .bind(REINDEX_ASSET_BATCH_SIZE)
         .fetch_all(&mut **tx)
         .await
         .map_err(ModelPackError::Database)
     } else {
-        sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
+        sqlx::query_as!(
+            ReindexAsset,
             r#"
             SELECT a.id, a.created_at
             FROM assets a
@@ -1233,9 +1036,9 @@ async fn eligible_reindex_assets_after(
             ORDER BY a.created_at ASC, a.id ASC
             LIMIT $2
             "#,
+            media_types,
+            REINDEX_ASSET_BATCH_SIZE
         )
-        .bind(media_types)
-        .bind(REINDEX_ASSET_BATCH_SIZE)
         .fetch_all(&mut **tx)
         .await
         .map_err(ModelPackError::Database)
@@ -1244,11 +1047,12 @@ async fn eligible_reindex_assets_after(
 
 async fn active_face_counterpart(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    kinds: &[&str],
+    kinds: [&str; 2],
 ) -> Result<Uuid, ModelPackError> {
-    let row = sqlx::query(
+    let kinds = kinds.map(str::to_owned);
+    sqlx::query_scalar!(
         r#"
-        SELECT id
+        SELECT id AS "id!"
         FROM model_packs
         WHERE kind = ANY($1)
           AND status = 'active'
@@ -1256,11 +1060,11 @@ async fn active_face_counterpart(
         ORDER BY activated_at DESC NULLS LAST, updated_at DESC, id ASC
         LIMIT 1
         "#,
+        &kinds
     )
-    .bind(kinds)
     .fetch_optional(&mut **tx)
-    .await?;
-    row.map(|row| row.get("id")).ok_or(ModelPackError::NotFound)
+    .await?
+    .ok_or(ModelPackError::NotFound)
 }
 
 /// Lists recent reindex runs for one model pack.

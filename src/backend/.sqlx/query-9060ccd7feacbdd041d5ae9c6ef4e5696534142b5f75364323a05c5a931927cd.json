@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            a.public_id,\n            o.blake3_hash,\n            o.storage_key,\n            o.media_type,\n            o.size_bytes,\n            s.original_filename as \"original_filename?\",\n            a.created_at\n        FROM assets a\n        JOIN originals o ON o.id = a.original_id\n        LEFT JOIN LATERAL (\n            SELECT original_filename\n            FROM asset_sources\n            WHERE asset_id = a.id\n            ORDER BY created_at ASC\n            LIMIT 1\n        ) s ON true\n        WHERE a.owner_id = $1\n          AND a.trashed_at IS NULL\n        ORDER BY a.created_at ASC, a.public_id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "public_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "blake3_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "storage_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "media_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "size_bytes",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "original_filename?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int2"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9060ccd7feacbdd041d5ae9c6ef4e5696534142b5f75364323a05c5a931927cd"
+}

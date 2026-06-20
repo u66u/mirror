@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, manifest AS \"manifest: Json<ModelPackManifest>\"\n        FROM model_packs\n        WHERE id = $1\n          AND self_test_status = 'passed'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "manifest: Json<ModelPackManifest>",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "79b61ec17a7c6c9c64d3b2975437c2f49b3e3c87b3892c28115db81acd31b2de"
+}

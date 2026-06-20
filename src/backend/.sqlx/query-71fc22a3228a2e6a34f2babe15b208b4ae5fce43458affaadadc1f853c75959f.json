@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM owner_recovery_codes WHERE owner_id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "71fc22a3228a2e6a34f2babe15b208b4ae5fce43458affaadadc1f853c75959f"
+}

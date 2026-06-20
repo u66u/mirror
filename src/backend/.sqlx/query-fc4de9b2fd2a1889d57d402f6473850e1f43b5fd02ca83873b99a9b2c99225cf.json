@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM sessions\n            WHERE id = $1\n              AND csrf_token_hash = $2\n              AND revoked_at IS NULL\n              AND expires_at > now()\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fc4de9b2fd2a1889d57d402f6473850e1f43b5fd02ca83873b99a9b2c99225cf"
+}

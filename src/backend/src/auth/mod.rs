@@ -126,7 +126,7 @@ impl From<SetupTokenError> for OwnerSetupError {
 
 /// Returns true when the single-owner instance is already claimed.
 pub async fn owner_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM owner_accounts WHERE id = 1)")
+    sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM owner_accounts WHERE id = 1) AS "exists!""#)
         .fetch_one(pool)
         .await
 }
@@ -137,7 +137,7 @@ pub async fn login_owner(
     auth_secret: &AuthSecret,
     input: OwnerLoginInput,
 ) -> Result<SessionCreateOutput, OwnerLoginError> {
-    let owner = sqlx::query_as::<_, (i16, String)>(
+    let owner = sqlx::query!(
         r#"
         SELECT id, password_hash
         FROM owner_accounts
@@ -149,11 +149,11 @@ pub async fn login_owner(
     .await
     .map_err(OwnerLoginError::Database)?;
 
-    let Some((owner_id, password_hash)) = owner else {
+    let Some(owner) = owner else {
         return Err(OwnerLoginError::InvalidCredentials);
     };
 
-    if !verify_password(&input.password, &password_hash) {
+    if !verify_password(&input.password, &owner.password_hash) {
         return Err(OwnerLoginError::InvalidCredentials);
     }
 
@@ -173,7 +173,7 @@ pub async fn login_owner(
     create_session(
         pool,
         SessionCreateInput {
-            owner_id,
+            owner_id: owner.id,
             user_agent: input.user_agent,
             device_name: input.device_name,
         },

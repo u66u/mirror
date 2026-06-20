@@ -12,20 +12,22 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+mod rate_limits;
+
 use crate::{
     auth::{self, AuthenticatedSession, OwnerLoginInput},
     http::{client_ip, error::ApiError},
-    rate_limit::{self, FailureInput},
     state::AppState,
+};
+use rate_limits::{
+    OwnerRateLimit, clear_limit, owner_password_login_key, owner_password_reauth_key,
+    record_owner_failure, reject_blocked,
 };
 
 const SESSION_COOKIE: &str = "mirror_session";
 const CSRF_COOKIE: &str = "mirror_csrf";
 const CSRF_HEADER: &str = "x-csrf-token";
 const SESSION_MAX_AGE: Duration = Duration::days(30);
-const OWNER_PASSWORD_LOGIN_ACTION: &str = "owner_password_login";
-const OWNER_PASSWORD_REAUTH_ACTION: &str = "owner_password_reauth";
-const OWNER_MFA_ACTION: &str = "owner_mfa";
 
 /// Owner login request body.
 #[derive(Debug, Deserialize)]
@@ -193,12 +195,12 @@ pub async fn login(
         ));
     };
     let rate_limit_key = owner_password_login_key(&req, &state);
-    reject_blocked_owner_password_login(&state, pool, &rate_limit_key).await?;
+    reject_blocked(&state, pool, &rate_limit_key, OwnerRateLimit::PasswordLogin).await?;
     if auth::second_factor_enabled(pool)
         .await
         .map_err(|_| ApiError::Internal)?
     {
-        reject_blocked_owner_mfa(&state, pool, &rate_limit_key).await?;
+        reject_blocked(&state, pool, &rate_limit_key, OwnerRateLimit::Mfa).await?;
     }
 
     let output = match auth::login_owner(
@@ -206,7 +208,10 @@ pub async fn login(
         &state.config.auth_secret,
         OwnerLoginInput {
             password: body.password.clone(),
-            second_factor: Some(second_factor_from_login(&body)),
+            second_factor: Some(auth::SecondFactorInput {
+                totp_code: body.totp_code.clone(),
+                recovery_code: body.recovery_code.clone(),
+            }),
             user_agent: user_agent(&req),
             device_name: body.device_name.clone(),
         },
@@ -214,8 +219,8 @@ pub async fn login(
     .await
     {
         Ok(output) => {
-            clear_owner_password_login_limit(&state, pool, &rate_limit_key).await?;
-            clear_owner_mfa_limit(&state, pool, &rate_limit_key).await?;
+            clear_limit(&state, pool, &rate_limit_key, OwnerRateLimit::PasswordLogin).await?;
+            clear_limit(&state, pool, &rate_limit_key, OwnerRateLimit::Mfa).await?;
             output
         }
         Err(
@@ -223,7 +228,8 @@ pub async fn login(
             | auth::OwnerLoginError::SecondFactorRequired
             | auth::OwnerLoginError::InvalidSecondFactor,
         ) => {
-            record_owner_password_login_failure(&state, pool, &rate_limit_key).await?;
+            record_owner_failure(&state, pool, &rate_limit_key, OwnerRateLimit::PasswordLogin)
+                .await?;
             return Err(invalid_login_credentials());
         }
         Err(error) => return Err(error.into()),
@@ -255,13 +261,13 @@ pub async fn device_login(
         ));
     };
     let rate_limit_key = owner_password_login_key(&req, &state);
-    reject_blocked_owner_password_login(&state, pool, &rate_limit_key).await?;
+    reject_blocked(&state, pool, &rate_limit_key, OwnerRateLimit::PasswordLogin).await?;
 
     if !auth::verify_owner_password(pool, &body.password)
         .await
         .map_err(|_| ApiError::Internal)?
     {
-        record_owner_password_login_failure(&state, pool, &rate_limit_key).await?;
+        record_owner_failure(&state, pool, &rate_limit_key, OwnerRateLimit::PasswordLogin).await?;
         return Err(ApiError::Unauthorized(
             "invalid_credentials",
             "invalid credentials",
@@ -271,17 +277,21 @@ pub async fn device_login(
         &state,
         pool,
         &rate_limit_key,
-        second_factor_from_device_login(&body),
+        auth::SecondFactorInput {
+            totp_code: body.totp_code.clone(),
+            recovery_code: body.recovery_code.clone(),
+        },
     )
     .await
     {
         if matches!(error, ApiError::Unauthorized(_, _)) {
-            record_owner_password_login_failure(&state, pool, &rate_limit_key).await?;
+            record_owner_failure(&state, pool, &rate_limit_key, OwnerRateLimit::PasswordLogin)
+                .await?;
             return Err(invalid_login_credentials());
         }
         return Err(error);
     }
-    clear_owner_password_login_limit(&state, pool, &rate_limit_key).await?;
+    clear_limit(&state, pool, &rate_limit_key, OwnerRateLimit::PasswordLogin).await?;
 
     let output = auth::create_device_token(
         pool,
@@ -361,14 +371,14 @@ pub async fn enable_totp_route(
     require_csrf(pool, &req, current.session_id).await?;
     require_owner_password(&state, pool, &req, current.session_id, &body.password).await?;
     let mfa_key = mfa_session_key(current.session_id);
-    reject_blocked_owner_mfa(&state, pool, &mfa_key).await?;
+    reject_blocked(&state, pool, &mfa_key, OwnerRateLimit::Mfa).await?;
     let codes = match auth::enable_totp(pool, &state.config.auth_secret, &body.totp_code).await {
         Ok(codes) => {
-            clear_owner_mfa_limit(&state, pool, &mfa_key).await?;
+            clear_limit(&state, pool, &mfa_key, OwnerRateLimit::Mfa).await?;
             codes
         }
         Err(auth::MfaError::InvalidSecondFactor) => {
-            record_owner_mfa_failure(&state, pool, &mfa_key).await?;
+            record_owner_failure(&state, pool, &mfa_key, OwnerRateLimit::Mfa).await?;
             return Err(ApiError::Unauthorized(
                 "invalid_second_factor",
                 "invalid second factor",
@@ -398,17 +408,20 @@ pub async fn disable_totp_route(
     require_csrf(pool, &req, current.session_id).await?;
     require_owner_password(&state, pool, &req, current.session_id, &body.password).await?;
     let mfa_key = mfa_session_key(current.session_id);
-    reject_blocked_owner_mfa(&state, pool, &mfa_key).await?;
+    reject_blocked(&state, pool, &mfa_key, OwnerRateLimit::Mfa).await?;
     match auth::disable_totp(
         pool,
         &state.config.auth_secret,
-        second_factor_from_management(&body),
+        auth::SecondFactorInput {
+            totp_code: body.totp_code.clone(),
+            recovery_code: body.recovery_code.clone(),
+        },
     )
     .await
     {
-        Ok(()) => clear_owner_mfa_limit(&state, pool, &mfa_key).await?,
+        Ok(()) => clear_limit(&state, pool, &mfa_key, OwnerRateLimit::Mfa).await?,
         Err(auth::MfaError::SecondFactorRequired | auth::MfaError::InvalidSecondFactor) => {
-            record_owner_mfa_failure(&state, pool, &mfa_key).await?;
+            record_owner_failure(&state, pool, &mfa_key, OwnerRateLimit::Mfa).await?;
             return Err(ApiError::Unauthorized(
                 "invalid_second_factor",
                 "invalid second factor",
@@ -436,20 +449,23 @@ pub async fn rotate_recovery_codes_route(
     require_csrf(pool, &req, current.session_id).await?;
     require_owner_password(&state, pool, &req, current.session_id, &body.password).await?;
     let mfa_key = mfa_session_key(current.session_id);
-    reject_blocked_owner_mfa(&state, pool, &mfa_key).await?;
+    reject_blocked(&state, pool, &mfa_key, OwnerRateLimit::Mfa).await?;
     let codes = match auth::rotate_recovery_codes(
         pool,
         &state.config.auth_secret,
-        second_factor_from_management(&body),
+        auth::SecondFactorInput {
+            totp_code: body.totp_code.clone(),
+            recovery_code: body.recovery_code.clone(),
+        },
     )
     .await
     {
         Ok(codes) => {
-            clear_owner_mfa_limit(&state, pool, &mfa_key).await?;
+            clear_limit(&state, pool, &mfa_key, OwnerRateLimit::Mfa).await?;
             codes
         }
         Err(auth::MfaError::SecondFactorRequired | auth::MfaError::InvalidSecondFactor) => {
-            record_owner_mfa_failure(&state, pool, &mfa_key).await?;
+            record_owner_failure(&state, pool, &mfa_key, OwnerRateLimit::Mfa).await?;
             return Err(ApiError::Unauthorized(
                 "invalid_second_factor",
                 "invalid second factor",
@@ -556,7 +572,10 @@ pub async fn create_device_token_route(
         &state,
         pool,
         &mfa_session_key(current.session_id),
-        second_factor_from_device_login(&body),
+        auth::SecondFactorInput {
+            totp_code: body.totp_code.clone(),
+            recovery_code: body.recovery_code.clone(),
+        },
     )
     .await?;
 
@@ -800,27 +819,6 @@ fn user_agent(req: &HttpRequest) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn second_factor_from_login(body: &LoginRequest) -> auth::SecondFactorInput {
-    auth::SecondFactorInput {
-        totp_code: body.totp_code.clone(),
-        recovery_code: body.recovery_code.clone(),
-    }
-}
-
-fn second_factor_from_device_login(body: &CreateDeviceTokenRequest) -> auth::SecondFactorInput {
-    auth::SecondFactorInput {
-        totp_code: body.totp_code.clone(),
-        recovery_code: body.recovery_code.clone(),
-    }
-}
-
-fn second_factor_from_management(body: &MfaSecondFactorRequest) -> auth::SecondFactorInput {
-    auth::SecondFactorInput {
-        totp_code: body.totp_code.clone(),
-        recovery_code: body.recovery_code.clone(),
-    }
-}
-
 fn mfa_session_key(session_id: Uuid) -> String {
     format!("session:{session_id}")
 }
@@ -837,43 +835,19 @@ async fn require_owner_password(
     password: &str,
 ) -> Result<(), ApiError> {
     let key = owner_password_reauth_key(req, state, session_id);
-    reject_blocked_owner_password_reauth(state, pool, &key).await?;
+    reject_blocked(state, pool, &key, OwnerRateLimit::PasswordReauth).await?;
     if auth::verify_owner_password(pool, password)
         .await
         .map_err(|_| ApiError::Internal)?
     {
-        clear_owner_password_reauth_limit(state, pool, &key).await?;
+        clear_limit(state, pool, &key, OwnerRateLimit::PasswordReauth).await?;
         Ok(())
     } else {
-        record_owner_password_reauth_failure(state, pool, &key).await?;
+        record_owner_failure(state, pool, &key, OwnerRateLimit::PasswordReauth).await?;
         Err(ApiError::Unauthorized(
             "reauth_required",
             "password reauthentication failed",
         ))
-    }
-}
-
-async fn reject_blocked_owner_password_reauth(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<(), ApiError> {
-    if rate_limit::is_blocked(
-        pool,
-        &state.config.rate_limit_secret,
-        OWNER_PASSWORD_REAUTH_ACTION,
-        key,
-        OffsetDateTime::now_utc(),
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?
-    {
-        Err(ApiError::TooManyRequests(
-            "rate_limited",
-            "too many password reauthentication attempts",
-        ))
-    } else {
-        Ok(())
     }
 }
 
@@ -889,10 +863,10 @@ async fn verify_login_second_factor(
     {
         return Ok(());
     }
-    reject_blocked_owner_mfa(state, pool, key).await?;
+    reject_blocked(state, pool, key, OwnerRateLimit::Mfa).await?;
     match auth::verify_second_factor(pool, &state.config.auth_secret, second_factor).await {
         Ok(()) => {
-            clear_owner_mfa_limit(state, pool, key).await?;
+            clear_limit(state, pool, key, OwnerRateLimit::Mfa).await?;
             Ok(())
         }
         Err(auth::MfaError::SecondFactorRequired) => Err(ApiError::Unauthorized(
@@ -900,7 +874,7 @@ async fn verify_login_second_factor(
             "second factor required",
         )),
         Err(auth::MfaError::InvalidSecondFactor) => {
-            record_owner_mfa_failure(state, pool, key).await?;
+            record_owner_failure(state, pool, key, OwnerRateLimit::Mfa).await?;
             Err(ApiError::Unauthorized(
                 "invalid_second_factor",
                 "invalid second factor",
@@ -908,192 +882,4 @@ async fn verify_login_second_factor(
         }
         Err(error) => Err(error.into()),
     }
-}
-
-async fn reject_blocked_owner_password_login(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<(), ApiError> {
-    if rate_limit::is_blocked(
-        pool,
-        &state.config.rate_limit_secret,
-        OWNER_PASSWORD_LOGIN_ACTION,
-        key,
-        OffsetDateTime::now_utc(),
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?
-    {
-        Err(ApiError::TooManyRequests(
-            "rate_limited",
-            "too many failed login attempts",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-async fn reject_blocked_owner_mfa(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<(), ApiError> {
-    if rate_limit::is_blocked(
-        pool,
-        &state.config.rate_limit_secret,
-        OWNER_MFA_ACTION,
-        key,
-        OffsetDateTime::now_utc(),
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?
-    {
-        Err(ApiError::TooManyRequests(
-            "rate_limited",
-            "too many second-factor attempts",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-async fn record_owner_mfa_failure(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<(), ApiError> {
-    if rate_limit::record_failure(
-        pool,
-        &state.config.rate_limit_secret,
-        FailureInput {
-            action: OWNER_MFA_ACTION,
-            key,
-            now: OffsetDateTime::now_utc(),
-            max_attempts: state.config.rate_limits.owner_mfa.max_per_window,
-            window: state.config.rate_limits.owner_mfa.window,
-            block_for: state.config.rate_limits.owner_mfa.block_for,
-        },
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?
-    {
-        Err(ApiError::TooManyRequests(
-            "rate_limited",
-            "too many second-factor attempts",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-async fn clear_owner_mfa_limit(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<(), ApiError> {
-    rate_limit::clear(pool, &state.config.rate_limit_secret, OWNER_MFA_ACTION, key)
-        .await
-        .map_err(|_| ApiError::Internal)
-}
-
-async fn record_owner_password_reauth_failure(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<(), ApiError> {
-    if rate_limit::record_failure(
-        pool,
-        &state.config.rate_limit_secret,
-        FailureInput {
-            action: OWNER_PASSWORD_REAUTH_ACTION,
-            key,
-            now: OffsetDateTime::now_utc(),
-            max_attempts: state.config.rate_limits.owner_password_login.max_per_window,
-            window: state.config.rate_limits.owner_password_login.window,
-            block_for: state.config.rate_limits.owner_password_login.block_for,
-        },
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?
-    {
-        Err(ApiError::TooManyRequests(
-            "rate_limited",
-            "too many password reauthentication attempts",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-async fn clear_owner_password_reauth_limit(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<(), ApiError> {
-    rate_limit::clear(
-        pool,
-        &state.config.rate_limit_secret,
-        OWNER_PASSWORD_REAUTH_ACTION,
-        key,
-    )
-    .await
-    .map_err(|_| ApiError::Internal)
-}
-
-async fn record_owner_password_login_failure(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<(), ApiError> {
-    if rate_limit::record_failure(
-        pool,
-        &state.config.rate_limit_secret,
-        FailureInput {
-            action: OWNER_PASSWORD_LOGIN_ACTION,
-            key,
-            now: OffsetDateTime::now_utc(),
-            max_attempts: state.config.rate_limits.owner_password_login.max_per_window,
-            window: state.config.rate_limits.owner_password_login.window,
-            block_for: state.config.rate_limits.owner_password_login.block_for,
-        },
-    )
-    .await
-    .map_err(|_| ApiError::Internal)?
-    {
-        Err(ApiError::TooManyRequests(
-            "rate_limited",
-            "too many failed login attempts",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-async fn clear_owner_password_login_limit(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<(), ApiError> {
-    rate_limit::clear(
-        pool,
-        &state.config.rate_limit_secret,
-        OWNER_PASSWORD_LOGIN_ACTION,
-        key,
-    )
-    .await
-    .map_err(|_| ApiError::Internal)
-}
-
-fn owner_password_login_key(req: &HttpRequest, state: &AppState) -> String {
-    client_ip::client_ip(req, &state.config.trusted_proxies)
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| "unknown-peer".to_owned())
-}
-
-fn owner_password_reauth_key(req: &HttpRequest, state: &AppState, session_id: Uuid) -> String {
-    let ip = client_ip::client_ip(req, &state.config.trusted_proxies)
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| "unknown-peer".to_owned());
-    format!("session:{session_id}:ip:{ip}")
 }

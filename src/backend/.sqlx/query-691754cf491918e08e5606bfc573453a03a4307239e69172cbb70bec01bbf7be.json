@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE asset_shares\n        SET revoked_at = COALESCE(revoked_at, now())\n        WHERE owner_id = $1\n          AND public_id = $2\n          AND revoked_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int2",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "691754cf491918e08e5606bfc573453a03a4307239e69172cbb70bec01bbf7be"
+}

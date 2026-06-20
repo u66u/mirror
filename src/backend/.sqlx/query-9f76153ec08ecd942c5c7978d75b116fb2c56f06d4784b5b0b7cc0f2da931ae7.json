@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT kind AS \"kind: JobKind\", payload AS \"payload: Json<Value>\", attempts, max_attempts\n        FROM jobs\n        WHERE id = $1\n          AND status = 'leased'\n          AND lease_owner = $2\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind: JobKind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "payload: Json<Value>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 2,
+        "name": "attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "max_attempts",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9f76153ec08ecd942c5c7978d75b116fb2c56f06d4784b5b0b7cc0f2da931ae7"
+}

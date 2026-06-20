@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, embedding_dimension, distance_metric, manifest as \"manifest: Json<ModelPackManifest>\"\n        FROM model_packs\n        WHERE kind = 'semantic_image_text'\n          AND status = 'active'\n          AND self_test_status = 'passed'\n        ORDER BY activated_at DESC NULLS LAST, updated_at DESC, id ASC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "embedding_dimension",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "distance_metric",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "manifest: Json<ModelPackManifest>",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "776fe271fb0b3d467c9c2edf8d27d785df42913e0a79f70fa23f34c168121af9"
+}

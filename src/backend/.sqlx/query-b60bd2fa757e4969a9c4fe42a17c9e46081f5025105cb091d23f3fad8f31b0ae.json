@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE model_packs\n        SET status = 'installed', activated_at = NULL, updated_at = now()\n        WHERE kind = $1 AND status = 'active'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b60bd2fa757e4969a9c4fe42a17c9e46081f5025105cb091d23f3fad8f31b0ae"
+}

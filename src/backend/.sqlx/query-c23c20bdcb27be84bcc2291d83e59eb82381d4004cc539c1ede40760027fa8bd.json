@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE device_tokens\n        SET last_used_at = now()\n        WHERE token_hash = $1\n          AND revoked_at IS NULL\n          AND (expires_at IS NULL OR expires_at > now())\n        RETURNING id as \"device_token_id!\", owner_id as \"owner_id!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "device_token_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "owner_id!",
+        "type_info": "Int2"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "c23c20bdcb27be84bcc2291d83e59eb82381d4004cc539c1ede40760027fa8bd"
+}

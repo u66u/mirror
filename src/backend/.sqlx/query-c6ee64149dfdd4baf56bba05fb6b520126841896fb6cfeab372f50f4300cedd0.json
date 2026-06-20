@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE jobs\n        SET\n            status = $3,\n            run_after = COALESCE($4, run_after),\n            lease_owner = NULL,\n            leased_at = NULL,\n            heartbeat_at = NULL,\n            last_error = $5,\n            updated_at = now()\n        WHERE id = $1\n          AND lease_owner = $2\n          AND status = 'leased'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c6ee64149dfdd4baf56bba05fb6b520126841896fb6cfeab372f50f4300cedd0"
+}

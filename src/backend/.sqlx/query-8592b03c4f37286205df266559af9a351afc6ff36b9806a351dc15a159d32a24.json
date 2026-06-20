@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, original_filename, expected_size, expected_blake3, media_type\n            FROM upload_sessions\n            WHERE owner_id = $1\n              AND client_upload_key = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "original_filename",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "expected_size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "expected_blake3",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "media_type",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int2",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8592b03c4f37286205df266559af9a351afc6ff36b9806a351dc15a159d32a24"
+}

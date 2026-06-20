@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, model_pack_id, status, total_assets, queued_assets, processed_assets, failed_assets\n        FROM model_reindex_runs\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "model_pack_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "total_assets",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "queued_assets",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "processed_assets",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "failed_assets",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5c071a165cf08f873446aeedcf6f63225b24fa7597ff8d3cb3e31aa05183edb8"
+}

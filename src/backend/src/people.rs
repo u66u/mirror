@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -96,6 +96,7 @@ impl PartialEq for PeopleReviewError {
                 | (Self::OwnerMismatch, Self::OwnerMismatch)
                 | (Self::InvalidDisplayName, Self::InvalidDisplayName)
                 | (Self::Database(_), Self::Database(_))
+                | (Self::StorageKey(_), Self::StorageKey(_))
         )
     }
 }
@@ -147,6 +148,41 @@ pub struct FaceAlbumItem {
     pub review_state: String,
     /// Whether a generated face chip is available.
     pub chip_available: bool,
+}
+
+#[derive(Debug)]
+struct FaceAlbumRow {
+    face_id: Uuid,
+    asset_public_id: Uuid,
+    asset_created_at: OffsetDateTime,
+    media_type: String,
+    bbox_left: f32,
+    bbox_top: f32,
+    bbox_width: f32,
+    bbox_height: f32,
+    quality: Option<f32>,
+    review_state: String,
+    chip_available: bool,
+}
+
+impl From<FaceAlbumRow> for FaceAlbumItem {
+    fn from(row: FaceAlbumRow) -> Self {
+        Self {
+            face_id: row.face_id,
+            asset_id: row.asset_public_id,
+            asset_created_at: row.asset_created_at,
+            media_type: row.media_type,
+            bbox: FaceBounds {
+                left: row.bbox_left,
+                top: row.bbox_top,
+                width: row.bbox_width,
+                height: row.bbox_height,
+            },
+            quality: row.quality,
+            review_state: row.review_state,
+            chip_available: row.chip_available,
+        }
+    }
 }
 
 /// Stored face chip object metadata.
@@ -357,9 +393,14 @@ pub async fn list_people(
     pool: &PgPool,
     owner_id: i16,
 ) -> Result<Vec<PersonSummary>, PeopleReviewError> {
-    let rows = sqlx::query(
+    sqlx::query_as!(
+        PersonSummary,
         r#"
-        SELECT p.id, p.display_name, p.review_status, count(pf.face_occurrence_id) AS face_count
+        SELECT
+            p.id AS person_id,
+            p.display_name,
+            p.review_status,
+            count(pf.face_occurrence_id) AS "face_count!"
         FROM people p
         LEFT JOIN person_faces pf
           ON pf.person_id = p.id
@@ -368,22 +409,17 @@ pub async fn list_people(
         WHERE p.owner_id = $1
           AND p.review_status <> 'hidden'
         GROUP BY p.id, p.display_name, p.review_status
-        ORDER BY p.review_status ASC, p.display_name ASC NULLS LAST, face_count DESC, p.created_at DESC
+        ORDER BY
+            p.review_status ASC,
+            p.display_name ASC NULLS LAST,
+            count(pf.face_occurrence_id) DESC,
+            p.created_at DESC
         "#,
+        owner_id
     )
-    .bind(owner_id)
     .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| PersonSummary {
-            person_id: row.get("id"),
-            display_name: row.get("display_name"),
-            review_status: row.get("review_status"),
-            face_count: row.get("face_count"),
-        })
-        .collect())
+    .await
+    .map_err(Into::into)
 }
 
 /// Lists visible assigned faces for one owner-local person cluster.
@@ -394,7 +430,8 @@ pub async fn list_person_faces(
     limit: Option<i64>,
 ) -> Result<Vec<FaceAlbumItem>, PeopleReviewError> {
     ensure_visible_person(pool, owner_id, person_id).await?;
-    let rows = sqlx::query(
+    let rows = sqlx::query_as!(
+        FaceAlbumRow,
         r#"
         SELECT
             fo.id AS face_id,
@@ -407,7 +444,7 @@ pub async fn list_person_faces(
             fo.bbox_height,
             fo.quality,
             fo.review_state,
-            fo.chip_storage_key IS NOT NULL AS chip_available
+            fo.chip_storage_key IS NOT NULL AS "chip_available!"
         FROM person_faces pf
         JOIN face_occurrences fo
           ON fo.id = pf.face_occurrence_id
@@ -425,14 +462,14 @@ pub async fn list_person_faces(
         ORDER BY a.created_at DESC, fo.created_at DESC, fo.id DESC
         LIMIT $3
         "#,
+        owner_id,
+        person_id,
+        face_list_limit(limit)
     )
-    .bind(owner_id)
-    .bind(person_id)
-    .bind(face_list_limit(limit))
     .fetch_all(pool)
     .await?;
 
-    rows.into_iter().map(face_album_item_from_row).collect()
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// Lists owner-local faces that are not assigned to a visible person.
@@ -441,7 +478,8 @@ pub async fn list_unassigned_faces(
     owner_id: i16,
     limit: Option<i64>,
 ) -> Result<Vec<FaceAlbumItem>, PeopleReviewError> {
-    let rows = sqlx::query(
+    let rows = sqlx::query_as!(
+        FaceAlbumRow,
         r#"
         SELECT
             fo.id AS face_id,
@@ -454,7 +492,7 @@ pub async fn list_unassigned_faces(
             fo.bbox_height,
             fo.quality,
             fo.review_state,
-            fo.chip_storage_key IS NOT NULL AS chip_available
+            fo.chip_storage_key IS NOT NULL AS "chip_available!"
         FROM face_occurrences fo
         JOIN assets a
           ON a.id = fo.asset_id
@@ -471,13 +509,13 @@ pub async fn list_unassigned_faces(
         ORDER BY a.created_at DESC, fo.created_at DESC, fo.id DESC
         LIMIT $2
         "#,
+        owner_id,
+        face_list_limit(limit)
     )
-    .bind(owner_id)
-    .bind(face_list_limit(limit))
     .fetch_all(pool)
     .await?;
 
-    rows.into_iter().map(face_album_item_from_row).collect()
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// Resolves a generated face chip for an owner-visible face.
@@ -486,9 +524,11 @@ pub async fn get_face_chip(
     owner_id: i16,
     face_id: Uuid,
 ) -> Result<FaceChipObject, PeopleReviewError> {
-    let row = sqlx::query(
+    let row = sqlx::query!(
         r#"
-        SELECT fo.chip_storage_key, fo.chip_format
+        SELECT
+            fo.chip_storage_key AS "chip_storage_key!",
+            fo.chip_format AS "chip_format!"
         FROM face_occurrences fo
         JOIN assets a
           ON a.id = fo.asset_id
@@ -499,21 +539,20 @@ pub async fn get_face_chip(
           AND fo.chip_storage_key IS NOT NULL
           AND a.trashed_at IS NULL
         "#,
+        owner_id,
+        face_id
     )
-    .bind(owner_id)
-    .bind(face_id)
     .fetch_optional(pool)
     .await?;
     let Some(row) = row else {
         return Err(PeopleReviewError::FaceNotFound);
     };
-    let format: String = row.get("chip_format");
-    let media_type = match format.as_str() {
+    let media_type = match row.chip_format.as_str() {
         "webp" => "image/webp",
         _ => return Err(StorageKeyError::UnsafePath.into()),
     };
     Ok(FaceChipObject {
-        storage_key: StorageKey::new(row.get::<String, _>("chip_storage_key"))?,
+        storage_key: StorageKey::new(row.chip_storage_key)?,
         media_type,
     })
 }
@@ -523,44 +562,26 @@ async fn ensure_visible_person(
     owner_id: i16,
     person_id: Uuid,
 ) -> Result<(), PeopleReviewError> {
-    let exists: Option<bool> = sqlx::query_scalar(
+    let exists = sqlx::query_scalar!(
         r#"
-        SELECT true
-        FROM people
-        WHERE id = $1
-          AND owner_id = $2
-          AND review_status <> 'hidden'
+        SELECT EXISTS (
+            SELECT 1
+            FROM people
+            WHERE id = $1
+              AND owner_id = $2
+              AND review_status <> 'hidden'
+        ) AS "exists!"
         "#,
+        person_id,
+        owner_id
     )
-    .bind(person_id)
-    .bind(owner_id)
-    .fetch_optional(pool)
+    .fetch_one(pool)
     .await?;
-    if exists.unwrap_or(false) {
+    if exists {
         Ok(())
     } else {
         Err(PeopleReviewError::PersonNotFound)
     }
-}
-
-fn face_album_item_from_row(
-    row: sqlx::postgres::PgRow,
-) -> Result<FaceAlbumItem, PeopleReviewError> {
-    Ok(FaceAlbumItem {
-        face_id: row.get("face_id"),
-        asset_id: row.get("asset_public_id"),
-        asset_created_at: row.get("asset_created_at"),
-        media_type: row.get("media_type"),
-        bbox: FaceBounds {
-            left: row.get("bbox_left"),
-            top: row.get("bbox_top"),
-            width: row.get("bbox_width"),
-            height: row.get("bbox_height"),
-        },
-        quality: row.get("quality"),
-        review_state: row.get("review_state"),
-        chip_available: row.get("chip_available"),
-    })
 }
 
 fn face_list_limit(limit: Option<i64>) -> i64 {
@@ -577,16 +598,16 @@ pub async fn rename_person(
     name: &str,
 ) -> Result<(), PeopleReviewError> {
     let name = normalize_person_name(name)?;
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE people
         SET display_name = $1, review_status = 'reviewed', updated_at = now()
         WHERE id = $2 AND owner_id = $3 AND review_status <> 'hidden'
         "#,
+        name,
+        person_id,
+        owner_id
     )
-    .bind(name)
-    .bind(person_id)
-    .bind(owner_id)
     .execute(pool)
     .await?;
     if result.rows_affected() == 0 {
@@ -602,32 +623,32 @@ pub async fn hide_person(
     person_id: Uuid,
 ) -> Result<(), PeopleReviewError> {
     let mut tx = pool.begin().await?;
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE people
         SET review_status = 'hidden', updated_at = now()
         WHERE id = $1 AND owner_id = $2
         "#,
+        person_id,
+        owner_id
     )
-    .bind(person_id)
-    .bind(owner_id)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
         return Err(PeopleReviewError::PersonNotFound);
     }
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE person_faces
         SET review_state = 'hidden', updated_at = now()
         WHERE person_id = $1 AND owner_id = $2
         "#,
+        person_id,
+        owner_id
     )
-    .bind(person_id)
-    .bind(owner_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE face_occurrences fo
         SET review_state = 'hidden', updated_at = now()
@@ -637,9 +658,9 @@ pub async fn hide_person(
           AND pf.person_id = $1
           AND pf.owner_id = $2
         "#,
+        person_id,
+        owner_id
     )
-    .bind(person_id)
-    .bind(owner_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -657,16 +678,16 @@ pub async fn merge_people(
         return Err(PeopleReviewError::PersonNotFound);
     }
     let mut tx = pool.begin().await?;
-    let rows = sqlx::query(
+    let rows = sqlx::query!(
         r#"
         SELECT id, display_name, review_status
         FROM people
         WHERE owner_id = $1 AND id = ANY($2)
         FOR UPDATE
         "#,
+        owner_id,
+        &[target_id, source_id]
     )
-    .bind(owner_id)
-    .bind(&[target_id, source_id][..])
     .fetch_all(&mut *tx)
     .await?;
     if rows.len() != 2 {
@@ -674,24 +695,24 @@ pub async fn merge_people(
     }
     let source_name = rows
         .iter()
-        .find(|row| row.get::<Uuid, _>("id") == source_id)
-        .and_then(|row| row.get::<Option<String>, _>("display_name"));
-    let source_reviewed = rows.iter().any(|row| {
-        row.get::<Uuid, _>("id") == source_id && row.get::<String, _>("review_status") == "reviewed"
-    });
-    sqlx::query(
+        .find(|row| row.id == source_id)
+        .and_then(|row| row.display_name.clone());
+    let source_reviewed = rows
+        .iter()
+        .any(|row| row.id == source_id && row.review_status == "reviewed");
+    sqlx::query!(
         r#"
         UPDATE person_faces
         SET person_id = $1, updated_at = now()
         WHERE person_id = $2 AND owner_id = $3
         "#,
+        target_id,
+        source_id,
+        owner_id
     )
-    .bind(target_id)
-    .bind(source_id)
-    .bind(owner_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE people
         SET
@@ -700,18 +721,20 @@ pub async fn merge_people(
             updated_at = now()
         WHERE id = $3 AND owner_id = $4
         "#,
+        source_name,
+        source_reviewed,
+        target_id,
+        owner_id
     )
-    .bind(source_name)
-    .bind(source_reviewed)
-    .bind(target_id)
-    .bind(owner_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM people WHERE id = $1 AND owner_id = $2")
-        .bind(source_id)
-        .bind(owner_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM people WHERE id = $1 AND owner_id = $2",
+        source_id,
+        owner_id
+    )
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -728,17 +751,17 @@ pub async fn split_faces(
     }
     let new_person_id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO people (id, owner_id, display_name, review_status)
         VALUES ($1, $2, NULL, 'unreviewed')
         "#,
+        new_person_id,
+        owner_id
     )
-    .bind(new_person_id)
-    .bind(owner_id)
     .execute(&mut *tx)
     .await?;
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE person_faces
         SET person_id = $1, updated_at = now()
@@ -746,11 +769,11 @@ pub async fn split_faces(
           AND owner_id = $3
           AND face_occurrence_id = ANY($4)
         "#,
+        new_person_id,
+        source_id,
+        owner_id,
+        face_ids
     )
-    .bind(new_person_id)
-    .bind(source_id)
-    .bind(owner_id)
-    .bind(face_ids)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() != face_ids.len() as u64 {
@@ -770,30 +793,30 @@ pub async fn unassign_faces(
         return Err(PeopleReviewError::FaceNotFound);
     }
     let mut tx = pool.begin().await?;
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         DELETE FROM person_faces
         WHERE owner_id = $1
           AND face_occurrence_id = ANY($2)
         "#,
+        owner_id,
+        face_ids
     )
-    .bind(owner_id)
-    .bind(face_ids)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() != face_ids.len() as u64 {
         return Err(PeopleReviewError::FaceNotFound);
     }
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE face_occurrences
         SET review_state = 'unassigned', updated_at = now()
         WHERE owner_id = $1
           AND id = ANY($2)
         "#,
+        owner_id,
+        face_ids
     )
-    .bind(owner_id)
-    .bind(face_ids)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

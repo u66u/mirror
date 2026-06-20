@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO asset_shares (\n            id,\n            public_id,\n            owner_id,\n            asset_id,\n            token_hash,\n            allow_original_download,\n            expires_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int2",
+        "Uuid",
+        "Bytea",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7e2fec32cf3b54f971883390f7c1a8baeecbb04e10d56698d9fb6c18e7e56819"
+}

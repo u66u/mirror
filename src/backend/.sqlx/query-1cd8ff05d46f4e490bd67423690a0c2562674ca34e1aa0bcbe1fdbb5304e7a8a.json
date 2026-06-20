@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO originals (id, blake3_hash, storage_key, size_bytes, media_type)\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (blake3_hash)\n        DO UPDATE SET blake3_hash = EXCLUDED.blake3_hash\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1cd8ff05d46f4e490bd67423690a0c2562674ca34e1aa0bcbe1fdbb5304e7a8a"
+}
