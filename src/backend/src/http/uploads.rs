@@ -1,7 +1,7 @@
 //! Resumable upload routes.
 //!
-//! C001: completion promotes storage before committing DB asset rows. Recovery
-//! tooling must detect orphan originals with `assets::detect_original_orphan`.
+//! Completion verifies staged upload bytes, writes durable object storage outside
+//! SQL transactions, then finalizes DB rows in a short transaction.
 
 use actix_web::{HttpRequest, HttpResponse, delete, get, post, put, web};
 use serde::{Deserialize, Serialize};

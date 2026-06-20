@@ -1,7 +1,8 @@
 //! Asset/original promotion.
 //!
-//! C001: storage promotion happens before DB commit. `detect_original_orphan`
-//! lets recovery tooling identify promoted objects that lack DB rows.
+//! Storage work is deliberately outside SQL transactions. Upload and asset
+//! states make interrupted promotion retryable; integrity tooling finds any
+//! storage object that outlives a failed final DB transaction.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blake3::Hasher;
@@ -194,39 +195,30 @@ pub struct AssetDerivativeBlob {
 
 /// Promotes a verified staged upload into immutable original storage and asset rows.
 ///
-/// The final object write can outlive a failed DB transaction. Callers should
-/// run orphan detection from C001 during integrity checks.
+/// The final object write can outlive a failed DB transaction. The upload stays
+/// `promoting`, so a retry can either adopt the final object or finish DB state.
 pub async fn promote_verified_upload(
     pool: &PgPool,
     storage: &ObjectStorage,
     owner_id: i16,
     upload_id: Uuid,
 ) -> Result<PromotedUpload, PromoteError> {
-    let mut tx = pool.begin().await.map_err(PromoteError::Database)?;
-    let upload = load_verified_upload_for_update(&mut tx, owner_id, upload_id).await?;
-    if let Some(existing) = existing_asset_for_upload(&mut tx, upload_id).await? {
-        tx.commit().await.map_err(PromoteError::Database)?;
-        return Ok(existing);
+    match reserve_upload_promotion(pool, owner_id, upload_id, false).await? {
+        PromotionPlan::AlreadyPromoted { promoted, .. } => Ok(promoted),
+        PromotionPlan::Promote {
+            upload,
+            parts,
+            final_key,
+        } => {
+            if let Err(error) =
+                promote_reserved_upload(storage, upload_id, &upload, &final_key, parts).await
+            {
+                mark_upload_failed_on_permanent_error(pool, owner_id, upload_id, &error).await?;
+                return Err(error);
+            }
+            finalize_promoted_upload(pool, owner_id, upload_id, &upload, final_key.as_str()).await
+        }
     }
-
-    let final_key = StorageKey::original_blake3(&upload.expected_blake3)
-        .map_err(|_| PromoteError::VerificationFailed)?;
-
-    if storage
-        .exists(&final_key)
-        .await
-        .map_err(PromoteError::Storage)?
-    {
-        verify_staged_upload_parts(&mut tx, storage, upload_id, &upload).await?;
-    } else {
-        write_staged_upload_to_original(&mut tx, storage, upload_id, &upload, &final_key).await?;
-    }
-
-    let promoted =
-        insert_asset_for_upload(&mut tx, owner_id, upload_id, &upload, final_key.as_str()).await?;
-    tx.commit().await.map_err(PromoteError::Database)?;
-
-    Ok(promoted)
 }
 
 /// Verifies an open upload and promotes it without reading staged parts twice.
@@ -236,57 +228,36 @@ pub async fn complete_and_promote_upload(
     owner_id: i16,
     upload_id: Uuid,
 ) -> Result<(UploadSessionView, PromotedUpload), PromoteError> {
-    let mut tx = pool.begin().await.map_err(PromoteError::Database)?;
-    let promotable = load_promotable_upload_for_update(&mut tx, owner_id, upload_id).await?;
-
-    if let Some(existing) = existing_asset_for_upload(&mut tx, upload_id).await? {
-        if promotable.status == UploadPromotionStatus::Open {
-            mark_upload_verified(&mut tx, owner_id, upload_id).await?;
+    match reserve_upload_promotion(pool, owner_id, upload_id, true).await? {
+        PromotionPlan::AlreadyPromoted {
+            upload,
+            parts,
+            promoted,
+        } => Ok((
+            upload_view(upload_id, &upload, &parts, UploadStatus::Completed),
+            promoted,
+        )),
+        PromotionPlan::Promote {
+            upload,
+            parts,
+            final_key,
+        } => {
+            if let Err(error) =
+                promote_reserved_upload(storage, upload_id, &upload, &final_key, parts.clone())
+                    .await
+            {
+                mark_upload_failed_on_permanent_error(pool, owner_id, upload_id, &error).await?;
+                return Err(error);
+            }
+            let promoted =
+                finalize_promoted_upload(pool, owner_id, upload_id, &upload, final_key.as_str())
+                    .await?;
+            Ok((
+                upload_view(upload_id, &upload, &parts, UploadStatus::Completed),
+                promoted,
+            ))
         }
-        let parts = upload_parts(&mut tx, upload_id).await?;
-        let upload = upload_view(upload_id, &promotable.upload, &parts);
-        tx.commit().await.map_err(PromoteError::Database)?;
-        return Ok((upload, existing));
     }
-
-    let parts = upload_parts(&mut tx, upload_id).await?;
-    validate_upload_parts(&parts, &promotable.upload)?;
-
-    let final_key = StorageKey::original_blake3(&promotable.upload.expected_blake3)
-        .map_err(|_| PromoteError::VerificationFailed)?;
-
-    if storage
-        .exists(&final_key)
-        .await
-        .map_err(PromoteError::Storage)?
-    {
-        verify_staged_upload_part_rows(storage, parts.clone(), &promotable.upload).await?;
-    } else {
-        write_staged_upload_parts_to_original(
-            storage,
-            upload_id,
-            &promotable.upload,
-            &final_key,
-            parts.clone(),
-        )
-        .await?;
-    }
-
-    if promotable.status == UploadPromotionStatus::Open {
-        mark_upload_verified(&mut tx, owner_id, upload_id).await?;
-    }
-    let promoted = insert_asset_for_upload(
-        &mut tx,
-        owner_id,
-        upload_id,
-        &promotable.upload,
-        final_key.as_str(),
-    )
-    .await?;
-    let upload = upload_view(upload_id, &promotable.upload, &parts);
-    tx.commit().await.map_err(PromoteError::Database)?;
-
-    Ok((upload, promoted))
 }
 
 /// Detects a content-addressed original object that exists without DB metadata.
@@ -587,6 +558,79 @@ pub async fn purge_trashed_asset(
     tx.commit().await.map_err(AssetMutationError::Database)
 }
 
+/// Marks an internal asset as being processed by background media jobs.
+pub async fn mark_asset_processing(pool: &PgPool, asset_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE assets
+        SET status = $2
+        WHERE id = $1
+          AND status IN ('original_available', 'processing')
+        "#,
+        asset_id,
+        ASSET_STATUS_PROCESSING
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Marks an internal asset ready after required media derivatives are published.
+pub async fn mark_asset_ready(pool: &PgPool, asset_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE assets
+        SET status = $2
+        WHERE id = $1
+          AND status IN ('original_available', 'processing', 'ready')
+        "#,
+        asset_id,
+        ASSET_STATUS_READY
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Marks an internal asset failed after its retry budget is exhausted.
+pub async fn mark_asset_failed(pool: &PgPool, asset_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE assets
+        SET status = $2
+        WHERE id = $1
+          AND status <> 'corrupt'
+        "#,
+        asset_id,
+        ASSET_STATUS_FAILED
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Marks all assets backed by missing/corrupt originals as corrupt.
+pub async fn mark_original_assets_corrupt(
+    pool: &PgPool,
+    original_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    if original_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query!(
+        r#"
+        UPDATE assets
+        SET status = $2
+        WHERE original_id = ANY($1)
+        "#,
+        original_ids,
+        ASSET_STATUS_CORRUPT
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct VerifiedUpload {
     original_filename: String,
@@ -607,12 +651,33 @@ struct UploadPart {
 enum UploadPromotionStatus {
     Open,
     Verified,
+    Promoting,
+    Completed,
 }
 
+enum PromotionPlan {
+    AlreadyPromoted {
+        upload: VerifiedUpload,
+        parts: Vec<UploadPart>,
+        promoted: PromotedUpload,
+    },
+    Promote {
+        upload: VerifiedUpload,
+        parts: Vec<UploadPart>,
+        final_key: StorageKey,
+    },
+}
+
+const ASSET_STATUS_ORIGINAL_AVAILABLE: &str = "original_available";
+const ASSET_STATUS_PROCESSING: &str = "processing";
+const ASSET_STATUS_READY: &str = "ready";
+const ASSET_STATUS_FAILED: &str = "failed";
+const ASSET_STATUS_CORRUPT: &str = "corrupt";
+
 #[derive(Debug)]
-struct PromotableUpload {
-    status: UploadPromotionStatus,
+struct PromotableUploadRow {
     upload: VerifiedUpload,
+    status: UploadPromotionStatus,
 }
 
 async fn existing_asset_for_upload(
@@ -652,13 +717,14 @@ async fn insert_asset_for_upload(
 
     sqlx::query!(
         r#"
-        INSERT INTO assets (id, public_id, owner_id, original_id)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO assets (id, public_id, owner_id, original_id, status)
+        VALUES ($1, $2, $3, $4, $5)
         "#,
         asset_id,
         asset_public_id,
         owner_id,
-        original_id
+        original_id,
+        ASSET_STATUS_ORIGINAL_AVAILABLE
     )
     .execute(&mut **tx)
     .await
@@ -686,11 +752,52 @@ async fn insert_asset_for_upload(
     })
 }
 
+async fn reserve_upload_promotion(
+    pool: &PgPool,
+    owner_id: i16,
+    upload_id: Uuid,
+    allow_open: bool,
+) -> Result<PromotionPlan, PromoteError> {
+    let mut tx = pool.begin().await.map_err(PromoteError::Database)?;
+    let row = load_promotable_upload_for_update(&mut tx, owner_id, upload_id).await?;
+
+    if let Some(existing) = existing_asset_for_upload(&mut tx, upload_id).await? {
+        mark_upload_completed(&mut tx, owner_id, upload_id).await?;
+        let parts = upload_parts(&mut tx, upload_id).await?;
+        tx.commit().await.map_err(PromoteError::Database)?;
+        return Ok(PromotionPlan::AlreadyPromoted {
+            upload: row.upload,
+            parts,
+            promoted: existing,
+        });
+    }
+
+    if row.status == UploadPromotionStatus::Open && !allow_open {
+        return Err(PromoteError::UploadNotVerified);
+    }
+    if row.status == UploadPromotionStatus::Completed {
+        return Err(PromoteError::UploadNotVerified);
+    }
+
+    let parts = upload_parts(&mut tx, upload_id).await?;
+    validate_upload_parts(&parts, &row.upload)?;
+    mark_upload_promoting(&mut tx, owner_id, upload_id).await?;
+    let final_key = StorageKey::original_blake3(&row.upload.expected_blake3)
+        .map_err(|_| PromoteError::VerificationFailed)?;
+    tx.commit().await.map_err(PromoteError::Database)?;
+
+    Ok(PromotionPlan::Promote {
+        upload: row.upload,
+        parts,
+        final_key,
+    })
+}
+
 async fn load_promotable_upload_for_update(
     tx: &mut Transaction<'_, Postgres>,
     owner_id: i16,
     upload_id: Uuid,
-) -> Result<PromotableUpload, PromoteError> {
+) -> Result<PromotableUploadRow, PromoteError> {
     let row = sqlx::query!(
         r#"
         SELECT status, original_filename, expected_size, expected_blake3, media_type
@@ -710,10 +817,12 @@ async fn load_promotable_upload_for_update(
     let status = match row.status.as_str() {
         "open" => UploadPromotionStatus::Open,
         "verified" => UploadPromotionStatus::Verified,
+        "promoting" => UploadPromotionStatus::Promoting,
+        "completed" => UploadPromotionStatus::Completed,
         _ => return Err(PromoteError::UploadNotVerified),
     };
 
-    Ok(PromotableUpload {
+    Ok(PromotableUploadRow {
         status,
         upload: VerifiedUpload {
             original_filename: row.original_filename,
@@ -721,39 +830,6 @@ async fn load_promotable_upload_for_update(
             expected_blake3: row.expected_blake3,
             media_type: row.media_type,
         },
-    })
-}
-
-async fn load_verified_upload_for_update(
-    tx: &mut Transaction<'_, Postgres>,
-    owner_id: i16,
-    upload_id: Uuid,
-) -> Result<VerifiedUpload, PromoteError> {
-    let row = sqlx::query!(
-        r#"
-        SELECT status, original_filename, expected_size, expected_blake3, media_type
-        FROM upload_sessions
-        WHERE id = $1
-          AND owner_id = $2
-        FOR UPDATE
-        "#,
-        upload_id,
-        owner_id
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(PromoteError::Database)?
-    .ok_or(PromoteError::UploadNotVerified)?;
-
-    if row.status != "verified" {
-        return Err(PromoteError::UploadNotVerified);
-    }
-
-    Ok(VerifiedUpload {
-        original_filename: row.original_filename,
-        expected_size: row.expected_size,
-        expected_blake3: row.expected_blake3,
-        media_type: row.media_type,
     })
 }
 
@@ -808,7 +884,7 @@ fn validate_upload_parts(
     Ok(())
 }
 
-async fn mark_upload_verified(
+async fn mark_upload_promoting(
     tx: &mut Transaction<'_, Postgres>,
     owner_id: i16,
     upload_id: Uuid,
@@ -816,12 +892,15 @@ async fn mark_upload_verified(
     let updated = sqlx::query!(
         r#"
         UPDATE upload_sessions
-        SET status = 'verified',
+        SET status = 'promoting',
             completed_at = COALESCE(completed_at, now()),
+            promotion_started_at = COALESCE(promotion_started_at, now()),
+            failed_at = NULL,
+            failure_reason = NULL,
             updated_at = now()
         WHERE id = $1
           AND owner_id = $2
-          AND status = 'open'
+          AND status IN ('open', 'verified', 'promoting')
         "#,
         upload_id,
         owner_id
@@ -837,14 +916,73 @@ async fn mark_upload_verified(
     }
 }
 
+async fn mark_upload_completed(
+    tx: &mut Transaction<'_, Postgres>,
+    owner_id: i16,
+    upload_id: Uuid,
+) -> Result<(), PromoteError> {
+    sqlx::query!(
+        r#"
+        UPDATE upload_sessions
+        SET status = 'completed',
+            completed_at = COALESCE(completed_at, now()),
+            promoted_at = COALESCE(promoted_at, now()),
+            failed_at = NULL,
+            failure_reason = NULL,
+            updated_at = now()
+        WHERE id = $1
+          AND owner_id = $2
+          AND status IN ('verified', 'promoting', 'completed')
+        "#,
+        upload_id,
+        owner_id
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(PromoteError::Database)?;
+    Ok(())
+}
+
+async fn mark_upload_failed_on_permanent_error(
+    pool: &PgPool,
+    owner_id: i16,
+    upload_id: Uuid,
+    error: &PromoteError,
+) -> Result<(), PromoteError> {
+    if !matches!(error, PromoteError::VerificationFailed) {
+        return Ok(());
+    }
+    let reason = error.to_string();
+    sqlx::query!(
+        r#"
+        UPDATE upload_sessions
+        SET status = 'failed',
+            failed_at = COALESCE(failed_at, now()),
+            failure_reason = $3,
+            updated_at = now()
+        WHERE id = $1
+          AND owner_id = $2
+          AND status = 'promoting'
+        "#,
+        upload_id,
+        owner_id,
+        reason
+    )
+    .execute(pool)
+    .await
+    .map_err(PromoteError::Database)?;
+    Ok(())
+}
+
 fn upload_view(
     upload_id: Uuid,
     upload: &VerifiedUpload,
     parts: &[UploadPart],
+    status: UploadStatus,
 ) -> UploadSessionView {
     UploadSessionView {
         upload_id,
-        status: UploadStatus::Verified,
+        status,
         expected_size: upload.expected_size,
         expected_blake3: upload.expected_blake3.clone(),
         media_type: upload.media_type.clone(),
@@ -852,38 +990,23 @@ fn upload_view(
     }
 }
 
-async fn verify_staged_upload_parts(
-    tx: &mut Transaction<'_, Postgres>,
-    storage: &ObjectStorage,
-    upload_id: Uuid,
-    upload: &VerifiedUpload,
-) -> Result<(), PromoteError> {
-    let parts = upload_parts(tx, upload_id).await?;
-    validate_upload_parts(&parts, upload)?;
-    verify_staged_upload_part_rows(storage, parts, upload).await
-}
-
-async fn verify_staged_upload_part_rows(
-    storage: &ObjectStorage,
-    parts: Vec<UploadPart>,
-    upload: &VerifiedUpload,
-) -> Result<(), PromoteError> {
-    let stream = verified_part_stream(storage.clone(), parts, upload);
-    futures_util::pin_mut!(stream);
-    while stream.try_next().await?.is_some() {}
-    Ok(())
-}
-
-async fn write_staged_upload_to_original(
-    tx: &mut Transaction<'_, Postgres>,
+async fn promote_reserved_upload(
     storage: &ObjectStorage,
     upload_id: Uuid,
     upload: &VerifiedUpload,
     final_key: &StorageKey,
+    parts: Vec<UploadPart>,
 ) -> Result<(), PromoteError> {
-    let parts = upload_parts(tx, upload_id).await?;
-    validate_upload_parts(&parts, upload)?;
-    write_staged_upload_parts_to_original(storage, upload_id, upload, final_key, parts).await
+    if storage
+        .exists(final_key)
+        .await
+        .map_err(PromoteError::Storage)?
+    {
+        verify_final_original_object(storage, final_key, upload).await?;
+    } else {
+        write_staged_upload_parts_to_original(storage, upload_id, upload, final_key, parts).await?;
+    }
+    Ok(())
 }
 
 async fn write_staged_upload_parts_to_original(
@@ -893,8 +1016,9 @@ async fn write_staged_upload_parts_to_original(
     final_key: &StorageKey,
     parts: Vec<UploadPart>,
 ) -> Result<(), PromoteError> {
-    let temp_key = StorageKey::staging_upload(upload_id, "promoted-original")
-        .map_err(|_| PromoteError::VerificationFailed)?;
+    let temp_key =
+        StorageKey::staging_upload(upload_id, &format!("promoted-original-{}", Uuid::now_v7()))
+            .map_err(|_| PromoteError::VerificationFailed)?;
     let stream = verified_part_stream(storage.clone(), parts, upload);
     let write_result = storage.write_stream(&temp_key, stream).await;
     if let Err(error) = write_result {
@@ -908,6 +1032,86 @@ async fn write_staged_upload_parts_to_original(
     }
 
     Ok(())
+}
+
+async fn verify_final_original_object(
+    storage: &ObjectStorage,
+    final_key: &StorageKey,
+    upload: &VerifiedUpload,
+) -> Result<(), PromoteError> {
+    let stream = storage.read_stream(final_key).await?;
+    futures_util::pin_mut!(stream);
+    let mut total_size = 0_i64;
+    let mut first_bytes = Vec::new();
+    let mut hasher = Hasher::new();
+
+    while let Some(bytes) = stream.try_next().await? {
+        let bytes_len = i64::try_from(bytes.len()).map_err(|_| PromoteError::VerificationFailed)?;
+        total_size = total_size
+            .checked_add(bytes_len)
+            .ok_or(PromoteError::VerificationFailed)?;
+        if first_bytes.len() < 12 {
+            let remaining = 12 - first_bytes.len();
+            first_bytes.extend(bytes.iter().copied().take(remaining));
+        }
+        hasher.update(&bytes);
+    }
+
+    if total_size != upload.expected_size
+        || hasher.finalize().to_hex().as_str() != upload.expected_blake3
+        || !uploads::media_signature_matches(&upload.media_type, &first_bytes)
+    {
+        return Err(PromoteError::VerificationFailed);
+    }
+    Ok(())
+}
+
+async fn finalize_promoted_upload(
+    pool: &PgPool,
+    owner_id: i16,
+    upload_id: Uuid,
+    upload: &VerifiedUpload,
+    final_key: &str,
+) -> Result<PromotedUpload, PromoteError> {
+    let mut tx = pool.begin().await.map_err(PromoteError::Database)?;
+    lock_upload_for_finalization(&mut tx, owner_id, upload_id).await?;
+    if let Some(existing) = existing_asset_for_upload(&mut tx, upload_id).await? {
+        mark_upload_completed(&mut tx, owner_id, upload_id).await?;
+        tx.commit().await.map_err(PromoteError::Database)?;
+        return Ok(existing);
+    }
+
+    let promoted = insert_asset_for_upload(&mut tx, owner_id, upload_id, upload, final_key).await?;
+    mark_upload_completed(&mut tx, owner_id, upload_id).await?;
+    tx.commit().await.map_err(PromoteError::Database)?;
+    Ok(promoted)
+}
+
+async fn lock_upload_for_finalization(
+    tx: &mut Transaction<'_, Postgres>,
+    owner_id: i16,
+    upload_id: Uuid,
+) -> Result<(), PromoteError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id
+        FROM upload_sessions
+        WHERE id = $1
+          AND owner_id = $2
+          AND status IN ('promoting', 'completed')
+        FOR UPDATE
+        "#,
+        upload_id,
+        owner_id
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(PromoteError::Database)?;
+    if row.is_some() {
+        Ok(())
+    } else {
+        Err(PromoteError::UploadNotVerified)
+    }
 }
 
 fn verified_part_stream(

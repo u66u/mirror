@@ -21,8 +21,14 @@ const UPLOAD_PART_SIZE_I64: i64 = 4 * 1024 * 1024;
 pub enum UploadStatus {
     /// Parts can still be uploaded.
     Open,
-    /// Bytes verified. Promotion is handled by T204.
+    /// Bytes verified and ready for promotion.
     Verified,
+    /// Promotion is in progress or retryable after an interrupted attempt.
+    Promoting,
+    /// Durable asset/original rows were published.
+    Completed,
+    /// Upload verification or promotion failed permanently.
+    Failed,
     /// Upload was cancelled.
     Cancelled,
 }
@@ -32,6 +38,9 @@ impl UploadStatus {
         match self {
             Self::Open => "open",
             Self::Verified => "verified",
+            Self::Promoting => "promoting",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
             Self::Cancelled => "cancelled",
         }
     }
@@ -247,7 +256,10 @@ pub async fn complete_upload(
 ) -> Result<UploadSessionView, UploadError> {
     let mut tx = pool.begin().await?;
     let session = load_upload_for_update(&mut tx, owner_id, upload_id).await?;
-    if session.status == UploadStatus::Verified {
+    if matches!(
+        session.status,
+        UploadStatus::Verified | UploadStatus::Promoting | UploadStatus::Completed
+    ) {
         tx.commit().await?;
         return get_upload(pool, owner_id, upload_id).await;
     }
@@ -509,6 +521,9 @@ fn parse_status(status: &str) -> Result<UploadStatus, UploadError> {
     match status {
         "open" => Ok(UploadStatus::Open),
         "verified" => Ok(UploadStatus::Verified),
+        "promoting" => Ok(UploadStatus::Promoting),
+        "completed" => Ok(UploadStatus::Completed),
+        "failed" => Ok(UploadStatus::Failed),
         "cancelled" => Ok(UploadStatus::Cancelled),
         _ => Err(UploadError::InvalidInput),
     }

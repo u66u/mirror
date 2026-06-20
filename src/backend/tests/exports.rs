@@ -1,4 +1,5 @@
 use actix_web::{App, cookie::Cookie, http::StatusCode, test, web};
+use futures_util::StreamExt;
 use mirror_backend::{
     assets::trash_asset,
     auth::{SessionCreateInput, SetupState, create_session},
@@ -7,6 +8,7 @@ use mirror_backend::{
     state::AppState,
 };
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
 
 mod support;
 use support::{TestResult, create_promoted_asset, jpeg_bytes, storage_test_deps};
@@ -156,7 +158,7 @@ async fn original_export_archive_contains_manifest_and_active_original_bytes() -
         Some("application/x-tar")
     );
     let body = test::read_body(response).await.to_vec();
-    let entries = parse_tar_entries(&body)?;
+    let entries = parse_tar_entries(&body).await?;
     let manifest = entries
         .iter()
         .find(|entry| entry.path == "manifest.json")
@@ -249,42 +251,16 @@ struct TarEntry {
     bytes: Vec<u8>,
 }
 
-fn parse_tar_entries(bytes: &[u8]) -> TestResult<Vec<TarEntry>> {
-    let mut offset = 0_usize;
+async fn parse_tar_entries(bytes: &[u8]) -> TestResult<Vec<TarEntry>> {
+    let mut archive = tokio_tar::Archive::new(std::io::Cursor::new(bytes.to_vec()));
+    let mut archive_entries = archive.entries()?;
     let mut entries = Vec::new();
-    while offset + 512 <= bytes.len() {
-        let header = &bytes[offset..offset + 512];
-        if header.iter().all(|byte| *byte == 0) {
-            break;
-        }
-        let path_end = header[..100]
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(100);
-        let path = std::str::from_utf8(&header[..path_end])
-            .map_err(std::io::Error::other)?
-            .to_owned();
-        let size_end = header[124..136]
-            .iter()
-            .position(|byte| *byte == 0 || *byte == b' ')
-            .unwrap_or(12);
-        let size_text =
-            std::str::from_utf8(&header[124..124 + size_end]).map_err(std::io::Error::other)?;
-        let size = usize::from_str_radix(size_text, 8).map_err(std::io::Error::other)?;
-        offset += 512;
-        if offset + size > bytes.len() {
-            return Err(std::io::Error::other("tar entry exceeds archive").into());
-        }
-        entries.push(TarEntry {
-            path,
-            bytes: bytes[offset..offset + size].to_vec(),
-        });
-        offset += size + tar_entry_padding(size);
+    while let Some(entry) = archive_entries.next().await {
+        let mut entry = entry?;
+        let path = entry.path()?.to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).await?;
+        entries.push(TarEntry { path, bytes });
     }
     Ok(entries)
-}
-
-fn tar_entry_padding(size: usize) -> usize {
-    let remainder = size % 512;
-    if remainder == 0 { 0 } else { 512 - remainder }
 }

@@ -21,6 +21,7 @@ use sqlx::{PgPool, types::Json};
 use uuid::Uuid;
 
 use crate::{
+    assets,
     jobs::{JobKind, LeasedJob},
     storage::{ObjectStorage, StorageKey},
     video::{VideoProcessor, VideoToolError},
@@ -257,6 +258,7 @@ where
     V: VideoProcessor,
 {
     let asset_id = asset_id_from_payload(&job.payload)?;
+    assets::mark_asset_processing(pool, asset_id).await?;
     match job.kind {
         JobKind::ExtractMetadata => {
             extract_metadata(pool, storage, image_processor, video_processor, asset_id).await
@@ -268,6 +270,16 @@ where
             Err(MediaError::UnsupportedJobKind)
         }
     }
+}
+
+/// Marks a media asset failed when its job is dead-lettered.
+pub async fn record_media_asset_dead_letter_payload(
+    pool: &PgPool,
+    payload: &Value,
+) -> Result<(), MediaError> {
+    let asset_id = asset_id_from_payload(payload)?;
+    assets::mark_asset_failed(pool, asset_id).await?;
+    Ok(())
 }
 
 /// Extracts basic metadata for an asset original.
@@ -528,6 +540,8 @@ where
         .execute(pool)
         .await?;
     }
+
+    assets::mark_asset_ready(pool, asset_id).await?;
 
     Ok(())
 }

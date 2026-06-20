@@ -561,61 +561,33 @@ fn env_bool(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-#[cfg(test)]
-mod tests {
+#[doc(hidden)]
+pub mod test_support {
     use super::*;
 
-    #[test]
-    fn operator_secrets_require_non_whitespace_minimum_length() {
-        assert_eq!(
-            validate_operator_secret("", ConfigError::WeakAuthSecret),
-            Err(ConfigError::WeakAuthSecret)
-        );
-        assert_eq!(
-            validate_operator_secret(
-                "                                ",
-                ConfigError::WeakAuthSecret
-            ),
-            Err(ConfigError::WeakAuthSecret)
-        );
-        assert_eq!(
-            validate_operator_secret(
-                "12345678901234567890123456789012",
-                ConfigError::WeakAuthSecret
-            ),
-            Ok(())
-        );
+    pub fn validate_operator_secret_for_test(
+        secret: &str,
+        error: ConfigError,
+    ) -> Result<(), ConfigError> {
+        validate_operator_secret(secret, error)
     }
 
-    #[test]
-    fn trusted_proxy_parser_rejects_invalid_non_empty_entries() {
-        assert_eq!(
-            parse_trusted_proxies("127.0.0.1/32, ::1/128").map(|parsed| parsed.len()),
-            Ok(2)
-        );
-
-        assert_eq!(
-            parse_trusted_proxies("127.0.0.1/32, not-a-cidr"),
-            Err(ConfigError::InvalidTrustedProxy("not-a-cidr".to_owned()))
-        );
+    pub fn parse_trusted_proxy_count_for_test(value: &str) -> Result<usize, ConfigError> {
+        parse_trusted_proxies(value).map(|parsed| parsed.len())
     }
 
-    #[test]
-    fn ml_positive_thread_settings_reject_zero_and_invalid_values() {
-        assert_eq!(parse_positive_usize("8"), Some(8));
-        assert_eq!(parse_positive_usize("0"), None);
-        assert_eq!(parse_positive_usize("many"), None);
+    #[must_use]
+    pub fn parse_positive_usize_for_test(value: &str) -> Option<usize> {
+        parse_positive_usize(value)
     }
 
-    #[test]
-    fn default_worker_concurrency_is_positive() {
-        assert!(default_worker_concurrency() > 0);
+    #[must_use]
+    pub fn default_worker_concurrency_for_test() -> usize {
+        default_worker_concurrency()
     }
 
-    #[test]
-    fn strict_optional_bool_parser_accepts_operator_spellings() {
-        assert_eq!(parse_optional_bool_value("true"), Some(true));
-        assert_eq!(parse_optional_bool_value("off"), Some(false));
-        assert_eq!(parse_optional_bool_value("maybe"), None);
+    #[must_use]
+    pub fn parse_optional_bool_value_for_test(value: &str) -> Option<bool> {
+        parse_optional_bool_value(value)
     }
 }

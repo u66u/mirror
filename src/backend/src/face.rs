@@ -2595,8 +2595,8 @@ fn is_supported_face_media_type(media_type: &str) -> bool {
     )
 }
 
-#[cfg(test)]
-mod tests {
+#[doc(hidden)]
+pub mod test_support {
     use super::*;
 
     fn test_embedding_config() -> FaceEmbeddingModelConfig {
@@ -2617,7 +2617,7 @@ mod tests {
         }
     }
 
-    fn test_chip(values: [[u8; 3]; 2]) -> FaceChip {
+    fn test_chip(values: &[[u8; 3]; 2]) -> FaceChip {
         let mut image = RgbImage::new(2, 1);
         image.put_pixel(0, 0, Rgb(values[0]));
         image.put_pixel(1, 0, Rgb(values[1]));
@@ -2632,92 +2632,65 @@ mod tests {
         }
     }
 
-    #[test]
-    fn scrfd_head_shape_requires_standard_two_anchors_per_location() {
+    #[must_use]
+    pub fn scrfd_anchors_per_location_for_test() -> usize {
+        SCRFD_ANCHORS_PER_LOCATION
+    }
+
+    pub fn validate_scrfd_head_shape_for_test(
+        stride: u32,
+        face_count: usize,
+        score_count: usize,
+        network_width: u32,
+        network_height: u32,
+    ) -> Result<(), FaceIndexError> {
         let ctx = DetectorPreprocessCtx {
-            network_width: 640,
-            network_height: 640,
-            resized_width: 640.0,
-            resized_height: 640.0,
+            network_width,
+            network_height,
+            resized_width: network_width as f32,
+            resized_height: network_height as f32,
             x_offset: 0.0,
             y_offset: 0.0,
         };
-        let expected = 80 * 80 * SCRFD_ANCHORS_PER_LOCATION;
-
-        assert!(validate_scrfd_head_shape(8, expected, expected, &ctx).is_ok());
-        assert!(validate_scrfd_head_shape(8, 80 * 80, 80 * 80, &ctx).is_err());
-        assert!(validate_scrfd_head_shape(8, expected * 3 / 2, expected * 3 / 2, &ctx).is_err());
+        validate_scrfd_head_shape(stride, face_count, score_count, &ctx)
     }
 
-    #[test]
-    fn face_chip_preprocessing_builds_one_contiguous_batch_tensor() -> Result<(), FaceIndexError> {
+    pub fn raw_embedding_preprocess_batch_for_test(
+        chips: &[[[u8; 3]; 2]],
+    ) -> Result<(Vec<usize>, Vec<f32>), FaceIndexError> {
         let config = test_embedding_config();
         let adapter = RawEmbeddingAdapter { config: &config };
-        let first = test_chip([[1, 2, 3], [4, 5, 6]]);
-        let second = test_chip([[7, 8, 9], [10, 11, 12]]);
-
-        let inputs = adapter.preprocess_batch(&[&first, &second])?;
-        assert_eq!(inputs.tensors.len(), 1);
-        let input = &inputs.tensors[0];
-
-        assert_eq!(input.shape, [2, 3, 1, 2]);
-        assert_eq!(input.values.len(), 12);
-        assert_eq!(
-            &input.values[..6],
-            &[
-                1.0 / 255.0,
-                4.0 / 255.0,
-                2.0 / 255.0,
-                5.0 / 255.0,
-                3.0 / 255.0,
-                6.0 / 255.0,
-            ]
-        );
-        assert_eq!(
-            &input.values[6..],
-            &[
-                7.0 / 255.0,
-                10.0 / 255.0,
-                8.0 / 255.0,
-                11.0 / 255.0,
-                9.0 / 255.0,
-                12.0 / 255.0,
-            ]
-        );
-        Ok(())
+        let chips = chips.iter().map(test_chip).collect::<Vec<_>>();
+        let chip_refs = chips.iter().collect::<Vec<_>>();
+        let inputs = adapter.preprocess_batch(&chip_refs)?;
+        let input = inputs
+            .tensors
+            .first()
+            .ok_or(FaceIndexError::RuntimeUnavailable)?;
+        Ok((input.shape.clone(), input.values.clone()))
     }
 
-    #[test]
-    fn face_embedding_batch_output_is_split_and_normalized_per_face() -> Result<(), FaceIndexError>
-    {
+    pub fn raw_embedding_postprocess_batch_for_test(
+        shape: Vec<i64>,
+        values: Vec<f32>,
+        batch_size: usize,
+        embedding_dimension: usize,
+    ) -> Result<Vec<Vec<f32>>, FaceIndexError> {
         let config = test_embedding_config();
         let adapter = RawEmbeddingAdapter { config: &config };
         let outputs = OnnxOutputs {
-            tensors: HashMap::from([(
-                "embedding".to_owned(),
-                OnnxOutput {
-                    shape: vec![2, 2],
-                    values: vec![3.0, 4.0, 0.0, 2.0],
-                },
-            )]),
+            tensors: HashMap::from([("embedding".to_owned(), OnnxOutput { shape, values })]),
         };
-
-        let embeddings = adapter.postprocess_batch(&outputs, 2, 2)?;
-
-        assert_eq!(embeddings.len(), 2);
-        assert!((embeddings[0][0] - 0.6).abs() < 1e-6);
-        assert!((embeddings[0][1] - 0.8).abs() < 1e-6);
-        assert_eq!(embeddings[1], [0.0, 1.0]);
-        Ok(())
+        adapter.postprocess_batch(&outputs, batch_size, embedding_dimension)
     }
 
-    #[test]
-    fn face_embedding_batch_output_rejects_aliased_batch_shape() {
-        let output = OnnxOutput {
-            shape: vec![1, 4],
-            values: vec![0.0; 4],
-        };
-
-        assert!(validate_embedding_batch_output(&output, 2, 2).is_err());
+    pub fn validate_embedding_batch_output_for_test(
+        shape: Vec<i64>,
+        values: Vec<f32>,
+        batch_size: usize,
+        embedding_dimension: usize,
+    ) -> Result<(), FaceIndexError> {
+        let output = OnnxOutput { shape, values };
+        validate_embedding_batch_output(&output, batch_size, embedding_dimension)
     }
 }

@@ -171,7 +171,7 @@ async fn complete_upload_route_promotes_asset_and_enqueues_jobs() -> TestResult 
 
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = test::read_body_json(response).await;
-    assert_eq!(body["upload"]["status"], "verified");
+    assert_eq!(body["upload"]["status"], "completed");
     assert!(body["promoted"]["asset_id"].is_string());
     assert_eq!(asset_count(&deps.pool).await?, 1);
     assert_eq!(job_count(&deps.pool).await?, 2);

@@ -36,6 +36,11 @@ async fn promotion_deduplicates_originals_but_keeps_distinct_assets() -> TestRes
     assert_eq!(original_count(&deps.pool).await?, 1);
     assert_eq!(asset_count(&deps.pool).await?, 2);
     assert_eq!(job_count(&deps.pool).await?, 4);
+    assert_eq!(
+        asset_status(&deps.pool, first.asset_id).await?,
+        "original_available"
+    );
+    assert_eq!(upload_status(&deps.pool, first_upload).await?, "completed");
 
     Ok(())
 }
@@ -57,6 +62,7 @@ async fn concurrent_promotion_of_one_upload_is_idempotent() -> TestResult {
     assert_eq!(original_count(&deps.pool).await?, 1);
     assert_eq!(asset_count(&deps.pool).await?, 1);
     assert_eq!(job_count(&deps.pool).await?, 2);
+    assert_eq!(upload_status(&deps.pool, upload_id).await?, "completed");
 
     Ok(())
 }
@@ -107,7 +113,35 @@ async fn promotion_writes_multipart_upload_to_original_storage() -> TestResult {
     assert_eq!(deps.storage.read(&final_key).await?, bytes);
     assert_eq!(original_count(&deps.pool).await?, 1);
     assert_eq!(asset_count(&deps.pool).await?, 1);
+    assert_eq!(
+        upload_status(&deps.pool, upload.upload_id).await?,
+        "completed"
+    );
 
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn promotion_adopts_existing_final_object_when_staging_was_cleaned() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let bytes = jpeg_bytes();
+    let expected_blake3 = blake3::hash(&bytes).to_hex().to_string();
+    let upload_id = create_verified_jpeg_upload(&deps.pool, &deps.storage, "adopt.jpg").await?;
+    let final_key = StorageKey::original_blake3(&expected_blake3)?;
+    let staged_key = StorageKey::staging_upload(upload_id, "part-00000000")?;
+    deps.storage.write(&final_key, bytes).await?;
+    deps.storage.delete(&staged_key).await?;
+
+    let promoted = promote_verified_upload(&deps.pool, &deps.storage, 1, upload_id).await?;
+
+    assert_eq!(
+        asset_status(&deps.pool, promoted.asset_id).await?,
+        "original_available"
+    );
+    assert_eq!(upload_status(&deps.pool, upload_id).await?, "completed");
+    assert_eq!(original_count(&deps.pool).await?, 1);
+    assert_eq!(asset_count(&deps.pool).await?, 1);
     Ok(())
 }
 
@@ -138,6 +172,24 @@ async fn unverified_upload_cannot_create_assets_or_jobs() -> TestResult {
     assert_eq!(job_count(&deps.pool).await?, 0);
 
     Ok(())
+}
+
+async fn asset_status(pool: &sqlx::PgPool, asset_public_id: uuid::Uuid) -> TestResult<String> {
+    Ok(sqlx::query_scalar!(
+        "SELECT status FROM assets WHERE public_id = $1",
+        asset_public_id
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn upload_status(pool: &sqlx::PgPool, upload_id: uuid::Uuid) -> TestResult<String> {
+    Ok(sqlx::query_scalar!(
+        "SELECT status FROM upload_sessions WHERE id = $1",
+        upload_id
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 #[tokio::test]

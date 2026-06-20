@@ -2,8 +2,16 @@
 
 use actix_web::{HttpRequest, HttpResponse, get, web};
 use bytes::Bytes;
-use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
-use std::{collections::VecDeque, pin::Pin};
+use futures_channel::mpsc;
+use futures_util::{Sink, SinkExt, TryStreamExt, ready, stream::BoxStream};
+use std::{
+    path::Path,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_tar::{Builder as TarBuilder, EntryType, Header as TarHeader};
+use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
 use crate::{
@@ -12,7 +20,7 @@ use crate::{
     http::{auth, error::ApiError},
     rate_limit::{self, QuotaInput},
     state::AppState,
-    storage::{ObjectStorage, StorageError, StorageKey},
+    storage::{ObjectStorage, StorageKey},
 };
 
 const EXPORT_MANIFEST_ACTION: &str = "export_original_manifest";
@@ -214,184 +222,189 @@ enum ArchiveItem {
     },
 }
 
-enum TarPhase {
-    Next,
-    BytesContent {
-        bytes: Option<Bytes>,
-        padding: usize,
-    },
-    OpenObject {
-        storage_key: StorageKey,
-        size_bytes: u64,
-    },
-    ObjectContent {
-        stream: Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, StorageError>> + Send>>,
-        remaining: u64,
-        padding: usize,
-    },
-    Padding(usize),
-    End(usize),
-}
-
-struct TarState {
-    storage: ObjectStorage,
-    items: VecDeque<ArchiveItem>,
-    phase: TarPhase,
-}
+const TAR_STREAM_CHANNEL_CAPACITY: usize = 8;
 
 fn tar_stream(
     storage: ObjectStorage,
     items: Vec<ArchiveItem>,
 ) -> BoxStream<'static, Result<Bytes, std::io::Error>> {
-    Box::pin(futures_util::stream::try_unfold(
-        TarState {
-            storage,
-            items: items.into(),
-            phase: TarPhase::Next,
-        },
-        |mut state| async move {
-            loop {
-                match state.phase {
-                    TarPhase::Next => {
-                        let Some(item) = state.items.pop_front() else {
-                            state.phase = TarPhase::End(2);
-                            continue;
-                        };
-                        match item {
-                            ArchiveItem::Bytes { path, bytes } => {
-                                let header = tar_header(&path, bytes.len() as u64)?;
-                                state.phase = TarPhase::BytesContent {
-                                    padding: tar_padding(bytes.len() as u64),
-                                    bytes: Some(bytes),
-                                };
-                                return Ok(Some((header, state)));
-                            }
-                            ArchiveItem::Object {
-                                path,
-                                storage_key,
-                                size_bytes,
-                            } => {
-                                let header = tar_header(&path, size_bytes)?;
-                                state.phase = TarPhase::OpenObject {
-                                    storage_key,
-                                    size_bytes,
-                                };
-                                return Ok(Some((header, state)));
-                            }
-                        }
-                    }
-                    TarPhase::BytesContent {
-                        ref mut bytes,
-                        padding,
-                    } => {
-                        if let Some(bytes) = bytes.take() {
-                            return Ok(Some((bytes, state)));
-                        }
-                        state.phase = TarPhase::Padding(padding);
-                    }
-                    TarPhase::OpenObject {
-                        ref storage_key,
-                        size_bytes,
-                    } => {
-                        let stream = state
-                            .storage
-                            .read_stream(storage_key)
-                            .await
-                            .map_err(std::io::Error::other)?;
-                        state.phase = TarPhase::ObjectContent {
-                            stream: Box::pin(stream),
-                            remaining: size_bytes,
-                            padding: tar_padding(size_bytes),
-                        };
-                    }
-                    TarPhase::ObjectContent {
-                        ref mut stream,
-                        ref mut remaining,
-                        padding,
-                    } => match stream.next().await {
-                        Some(Ok(bytes)) => {
-                            let len = u64::try_from(bytes.len()).map_err(std::io::Error::other)?;
-                            if len > *remaining {
-                                return Err(std::io::Error::other(
-                                    "export original exceeded manifest size",
-                                ));
-                            }
-                            *remaining -= len;
-                            return Ok(Some((bytes, state)));
-                        }
-                        Some(Err(error)) => return Err(std::io::Error::other(error)),
-                        None => {
-                            if *remaining != 0 {
-                                return Err(std::io::Error::other(
-                                    "export original shorter than manifest size",
-                                ));
-                            }
-                            state.phase = TarPhase::Padding(padding);
-                        }
-                    },
-                    TarPhase::Padding(remaining) => {
-                        if remaining == 0 {
-                            state.phase = TarPhase::Next;
-                            continue;
-                        }
-                        state.phase = TarPhase::Next;
-                        return Ok(Some((Bytes::from(vec![0_u8; remaining]), state)));
-                    }
-                    TarPhase::End(remaining_blocks) => {
-                        if remaining_blocks == 0 {
-                            return Ok(None);
-                        }
-                        state.phase = TarPhase::End(remaining_blocks - 1);
-                        return Ok(Some((Bytes::from(vec![0_u8; 512]), state)));
-                    }
-                }
-            }
-        },
-    ))
+    let (sender, receiver) = mpsc::channel(TAR_STREAM_CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        let mut writer = TarStreamWriter { sender };
+        if let Err(error) = write_tar_archive(&mut writer, storage, items).await {
+            writer.send_error(error).await;
+        }
+    });
+    Box::pin(receiver)
 }
 
-fn tar_header(path: &str, size: u64) -> Result<Bytes, std::io::Error> {
+async fn write_tar_archive(
+    writer: &mut TarStreamWriter,
+    storage: ObjectStorage,
+    items: Vec<ArchiveItem>,
+) -> Result<(), std::io::Error> {
+    let mut archive = TarBuilder::new_non_terminated(writer);
+    for item in items {
+        match item {
+            ArchiveItem::Bytes { path, bytes } => {
+                validate_archive_path(&path)?;
+                let mut header = tar_file_header(bytes.len() as u64);
+                archive
+                    .append_data(&mut header, Path::new(&path), std::io::Cursor::new(bytes))
+                    .await?;
+            }
+            ArchiveItem::Object {
+                path,
+                storage_key,
+                size_bytes,
+            } => {
+                validate_archive_path(&path)?;
+                let stream = storage
+                    .read_stream(&storage_key)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                let reader = StreamReader::new(stream.map_err(std::io::Error::other));
+                let mut header = tar_file_header(size_bytes);
+                archive
+                    .append_data(
+                        &mut header,
+                        Path::new(&path),
+                        ExactSizeReader::new(reader, size_bytes),
+                    )
+                    .await?;
+            }
+        }
+    }
+    archive.finish().await
+}
+
+fn validate_archive_path(path: &str) -> Result<(), std::io::Error> {
     if path.is_empty()
-        || path.len() > 100
         || path.starts_with('/')
         || path.contains("..")
         || path.contains('\\')
+        || path.as_bytes().contains(&0)
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "invalid export archive path",
         ));
     }
-    let mut header = [0_u8; 512];
-    write_tar_field(&mut header[0..100], path.as_bytes());
-    write_tar_octal(&mut header[100..108], 0o644);
-    write_tar_octal(&mut header[108..116], 0);
-    write_tar_octal(&mut header[116..124], 0);
-    write_tar_octal(&mut header[124..136], size);
-    write_tar_octal(&mut header[136..148], 0);
-    header[148..156].fill(b' ');
-    header[156] = b'0';
-    write_tar_field(&mut header[257..263], b"ustar");
-    write_tar_field(&mut header[263..265], b"00");
-    let checksum = header.iter().map(|byte| u32::from(*byte)).sum::<u32>();
-    let encoded = format!("{checksum:06o}\0 ");
-    header[148..156].copy_from_slice(encoded.as_bytes());
-    Ok(Bytes::copy_from_slice(&header))
+    Ok(())
 }
 
-fn write_tar_field(target: &mut [u8], value: &[u8]) {
-    let len = value.len().min(target.len());
-    target[..len].copy_from_slice(&value[..len]);
+fn tar_file_header(size: u64) -> TarHeader {
+    let mut header = TarHeader::new_ustar();
+    header.set_entry_type(EntryType::Regular);
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_size(size);
+    header
 }
 
-fn write_tar_octal(target: &mut [u8], value: u64) {
-    let encoded = format!("{value:0width$o}\0", width = target.len() - 1);
-    target.copy_from_slice(encoded.as_bytes());
+struct TarStreamWriter {
+    sender: mpsc::Sender<Result<Bytes, std::io::Error>>,
 }
 
-fn tar_padding(size: u64) -> usize {
-    let remainder = usize::try_from(size % 512).unwrap_or(0);
-    if remainder == 0 { 0 } else { 512 - remainder }
+impl TarStreamWriter {
+    async fn send_error(&mut self, error: std::io::Error) {
+        let _ = self.sender.send(Err(error)).await;
+    }
+}
+
+impl AsyncWrite for TarStreamWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        if buffer.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        ready!(Pin::new(&mut self.sender).poll_ready(cx)).map_err(|_| broken_pipe())?;
+        Pin::new(&mut self.sender)
+            .start_send(Ok(Bytes::copy_from_slice(buffer)))
+            .map_err(|_| broken_pipe())?;
+        Poll::Ready(Ok(buffer.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.sender)
+            .poll_close(cx)
+            .map_err(|_| broken_pipe())
+    }
+}
+
+fn broken_pipe() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "export stream closed")
+}
+
+struct ExactSizeReader<R> {
+    inner: R,
+    remaining: u64,
+    eof_checked: bool,
+}
+
+impl<R> ExactSizeReader<R> {
+    fn new(inner: R, size: u64) -> Self {
+        Self {
+            inner,
+            remaining: size,
+            eof_checked: false,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ExactSizeReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        if self.eof_checked {
+            return Poll::Ready(Ok(()));
+        }
+
+        if self.remaining == 0 {
+            let mut extra = [0_u8; 1];
+            let mut extra_buffer = ReadBuf::new(&mut extra);
+            ready!(Pin::new(&mut self.inner).poll_read(cx, &mut extra_buffer))?;
+            if extra_buffer.filled().is_empty() {
+                self.eof_checked = true;
+                return Poll::Ready(Ok(()));
+            }
+            return Poll::Ready(Err(std::io::Error::other(
+                "export original exceeded manifest size",
+            )));
+        }
+
+        let remaining = usize::try_from(self.remaining).unwrap_or(usize::MAX);
+        let max_read = buffer.remaining().min(remaining);
+        if max_read == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let output = buffer.initialize_unfilled_to(max_read);
+        let mut limited_buffer = ReadBuf::new(output);
+        ready!(Pin::new(&mut self.inner).poll_read(cx, &mut limited_buffer))?;
+        let bytes_read = limited_buffer.filled().len();
+        if bytes_read == 0 {
+            return Poll::Ready(Err(std::io::Error::other(
+                "export original shorter than manifest size",
+            )));
+        }
+        self.remaining -= bytes_read as u64;
+        buffer.advance(bytes_read);
+        Poll::Ready(Ok(()))
+    }
 }
 
 fn archive_original_path(item: &ExportManifestItem) -> String {

@@ -7,10 +7,12 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 use thiserror::Error;
+use wait_timeout::ChildExt;
 
 use serde::Deserialize;
 
@@ -135,7 +137,16 @@ impl VideoProcessor for FfmpegVideoProcessor {
             .map(|duration| (duration / 10).min(3_000))
             .unwrap_or(0);
         let seek_seconds = format!("{:.3}", seek_ms as f64 / 1000.0);
-        let output = input.with_extension("poster.webp");
+        let output_dir = input
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let output = tempfile::Builder::new()
+            .prefix("poster-")
+            .suffix(".webp")
+            .tempfile_in(output_dir)?
+            .into_temp_path();
+        let output_path = output.to_path_buf();
         let filter = format!(
             "scale=w='if(gte(iw,ih),min(iw,{target_edge}),-2)':h='if(gte(iw,ih),-2,min(ih,{target_edge}))'"
         );
@@ -162,14 +173,14 @@ impl VideoProcessor for FfmpegVideoProcessor {
             "-vf",
         ]);
         command.arg(filter);
-        command.arg(&output);
+        command.arg(&output_path);
         run_command(&mut command, self.command_timeout, false)?;
 
-        let size = std::fs::metadata(&output)?.len();
+        let size = std::fs::metadata(&output_path)?.len();
         if size == 0 || size > MAX_POSTER_BYTES {
             return Err(VideoToolError::PosterSizeOutOfRange);
         }
-        std::fs::read(output).map_err(From::from)
+        std::fs::read(&output_path).map_err(From::from)
     }
 }
 
@@ -239,30 +250,98 @@ fn run_command(
             VideoToolError::Io(error)
         }
     })?;
+    let mut stdout = if capture_stdout {
+        let stdout = child.stdout.take().ok_or(VideoToolError::MissingStdout)?;
+        Some(spawn_stdout_reader(stdout))
+    } else {
+        None
+    };
     let started = Instant::now();
+    let mut stdout_result = None;
 
     let status = loop {
+        if let Some(stdout_reader) = stdout.as_ref()
+            && stdout_result.is_none()
+        {
+            match stdout_reader.result.try_recv() {
+                Ok(result) => {
+                    if matches!(result, Err(VideoToolError::OutputTooLarge)) {
+                        if child.try_wait()?.is_none() {
+                            child.kill()?;
+                            child.wait()?;
+                        }
+                        if let Some(stdout) = stdout.take() {
+                            stdout.join()?;
+                        }
+                        return result;
+                    }
+                    stdout_result = Some(result);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(VideoToolError::Io(std::io::Error::other(
+                        "video stdout reader stopped",
+                    )));
+                }
+            }
+        }
+
         if started.elapsed() >= timeout {
             if child.try_wait()?.is_none() {
                 child.kill()?;
                 child.wait()?;
             }
+            if let Some(stdout) = stdout {
+                stdout.join()?;
+            }
             return Err(VideoToolError::TimedOut);
         }
-        if let Some(status) = child.try_wait()? {
+        let wait_for = PROCESS_POLL_INTERVAL.min(timeout.saturating_sub(started.elapsed()));
+        if let Some(status) = child.wait_timeout(wait_for)? {
             break status;
         }
-        thread::sleep(PROCESS_POLL_INTERVAL.min(timeout));
     };
-    if !status.success() {
-        return Err(VideoToolError::CommandFailed);
-    }
     if !capture_stdout {
+        if !status.success() {
+            return Err(VideoToolError::CommandFailed);
+        }
         return Ok(Vec::new());
     }
 
-    let stdout = child.stdout.take().ok_or(VideoToolError::MissingStdout)?;
-    read_bounded(stdout, MAX_PROBE_OUTPUT_BYTES)
+    let stdout = stdout.ok_or(VideoToolError::MissingStdout)?;
+    let output = match stdout_result {
+        Some(result) => result,
+        None => stdout.result.recv().map_err(|_| {
+            VideoToolError::Io(std::io::Error::other("video stdout reader stopped"))
+        })?,
+    };
+    stdout.join()?;
+    let output = output?;
+    if !status.success() {
+        return Err(VideoToolError::CommandFailed);
+    }
+    Ok(output)
+}
+
+struct StdoutReader {
+    result: mpsc::Receiver<Result<Vec<u8>, VideoToolError>>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl StdoutReader {
+    fn join(self) -> Result<(), VideoToolError> {
+        self.thread
+            .join()
+            .map_err(|_| VideoToolError::Io(std::io::Error::other("video stdout reader panicked")))
+    }
+}
+
+fn spawn_stdout_reader(stdout: impl Read + Send + 'static) -> StdoutReader {
+    let (sender, result) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        let _ = sender.send(read_bounded(stdout, MAX_PROBE_OUTPUT_BYTES));
+    });
+    StdoutReader { result, thread }
 }
 
 fn read_bounded(mut file: impl Read, max_bytes: u64) -> Result<Vec<u8>, VideoToolError> {

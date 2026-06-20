@@ -201,6 +201,8 @@ async fn integrity_scan_job_persists_report_without_deleting_objects() -> TestRe
     let deps = storage_test_deps().await?;
     let healthy_original = insert_original_object(&deps, b"job healthy", true).await?;
     let corrupt_original = insert_corrupt_original_object(&deps).await?;
+    let corrupt_original_asset_id =
+        insert_asset_for_original(&deps.pool, corrupt_original.original_id).await?;
     let asset_id = insert_asset_for_original(&deps.pool, healthy_original.original_id).await?;
     let corrupt_derivative =
         insert_corrupt_derivative_object(&deps, asset_id, &healthy_original.hash).await?;
@@ -238,6 +240,10 @@ async fn integrity_scan_job_persists_report_without_deleting_objects() -> TestRe
     assert_eq!(json_len(&row.corrupt_derivatives), 1);
     assert!(deps.storage.exists(&corrupt_original.key).await?);
     assert!(deps.storage.exists(&corrupt_derivative.key).await?);
+    assert_eq!(
+        asset_status(&deps.pool, corrupt_original_asset_id).await?,
+        "corrupt"
+    );
 
     Ok(())
 }
@@ -327,6 +333,14 @@ async fn insert_asset_for_original(pool: &sqlx::PgPool, original_id: Uuid) -> Te
     .execute(pool)
     .await?;
     Ok(asset_id)
+}
+
+async fn asset_status(pool: &sqlx::PgPool, asset_id: Uuid) -> TestResult<String> {
+    Ok(
+        sqlx::query_scalar!("SELECT status FROM assets WHERE id = $1", asset_id)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 async fn insert_derivative_object(

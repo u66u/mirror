@@ -58,7 +58,68 @@ fn video_processor_kills_probe_that_exceeds_deadline() -> TestResult {
 
     let result = processor.inspect(Path::new("unused-input"));
 
-    assert!(matches!(result, Err(VideoToolError::TimedOut)));
+    assert!(
+        matches!(result, Err(VideoToolError::TimedOut)),
+        "expected timeout, got {result:?}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn video_probe_does_not_deadlock_when_stdout_exceeds_limit() -> TestResult {
+    let temp_dir = TempDir::new()?;
+    let probe = temp_dir.path().join("noisy-probe");
+    write_executable_script(
+        &probe,
+        "#!/bin/sh\ndd if=/dev/zero bs=1024 count=128 2>/dev/null\nsleep 5\n",
+    )?;
+    let processor = FfmpegVideoProcessor::new(&probe, "ffmpeg", Duration::from_secs(5));
+
+    let result = processor.inspect(Path::new("unused-input"));
+
+    assert!(matches!(result, Err(VideoToolError::OutputTooLarge)));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn video_processor_deletes_bad_poster_output() -> TestResult {
+    let temp_dir = TempDir::new()?;
+    let probe = temp_dir.path().join("probe");
+    let ffmpeg = temp_dir.path().join("ffmpeg");
+    let recorded_output = temp_dir.path().join("poster-path");
+    write_executable_script(
+        &probe,
+        r#"#!/bin/sh
+printf '%s' '{"streams":[{"width":64,"height":32}],"format":{"duration":"1.0"}}'
+"#,
+    )?;
+    write_executable_script(
+        &ffmpeg,
+        &format!(
+            r#"#!/bin/sh
+last=
+for arg do
+    last="$arg"
+done
+printf '%s' "$last" > '{}'
+: > "$last"
+"#,
+            recorded_output.display()
+        ),
+    )?;
+    let input = temp_dir.path().join("input.mp4");
+    let processor = FfmpegVideoProcessor::new(&probe, &ffmpeg, Duration::from_secs(1));
+
+    let result = processor.generate_poster(&input, 512);
+
+    assert!(
+        matches!(result, Err(VideoToolError::PosterSizeOutOfRange)),
+        "expected poster size error, got {result:?}"
+    );
+    let poster_path = std::fs::read_to_string(recorded_output)?;
+    assert!(!Path::new(&poster_path).exists());
     Ok(())
 }
 

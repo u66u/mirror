@@ -38,6 +38,10 @@ uuid = { version = "1.12.0", features = ["serde", "v7"] }
 pgvector = { version = "0.4.2", features = ["sqlx"] }
 thiserror = "2.0.18"
 url = "2.5.7"
+tokio-tar = { version = "0.3.1", default-features = false }
+tokio-util = { version = "0.7.18", features = ["io"] }
+wait-timeout = "0.2.1"
+futures-channel = { version = "0.3.32", features = ["sink"] }
 
 [lints]
 workspace = true

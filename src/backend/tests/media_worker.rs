@@ -259,6 +259,7 @@ async fn metadata_and_derivative_handlers_persist_expected_rows() -> TestResult 
     for (_, _, _, _, key) in derivatives {
         assert!(deps.storage.exists(&StorageKey::new(key)?).await?);
     }
+    assert_eq!(asset_status(&deps.pool, asset_id).await?, "ready");
 
     Ok(())
 }
@@ -329,6 +330,7 @@ async fn video_handlers_stream_original_and_persist_posters() -> TestResult {
         assert_eq!((derivative_width, derivative_height), (64, 32));
         assert!(deps.storage.exists(&StorageKey::new(storage_key)?).await?);
     }
+    assert_eq!(asset_status(&deps.pool, asset_id).await?, "ready");
     Ok(())
 }
 
@@ -368,6 +370,14 @@ async fn promoted_asset(deps: &StorageTestDeps, filename: &str) -> TestResult<Uu
     .fetch_one(&deps.pool)
     .await?;
     Ok(internal_asset_id)
+}
+
+async fn asset_status(pool: &sqlx::PgPool, asset_id: Uuid) -> TestResult<String> {
+    Ok(
+        sqlx::query_scalar!("SELECT status FROM assets WHERE id = $1", asset_id)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 fn png_fixture() -> TestResult<Vec<u8>> {

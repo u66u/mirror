@@ -287,6 +287,16 @@ async fn fail_leased_job(
             .await
             .map_err(WorkerError::Ml)?;
     }
+    if outcome.dead
+        && matches!(
+            outcome.kind,
+            JobKind::ExtractMetadata | JobKind::GenerateDerivatives
+        )
+    {
+        media::record_media_asset_dead_letter_payload(pool, &outcome.payload)
+            .await
+            .map_err(WorkerError::Media)?;
+    }
 
     Ok(())
 }

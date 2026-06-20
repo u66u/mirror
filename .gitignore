@@ -12,4 +12,6 @@ local.properties
 .sqlx
 .venv*
 .codex
+.agents
+skills-lock.json
 .notes

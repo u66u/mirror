@@ -211,6 +211,7 @@ pub async fn run_integrity_job(
     match scan_durable_objects(pool, storage).await {
         Ok(report) => {
             mark_scan_succeeded(pool, run_id, &report).await?;
+            mark_corrupt_original_assets(pool, &report).await?;
             Ok(())
         }
         Err(error) => {
@@ -455,6 +456,43 @@ async fn mark_scan_failed(
         "#,
         run_id,
         message
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_corrupt_original_assets(
+    pool: &PgPool,
+    report: &ObjectIntegrityReport,
+) -> Result<(), IntegrityError> {
+    let missing_storage_keys = report
+        .missing_originals
+        .iter()
+        .map(|original| original.storage_key.clone())
+        .collect::<Vec<_>>();
+    let corrupt_original_ids = report
+        .corrupt_originals
+        .iter()
+        .map(|original| original.row_id)
+        .collect::<Vec<_>>();
+    if missing_storage_keys.is_empty() && corrupt_original_ids.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query!(
+        r#"
+        UPDATE assets
+        SET status = 'corrupt'
+        WHERE original_id IN (
+            SELECT id
+            FROM originals
+            WHERE storage_key = ANY($1)
+               OR id = ANY($2)
+        )
+        "#,
+        &missing_storage_keys,
+        &corrupt_original_ids
     )
     .execute(pool)
     .await?;
