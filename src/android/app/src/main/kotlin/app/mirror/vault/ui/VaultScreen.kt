@@ -86,7 +86,8 @@ fun VaultScreen(
     var confirmDisconnect by remember { mutableStateOf(false) }
     LazyColumn(
         state = listState,
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = top + 18.dp, bottom = 140.dp),
+        contentPadding =
+            PaddingValues(start = 16.dp, end = 16.dp, top = top + 18.dp, bottom = LocalBottomInset.current),
         verticalArrangement = Arrangement.spacedBy(14.dp),
         modifier = Modifier.fillMaxSize(),
     ) {

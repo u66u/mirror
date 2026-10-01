@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check check-sqlx clippy test check-duplicate-fns db-up db-down test-db test-ml test-db-all backup-restore-drill gate-backend web-typecheck web-lint web-test web-e2e web-build gate-web android-format android-static android-test android-lint android-build android-device-test gate-android gate
+.PHONY: fmt fmt-check check check-sqlx clippy test check-duplicate-fns db-up db-down test-db test-ml test-db-all backup-restore-drill gate-backend web-typecheck web-lint web-test web-e2e web-build gate-web android-format android-static android-test android-lint android-build android-device-test android-emulator android-emulator-stop android-seed gate-android gate
 
 ANDROID_JAVA_HOME ?= /usr/lib/jvm/java-17-openjdk
 ANDROID_SDK_ROOT ?= $(HOME)/Android/Sdk
@@ -83,6 +83,15 @@ android-lint:
 
 android-build:
 	$(ANDROID_GRADLE) assembleDebug assembleDebugAndroidTest
+
+android-emulator:
+	scripts/android-emulator.sh start
+
+android-emulator-stop:
+	scripts/android-emulator.sh stop
+
+android-seed:
+	scripts/android-seed-media.sh
 
 android-device-test:
 	$(ANDROID_GRADLE) connectedDebugAndroidTest

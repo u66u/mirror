@@ -89,14 +89,9 @@ fun LibraryScreen(
 ) {
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val scrolled by remember { derivedStateOf { gridState.firstVisibleItemIndex > 0 } }
-    val currentMonth by remember(entries) {
-        derivedStateOf {
-            val index = (gridState.firstVisibleItemIndex - 1).coerceIn(0, (entries.size - 1).coerceAtLeast(0))
-            entries
-                .getOrNull(index)
-                ?.let { entry -> (entry as? GridEntry.Tile)?.item?.localDate() }
-                ?.let(::monthLabel)
-        }
+    val currentSection by remember(entries) {
+        // The grid has one header item before the entries, hence the -1.
+        derivedStateOf { sectionTitleAt(entries, gridState.firstVisibleItemIndex - 1) }
     }
 
     LaunchedEffect(gridState, entries.size, timeline.nextCursor) {
@@ -140,7 +135,7 @@ fun LibraryScreen(
                     callbacks = callbacks.grid,
                     selection = selection,
                     heroBounds = heroBounds,
-                    contentPadding = PaddingValues(top = top, bottom = 132.dp),
+                    contentPadding = PaddingValues(top = top, bottom = LocalBottomInset.current),
                     header = {
                         item(key = "header", span = { GridItemSpan(maxLineSpan) }) {
                             LibraryHeader(timeline, visible.size, backup, filter, callbacks, showFilters = true)
@@ -182,7 +177,7 @@ fun LibraryScreen(
             enter = fadeIn() + slideInVertically { -it / 2 },
             exit = fadeOut() + slideOutVertically { -it / 2 },
         ) {
-            CompactBar(title = currentMonth ?: "Library", backup = backup, onOpenVault = callbacks.onOpenVault)
+            CompactBar(title = currentSection ?: "Library", backup = backup, onOpenVault = callbacks.onOpenVault)
         }
         AnimatedVisibility(
             visible = selection.isNotEmpty(),
@@ -248,7 +243,8 @@ fun BackupBadge(
             counts.failed > 0 -> "${counts.failed} need attention"
             remaining > 0 -> "$remaining to go"
             total > 0 -> "Backed up"
-            else -> "Backup off"
+            // Not a status claim: the vault may be full while this device just isn't uploading yet.
+            else -> "Set up backup"
         }
     Row(
         Modifier
@@ -280,7 +276,7 @@ private fun CompactBar(
     Row(
         Modifier
             .fillMaxWidth()
-            .background(colors.canvas.copy(alpha = 0.94f))
+            .background(colors.canvas)
             .statusBarsPadding()
             .padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,

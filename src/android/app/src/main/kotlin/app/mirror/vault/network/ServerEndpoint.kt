@@ -53,6 +53,9 @@ class ServerEndpoint private constructor(
                 uri.fragment == null &&
                 (uri.path.isEmpty() || uri.path == "/")
 
+        /** True for loopback, link-local and private-range IP literals (and `localhost`). */
+        fun isPrivateHost(host: String): Boolean = isPrivateAddressLiteral(host)
+
         private fun isPrivateAddressLiteral(host: String): Boolean {
             val value = host.lowercase().removePrefix("[").removeSuffix("]")
             return value == LOCALHOST ||

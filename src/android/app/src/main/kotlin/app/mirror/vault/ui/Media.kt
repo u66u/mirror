@@ -1,18 +1,35 @@
 package app.mirror.vault.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import app.mirror.vault.network.AssetTimelineItem
 import app.mirror.vault.network.FaceItem
+import app.mirror.vault.ui.design.Glyph
+import app.mirror.vault.ui.design.Glyphs
+import app.mirror.vault.ui.design.Mirror
+import app.mirror.vault.ui.design.Txt
 import coil3.compose.AsyncImage
+import coil3.compose.AsyncImagePainter
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
@@ -36,12 +53,14 @@ fun RemoteImage(
     contentDescription: String? = null,
     crossfadeMillis: Int = 220,
     background: Color = Color.Transparent,
+    fallbackLabel: String? = null,
 ) {
     val header = LocalAuthHeader.current
     if (url == null || header == null) {
         Box(modifier.background(background))
         return
     }
+    var failed by remember(url) { mutableStateOf(false) }
     val context = LocalContext.current
     val request =
         remember(url, header) {
@@ -58,7 +77,28 @@ fun RemoteImage(
             model = request,
             contentDescription = contentDescription,
             contentScale = contentScale,
+            onState = { failed = it is AsyncImagePainter.State.Error },
             modifier = Modifier.fillMaxSize(),
+        )
+        // A blank tile says nothing; name the file so the user knows what they're looking at.
+        if (failed && fallbackLabel != null) FailedImage(fallbackLabel)
+    }
+}
+
+@Composable
+private fun FailedImage(label: String) {
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Glyph(Glyphs.Photos, tint = Mirror.colors.inkFaint, size = 20.dp)
+        Spacer(Modifier.height(4.dp))
+        Txt(
+            label,
+            style = Mirror.type.caption.copy(textAlign = TextAlign.Center),
+            color = Mirror.colors.inkMuted,
+            maxLines = 2,
         )
     }
 }
@@ -140,51 +180,11 @@ fun humanBytes(bytes: Long): String {
 
 private const val KILO = 1024.0
 
-/** Timeline rows: a month banner, a day caption, or a run of tiles. */
-sealed interface GridEntry {
-    val key: String
+/**
+ * Space scrolling content must leave at the bottom so its last row clears the
+ * floating tab bar. Measured at runtime (pill + gesture/3-button inset + font
+ * scale), with a sensible default until the first measurement arrives.
+ */
+val LocalBottomInset = compositionLocalOf { DEFAULT_BOTTOM_INSET }
 
-    data class Month(
-        val label: String,
-    ) : GridEntry {
-        override val key: String get() = "month:$label"
-    }
-
-    data class Day(
-        val label: String,
-        val count: Int,
-        val dateKey: String,
-    ) : GridEntry {
-        override val key: String get() = "day:$dateKey"
-    }
-
-    data class Tile(
-        val item: AssetTimelineItem,
-        val index: Int,
-    ) : GridEntry {
-        override val key: String get() = item.assetId
-    }
-}
-
-fun buildGridEntries(items: List<AssetTimelineItem>): List<GridEntry> {
-    val entries = ArrayList<GridEntry>(items.size + items.size / 4)
-    val today = LocalDate.now()
-    var lastMonth: String? = null
-    var index = 0
-    items
-        .groupBy { it.localDate() }
-        .forEach { (date, group) ->
-            if (date != null) {
-                val month = monthLabel(date)
-                if (month != lastMonth && date.year * 12 + date.monthValue < today.year * 12 + today.monthValue) {
-                    entries += GridEntry.Month(month)
-                }
-                lastMonth = month
-                entries += GridEntry.Day(dayLabel(date, today), group.size, date.toString())
-            } else {
-                entries += GridEntry.Day("Undated", group.size, "undated")
-            }
-            group.forEach { entries += GridEntry.Tile(it, index++) }
-        }
-    return entries
-}
+private val DEFAULT_BOTTOM_INSET = 132.dp

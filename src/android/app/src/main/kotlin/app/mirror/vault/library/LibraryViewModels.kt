@@ -300,7 +300,7 @@ class TrashViewModel(
         mutableState.value = TrashUiState()
     }
 
-    fun thumbnailUrl(assetId: String): String? = credential?.let { library.thumbnailUrl(it, assetId) }
+    fun thumbnailUrl(assetId: String): String? = credential?.let { library.trashedThumbnailUrl(it, assetId) }
 
     fun refresh() {
         val credential = credential ?: return

@@ -64,7 +64,7 @@ class AppPreferences(
 
     fun setHidePreviews(value: Boolean) = write(KEY_HIDE_PREVIEWS, value) { copy(hidePreviews = value) }
 
-    fun setBackupOnlyWhileCharging(value: Boolean) = write(KEY_CHARGING_ONLY, value) { copy(backupOnlyWhileCharging = value) }
+    fun setChargingOnly(value: Boolean) = write(KEY_CHARGING_ONLY, value) { copy(backupOnlyWhileCharging = value) }
 
     fun setBackupVideos(value: Boolean) = write(KEY_BACKUP_VIDEOS, value) { copy(backupVideos = value) }
 

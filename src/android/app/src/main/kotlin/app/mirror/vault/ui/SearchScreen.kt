@@ -80,7 +80,7 @@ fun SearchScreen(
         state = gridState,
         callbacks = callbacks.grid,
         heroBounds = heroBounds,
-        contentPadding = PaddingValues(top = top, bottom = 132.dp),
+        contentPadding = PaddingValues(top = top, bottom = LocalBottomInset.current),
         header = {
             item(key = "search-header", span = { GridItemSpan(maxLineSpan) }) {
                 SearchHeader(state, callbacks)

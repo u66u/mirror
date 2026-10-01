@@ -99,6 +99,12 @@ class LibraryRepository(
         assetId: String,
     ): String = "${baseUrl(credential)}/assets/$assetId/derivatives/thumbnail"
 
+    /** Trashed assets are only reachable through the trash route. */
+    fun trashedThumbnailUrl(
+        credential: DeviceCredential,
+        assetId: String,
+    ): String = "${baseUrl(credential)}/trash/assets/$assetId/derivatives/thumbnail"
+
     private fun baseUrl(credential: DeviceCredential): String =
         ServerEndpoint
             .parse(

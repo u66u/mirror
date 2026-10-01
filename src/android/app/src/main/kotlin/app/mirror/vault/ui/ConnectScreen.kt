@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -33,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -47,8 +49,11 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import app.mirror.vault.network.ServerCheck
+import app.mirror.vault.network.checkServer
 import app.mirror.vault.ui.design.Field
 import app.mirror.vault.ui.design.Glyph
 import app.mirror.vault.ui.design.Glyphs
@@ -77,13 +82,29 @@ fun ConnectScreen(
     var allowLan by rememberSaveable { mutableStateOf(false) }
     var advanced by rememberSaveable { mutableStateOf(false) }
     var reveal by rememberSaveable { mutableStateOf(false) }
-    val normalized = normalizeServer(server)
-    val insecure = normalized.startsWith("http://")
-    val canConnect = server.isNotBlank() && password.isNotEmpty() && (!insecure || allowLan)
+    var addressTouched by rememberSaveable { mutableStateOf(false) }
+    var attempted by rememberSaveable { mutableStateOf(false) }
+    val check = remember(server, allowLan) { checkServer(server, allowLan) }
+    val local = check is ServerCheck.NeedsLocalConsent || (check is ServerCheck.Ok && check.local)
+    val blocker =
+        when {
+            check is ServerCheck.Empty -> "Enter your vault's address."
+            check is ServerCheck.Invalid -> check.message
+            check is ServerCheck.NeedsLocalConsent -> "Switch on the local connection above to continue."
+            password.isEmpty() -> "Enter your owner password."
+            deviceName.isBlank() -> "Give this device a name."
+            else -> null
+        }
+    val canConnect = blocker == null
+    // The address field already shows its own error; don't repeat it above the button.
+    val fieldShowsError = check is ServerCheck.Invalid && (addressTouched || attempted)
+    val showBlocker = blocker != null && check !is ServerCheck.Empty && !fieldShowsError
     val submit = {
-        if (canConnect) {
+        if (check is ServerCheck.Ok && canConnect) {
             focus.clearFocus()
-            onConnect(normalized, allowLan, password, deviceName)
+            onConnect(check.url, allowLan, password, deviceName.trim())
+        } else {
+            attempted = true
         }
     }
 
@@ -114,11 +135,24 @@ fun ConnectScreen(
                 label = "Vault address",
                 placeholder = "photos.example.com",
                 enabled = !loading,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
-                hint = if (server.isNotBlank() && normalized != server) normalized else null,
+                keyboardOptions =
+                    KeyboardOptions(
+                        keyboardType = KeyboardType.Uri,
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        imeAction = ImeAction.Next,
+                    ),
+                onBlur = { if (server.isNotBlank()) addressTouched = true },
+                error = (check as? ServerCheck.Invalid)?.message?.takeIf { addressTouched || attempted },
+                hint =
+                    when (check) {
+                        is ServerCheck.Ok -> check.url.takeIf { it != server }
+                        is ServerCheck.NeedsLocalConsent -> check.url.takeIf { it != server }
+                        else -> null
+                    },
             )
             AnimatedVisibility(
-                visible = insecure,
+                visible = local,
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically(),
             ) {
@@ -134,9 +168,14 @@ fun ConnectScreen(
                     Glyph(Glyphs.Wifi, tint = colors.accent, size = 20.dp)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Txt("Unencrypted local connection", style = Mirror.type.label)
+                        Txt("Connect without encryption", style = Mirror.type.label)
                         Txt(
-                            "Only allowed for private network addresses. Use HTTPS outside your home.",
+                            if (allowLan) {
+                                "Allowed for this private network address. Use https:// away from home."
+                            } else {
+                                "This address is on your private network. " +
+                                    "Switch on to allow a plain, unencrypted connection."
+                            },
                             style = Mirror.type.caption,
                             color = colors.inkMuted,
                         )
@@ -153,7 +192,13 @@ fun ConnectScreen(
                 placeholder = "Your vault password",
                 password = !reveal,
                 enabled = !loading,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Go),
+                keyboardOptions =
+                    KeyboardOptions(
+                        // Revealed text must stop being a password field for assistive tech and the IME too.
+                        keyboardType = if (reveal) KeyboardType.Text else KeyboardType.Password,
+                        autoCorrectEnabled = false,
+                        imeAction = ImeAction.Go,
+                    ),
                 keyboardActions = KeyboardActions(onGo = { submit() }),
                 trailing = {
                     Txt(
@@ -181,7 +226,9 @@ fun ConnectScreen(
                 Field(
                     value = deviceName,
                     onValueChange = { deviceName = it },
-                    label = "Shown in your vault's device list",
+                    label = "Device name",
+                    hint = "Shown in your vault's list of devices.",
+                    error = "Give this device a name.".takeIf { deviceName.isBlank() },
                     enabled = !loading,
                     modifier = Modifier.padding(top = 8.dp),
                 )
@@ -205,12 +252,19 @@ fun ConnectScreen(
                     Txt(friendlyError(error.orEmpty()), style = Mirror.type.label, color = colors.ink)
                 }
             }
+            // Say why Connect is unavailable instead of leaving a silent gray button.
+            Txt(
+                text = if (!loading && showBlocker) blocker.orEmpty() else " ",
+                style = Mirror.type.caption,
+                color = colors.inkMuted,
+                modifier = Modifier.padding(top = 24.dp).heightIn(min = 18.dp),
+            )
             MirrorButton(
                 "Connect",
                 submit,
                 enabled = canConnect,
                 loading = loading,
-                modifier = Modifier.fillMaxWidth().padding(top = 28.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             )
             Spacer(Modifier.height(12.dp))
             Txt(
@@ -223,20 +277,6 @@ fun ConnectScreen(
     }
 }
 
-/** Accepts bare hosts: private IP literals default to http, everything else to https. */
-fun normalizeServer(raw: String): String {
-    val value = raw.trim().trimEnd('/')
-    if (value.isEmpty() || value.contains("://")) return value
-    val host = value.substringBefore(':').substringBefore('/')
-    val local =
-        host == "localhost" ||
-            host.matches(Regex("""^(10|127)\.\d+\.\d+\.\d+$""")) ||
-            host.matches(Regex("""^192\.168\.\d+\.\d+$""")) ||
-            host.matches(Regex("""^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$""")) ||
-            host.matches(Regex("""^169\.254\.\d+\.\d+$"""))
-    return (if (local) "http://" else "https://") + value
-}
-
 fun friendlyError(raw: String): String {
     val message = raw.lowercase()
     return when {
@@ -244,7 +284,9 @@ fun friendlyError(raw: String): String {
             "Check that your server is running and that this device can reach it."
         "password" in message || "credential" in message || "unauthorized" in message ->
             "That password didn't work."
-        "private-lan" in message -> "Allow the local connection to continue."
+        "private-lan" in message -> "Switch on the local connection to continue."
+        "must be an origin" in message -> "Use just the address, with no path — like photos.example.com."
+        "http requires" in message -> "Plain http:// only works on a private network. Use https:// instead."
         "too many" in message || "rate" in message -> "Too many attempts. Wait a minute and try again."
         else -> raw.replaceFirstChar(Char::uppercase)
     }

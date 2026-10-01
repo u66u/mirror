@@ -39,6 +39,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -62,6 +63,7 @@ private const val POSITION_POLL_MILLIS = 200L
  * device token and use HTTP range reads, so seeking never downloads the file.
  */
 @Stable
+@androidx.annotation.OptIn(UnstableApi::class) // media3 data-source factories are still marked unstable.
 class VideoSession(
     context: Context,
     authorization: String?,

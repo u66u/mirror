@@ -78,7 +78,7 @@ fun TrashScreen(
                             if (item.assetId in selection) selection - item.assetId else selection + item.assetId
                     },
                 ),
-            contentPadding = PaddingValues(bottom = 140.dp),
+            contentPadding = PaddingValues(bottom = LocalBottomInset.current + 8.dp),
             header = {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     Column(Modifier.statusBarsPadding().padding(14.dp)) {

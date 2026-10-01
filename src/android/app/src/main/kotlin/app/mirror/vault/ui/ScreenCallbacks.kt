@@ -2,6 +2,8 @@ package app.mirror.vault.ui
 
 import app.mirror.vault.network.AssetTimelineItem
 import app.mirror.vault.network.SearchMode
+import app.mirror.vault.settings.ShareExpiry
+import app.mirror.vault.settings.ThemeMode
 
 data class SearchCallbacks(
     val onQuery: (String) -> Unit,
@@ -29,4 +31,11 @@ data class PeopleCallbacks(
     val onHide: (String) -> Unit,
     val onOpenAsset: (List<AssetTimelineItem>, AssetTimelineItem) -> Unit,
     val onRefresh: () -> Unit,
+)
+
+data class SettingsCallbacks(
+    val onTheme: (ThemeMode) -> Unit,
+    val onShareExpiry: (ShareExpiry) -> Unit,
+    val onHidePreviews: (Boolean) -> Unit,
+    val onClose: () -> Unit,
 )

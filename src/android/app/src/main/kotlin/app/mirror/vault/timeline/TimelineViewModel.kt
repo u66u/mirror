@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import app.mirror.vault.auth.DeviceCredential
 import app.mirror.vault.library.LibraryRepository
 import app.mirror.vault.network.AssetTimelineItem
+import app.mirror.vault.network.AssetTimelinePage
 import app.mirror.vault.network.MirrorTransportException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +32,7 @@ data class TimelineUiState(
     val offline: Boolean = false,
 )
 
+@Suppress("TooManyFunctions") // Paging, optimistic mutations and offline recovery share one list state.
 class TimelineViewModel(
     private val repository: TimelineRepository,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -103,45 +105,24 @@ class TimelineViewModel(
      */
     fun refreshQuietly() {
         val current = mutableState.value
-        val credential = current.credential ?: return
-        if (current.loadingInitial) return
-        if (current.items.isEmpty()) {
+        val credential = current.credential
+        when {
+            credential == null || current.loadingInitial -> Unit
             // Nothing to merge into (first load failed, or the vault was empty): do a full load.
-            refresh()
-            return
-        }
-        viewModelScope.launch {
-            runCatching {
-                withContext(ioDispatcher) { repository.loadPage(credential = credential, cursor = null) }
-            }.onSuccess { page ->
-                mutableState.update { state ->
-                    if (state.credential != credential) {
-                        state
-                    } else {
-                        val latest = page.items.associateBy { it.assetId }
-                        val known = state.items.mapTo(HashSet()) { it.assetId }
-                        // Remembered items may be gone server-side, so the first fresh page replaces them.
-                        val replaceAll = state.stale || state.items.isEmpty()
-                        state.copy(
-                            items =
-                                if (replaceAll) {
-                                    page.items
-                                } else {
-                                    page.items.filter { it.assetId !in known } + state.items.map { latest[it.assetId] ?: it }
-                                },
-                            nextCursor = if (replaceAll) page.nextCursor else state.nextCursor,
-                            stale = false,
-                            offline = false,
-                            error = null,
-                        )
+            current.items.isEmpty() -> refresh()
+            else ->
+                viewModelScope.launch {
+                    runCatching {
+                        withContext(ioDispatcher) { repository.loadPage(credential = credential, cursor = null) }
+                    }.onSuccess { page ->
+                        mutableState.update { state ->
+                            if (state.credential == credential) state.withNewestPage(page) else state
+                        }
+                        persist(credential)
+                    }.onFailure { error ->
+                        if (error is MirrorTransportException) markOffline(credential)
                     }
                 }
-                persist(credential)
-            }.onFailure { error ->
-                if (error is MirrorTransportException) {
-                    mutableState.update { state -> if (state.credential == credential) state.copy(offline = true) else state }
-                }
-            }
         }
     }
 
@@ -149,6 +130,10 @@ class TimelineViewModel(
         val store = store ?: return
         val items = mutableState.value.items
         viewModelScope.launch(ioDispatcher) { store.write(credential.serverUrl, items) }
+    }
+
+    private fun markOffline(credential: DeviceCredential) {
+        mutableState.update { state -> if (state.credential == credential) state.copy(offline = true) else state }
     }
 
     fun loadNext() {
@@ -387,4 +372,28 @@ class TimelineViewModelFactory(
         require(modelClass.isAssignableFrom(TimelineViewModel::class.java))
         return TimelineViewModel(repository, library = library, store = store) as T
     }
+}
+
+/**
+ * Folds a freshly fetched first page into the list. New items go on top and known
+ * ones are refreshed in place; if the list was only the remembered cache (or empty)
+ * the page replaces it, because remembered items may no longer exist on the server.
+ */
+internal fun TimelineUiState.withNewestPage(page: AssetTimelinePage): TimelineUiState {
+    val replaceAll = stale || items.isEmpty()
+    val merged =
+        if (replaceAll) {
+            page.items
+        } else {
+            val latest = page.items.associateBy { it.assetId }
+            val known = items.mapTo(HashSet()) { it.assetId }
+            page.items.filter { it.assetId !in known } + items.map { latest[it.assetId] ?: it }
+        }
+    return copy(
+        items = merged,
+        nextCursor = if (replaceAll) page.nextCursor else nextCursor,
+        stale = false,
+        offline = false,
+        error = null,
+    )
 }

@@ -50,13 +50,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-data class SettingsCallbacks(
-    val onTheme: (ThemeMode) -> Unit,
-    val onShareExpiry: (ShareExpiry) -> Unit,
-    val onHidePreviews: (Boolean) -> Unit,
-    val onClose: () -> Unit,
-)
-
 /**
  * Per-device preferences only. Anything that changes the vault for every
  * device or user (accounts, models, retention) stays in the web admin, which
@@ -195,7 +188,12 @@ fun SettingsScreen(
                             "Backups, exports and trash retention",
                         ).forEach { line ->
                             Row(Modifier.padding(vertical = 3.dp), verticalAlignment = Alignment.Top) {
-                                Glyph(Glyphs.Check, tint = colors.accent, size = 16.dp, modifier = Modifier.padding(top = 3.dp))
+                                Glyph(
+                                    Glyphs.Check,
+                                    tint = colors.accent,
+                                    size = 16.dp,
+                                    modifier = Modifier.padding(top = 3.dp),
+                                )
                                 Spacer(Modifier.width(10.dp))
                                 Txt(line, style = Mirror.type.body)
                             }

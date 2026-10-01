@@ -212,7 +212,12 @@ fun PhotoTile(
             if (item.localUri != null) {
                 LocalThumbnail(item.localUri, Modifier.fillMaxSize())
             } else {
-                RemoteImage(url, Modifier.fillMaxSize(), contentDescription = item.originalFilename)
+                RemoteImage(
+                    url,
+                    Modifier.fillMaxSize(),
+                    contentDescription = item.originalFilename,
+                    fallbackLabel = item.originalFilename ?: item.mediaType,
+                )
             }
             if (item.backupState != BackupState.IN_VAULT) {
                 BackupStateBadge(item.backupState, Modifier.align(Alignment.TopStart).padding(6.dp))

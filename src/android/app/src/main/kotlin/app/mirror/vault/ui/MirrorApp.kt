@@ -43,6 +43,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -57,11 +58,13 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -180,7 +183,7 @@ private fun Splash() {
     }
 }
 
-private const val WIDE_SCREEN_DP = 600
+private val WIDE_SCREEN = 600.dp
 
 /**
  * Only library-backed sessions survive rotation or process death; a frozen
@@ -199,11 +202,33 @@ private data class ViewerSession(
     val snapshot: List<AssetTimelineItem> = emptyList(),
 )
 
+/** Measures the floating tab bar and tells every scrolling screen how much bottom room it needs. */
 @Composable
-@Suppress("LongMethod", "CyclomaticComplexMethod") // The shell is the app's single wiring point.
 private fun MainShell(
     models: MirrorViewModels,
     serverUrl: String,
+) {
+    var chromeHeightPx by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
+    val inset =
+        if (chromeHeightPx == 0) {
+            LocalBottomInset.current
+        } else {
+            with(density) { chromeHeightPx.toDp() } + CHROME_BREATHING_ROOM
+        }
+    CompositionLocalProvider(LocalBottomInset provides inset) {
+        MainShellContent(models, serverUrl, onChromeMeasured = { chromeHeightPx = it })
+    }
+}
+
+private val CHROME_BREATHING_ROOM = 20.dp
+
+@Composable
+@Suppress("LongMethod", "CyclomaticComplexMethod") // The shell is the app's single wiring point.
+private fun MainShellContent(
+    models: MirrorViewModels,
+    serverUrl: String,
+    onChromeMeasured: (Int) -> Unit,
 ) {
     val timeline by models.timeline.state.collectAsStateWithLifecycle()
     val backup by models.backup.state.collectAsStateWithLifecycle()
@@ -226,7 +251,11 @@ private fun MainShell(
     }
     var selection by remember { mutableStateOf(emptySet<String>()) }
     var viewer by rememberSaveable(stateSaver = ViewerSessionSaver) { mutableStateOf<ViewerSession?>(null) }
-    val wide = LocalConfiguration.current.screenWidthDp >= WIDE_SCREEN_DP
+    val wide =
+        with(LocalDensity.current) {
+            LocalWindowInfo.current.containerSize.width
+                .toDp()
+        } >= WIDE_SCREEN
     val gridColumns = if (wide) columns * 2 else columns
     var showTrash by rememberSaveable { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -304,7 +333,8 @@ private fun MainShell(
                             type = "text/plain"
                             putExtra(Intent.EXTRA_TEXT, url)
                         }
-                    context.startActivity(Intent.createChooser(send, if (isVideo) "Share video preview" else "Share photo link"))
+                    val title = if (isVideo) "Share video preview" else "Share photo link"
+                    context.startActivity(Intent.createChooser(send, title))
                     toaster.show(
                         if (isVideo) {
                             "Shares a still preview · expires in ${settings.shareExpiry.label}"
@@ -459,7 +489,7 @@ private fun MainShell(
                                             },
                                         ),
                                     onChargingOnly = {
-                                        models.preferences.setBackupOnlyWhileCharging(it)
+                                        models.preferences.setChargingOnly(it)
                                         models.backup.preferencesChanged()
                                     },
                                     onBackupVideos = {
@@ -494,6 +524,7 @@ private fun MainShell(
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             NavPill(
+                modifier = Modifier.onSizeChanged { onChromeMeasured(it.height) },
                 selected = tab,
                 onSelect = { next ->
                     if (next == tab) {
@@ -620,10 +651,11 @@ private fun MainShell(
 private fun NavPill(
     selected: Tab,
     onSelect: (Tab) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val colors = Mirror.colors
     Row(
-        Modifier
+        modifier
             .navigationBarsPadding()
             .padding(bottom = 14.dp)
             .shadow(

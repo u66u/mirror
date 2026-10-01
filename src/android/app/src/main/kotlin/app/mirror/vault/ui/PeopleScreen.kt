@@ -68,7 +68,7 @@ fun PeopleScreen(
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
         state = gridState,
-        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = top, bottom = 132.dp),
+        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = top, bottom = LocalBottomInset.current),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(22.dp),
         modifier = Modifier.fillMaxSize(),

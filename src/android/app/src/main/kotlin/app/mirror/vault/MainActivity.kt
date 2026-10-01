@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
         LoginViewModelFactory(
             repository = app.authRepository,
             backupRepository = app.backupRepository,
-            defaultDeviceName = Build.MODEL.ifBlank { "Android device" },
+            defaultDeviceName = friendlyDeviceName(),
             onSignedOut = { app.timelineCache.clear() },
         )
     }
@@ -54,6 +54,16 @@ class MainActivity : ComponentActivity() {
     }
     private val trashViewModel: TrashViewModel by viewModels {
         viewModelFactory { initializer { TrashViewModel(app.libraryRepository) } }
+    }
+
+    /** "Pixel 8" rather than "google Pixel 8", and not the emulator's raw build string. */
+    private fun friendlyDeviceName(): String {
+        val model = Build.MODEL.orEmpty().trim()
+        return when {
+            model.isEmpty() -> "Android device"
+            model.startsWith("sdk_") || Build.FINGERPRINT.contains("generic") -> "Android emulator"
+            else -> model
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

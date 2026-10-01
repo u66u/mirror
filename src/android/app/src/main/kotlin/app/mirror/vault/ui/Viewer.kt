@@ -381,7 +381,12 @@ fun Viewer(
                         LocalImage(item.localUri, Modifier.fillMaxSize(), scale, item.originalFilename)
                     } else {
                         RemoteImage(actions.thumbUrl(item.assetId), Modifier.fillMaxSize(), scale, crossfadeMillis = 0)
-                        RemoteImage(actions.previewUrl(item.assetId), Modifier.fillMaxSize(), scale, item.originalFilename)
+                        RemoteImage(
+                            actions.previewUrl(item.assetId),
+                            Modifier.fillMaxSize(),
+                            scale,
+                            item.originalFilename,
+                        )
                     }
                     if (item.isVideo && isCurrent) {
                         if (video.assetId == item.assetId) {
@@ -396,7 +401,12 @@ fun Viewer(
                                 )
                             }
                         }
-                        VideoPlayOverlay(video, item.assetId, item.localUri ?: actions.originalUrl(item.assetId), Modifier.fillMaxSize())
+                        VideoPlayOverlay(
+                            video,
+                            item.assetId,
+                            item.localUri ?: actions.originalUrl(item.assetId),
+                            Modifier.fillMaxSize(),
+                        )
                     } else if (item.isVideo) {
                         Box(
                             Modifier

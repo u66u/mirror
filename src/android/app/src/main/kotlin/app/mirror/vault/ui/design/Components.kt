@@ -40,12 +40,15 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -57,6 +60,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -365,10 +369,14 @@ fun Field(
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     keyboardActions: KeyboardActions = KeyboardActions.Default,
     hint: String? = null,
+    error: String? = null,
+    onBlur: () -> Unit = {},
     trailing: @Composable (() -> Unit)? = null,
 ) {
     val colors = Mirror.colors
-    Column(modifier) {
+    var focused by remember { mutableStateOf(false) }
+    // Merged so assistive tech reads "label, edit box, value" as one control.
+    Column(modifier.semantics(mergeDescendants = true) {}) {
         Txt(label.uppercase(), style = Mirror.type.overline, color = colors.inkMuted)
         Spacer(Modifier.height(8.dp))
         Row(
@@ -377,8 +385,11 @@ fun Field(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
                     .background(colors.surface)
-                    .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-                    .padding(horizontal = 16.dp, vertical = 15.dp),
+                    .border(
+                        if (error != null) 1.5.dp else 1.dp,
+                        if (error != null) colors.danger else colors.line,
+                        RoundedCornerShape(16.dp),
+                    ).padding(horizontal = 16.dp, vertical = 15.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.weight(1f)) {
@@ -396,14 +407,19 @@ fun Field(
                         if (password) PasswordVisualTransformation() else VisualTransformation.None,
                     keyboardOptions = keyboardOptions,
                     keyboardActions = keyboardActions,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier =
+                        Modifier.fillMaxWidth().onFocusChanged {
+                            if (focused && !it.isFocused) onBlur()
+                            focused = it.isFocused
+                        },
                 )
             }
             trailing?.invoke()
         }
-        hint?.let {
+        val note = error ?: hint
+        if (note != null) {
             Spacer(Modifier.height(6.dp))
-            Txt(it, style = Mirror.type.caption, color = colors.inkMuted)
+            Txt(note, style = Mirror.type.caption, color = if (error != null) colors.danger else colors.inkMuted)
         }
     }
 }
