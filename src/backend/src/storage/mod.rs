@@ -135,6 +135,32 @@ impl ObjectStorage {
         Ok(stream)
     }
 
+    /// Streams `start..end` (end exclusive) of an object as byte chunks.
+    ///
+    /// Used for HTTP range reads so video players can seek without the server
+    /// reading or sending the whole original.
+    pub async fn read_range_stream(
+        &self,
+        key: &StorageKey,
+        start: u64,
+        end: u64,
+    ) -> Result<impl Stream<Item = Result<Bytes, StorageError>> + Send + 'static, StorageError>
+    {
+        let reader = self
+            .operator
+            .reader(key.as_str())
+            .await
+            .map_err(StorageError::OpenDal)?;
+        let stream = reader
+            .into_stream(start..end)
+            .await
+            .map_err(StorageError::OpenDal)?
+            .map_err(StorageError::OpenDal)
+            .map_ok(|buffer| stream::iter(buffer.into_iter().map(Ok::<_, StorageError>)))
+            .try_flatten();
+        Ok(stream)
+    }
+
     /// Streams an object into a new file while enforcing a byte limit.
     ///
     /// C005: large video originals must not be materialized as one in-memory

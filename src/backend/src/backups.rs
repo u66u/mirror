@@ -23,6 +23,7 @@ use crate::storage::{ObjectStorage, StorageError, StorageKey};
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct DurableStorageBackupManifest {
     /// Manifest generation timestamp.
+    #[serde(with = "time::serde::rfc3339")]
     pub generated_at: OffsetDateTime,
     /// Manifest schema marker.
     pub manifest_version: &'static str,

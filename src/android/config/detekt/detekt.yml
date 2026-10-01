@@ -8,3 +8,24 @@ style:
   # ranges are clearer as local literals or named constants than wrappers.
   MagicNumber:
     active: false
+
+# Compose UI: composables take many defaulted parameters, nest layouts, and
+# branch on state by design. Ordinary functions are still held to the defaults.
+complexity:
+  LongParameterList:
+    ignoreAnnotated:
+      - 'androidx.compose.runtime.Composable'
+    ignoreDefaultParameters: true
+  LongMethod:
+    ignoreAnnotated:
+      - 'androidx.compose.runtime.Composable'
+  CyclomaticComplexMethod:
+    ignoreAnnotated:
+      - 'androidx.compose.runtime.Composable'
+  ComplexCondition:
+    active: false
+  TooManyFunctions:
+    ignoreAnnotated:
+      - 'androidx.compose.runtime.Composable'
+    thresholdInFiles: 16
+    thresholdInClasses: 16

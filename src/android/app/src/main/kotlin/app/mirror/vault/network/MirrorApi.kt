@@ -9,6 +9,7 @@ import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.patch
 import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
@@ -59,7 +60,8 @@ class KtorMirrorApi(
     private val client: HttpClient = createHttpClient(),
 ) : MirrorApi,
     TimelineApi,
-    UploadApi {
+    UploadApi,
+    LibraryApi {
     override suspend fun login(
         endpoint: ServerEndpoint,
         password: String,
@@ -115,16 +117,7 @@ class KtorMirrorApi(
                         cursor?.let { parameters.append("cursor", it) }
                     }
                 }
-            requireSuccess(response)
-            val body = parseObject(response.bodyAsText())
-            AssetTimelinePage(
-                items =
-                    body["items"]
-                        ?.jsonArray
-                        ?.map { it.assetTimelineItem() }
-                        ?: throw invalidResponse(),
-                nextCursor = body.optionalString("next_cursor"),
-            )
+            response.assetPage()
         }
 
     override suspend fun createUpload(
@@ -219,6 +212,206 @@ class KtorMirrorApi(
         }
     }
 
+    override suspend fun setFavorite(
+        credential: DeviceCredential,
+        assetId: String,
+        favorite: Boolean,
+    ) = transport {
+        val url = "${credential.endpoint().baseUrl}/assets/$assetId/favorite"
+        val response =
+            if (favorite) {
+                client.post(url) { bearerAuth(credential.token) }
+            } else {
+                client.delete(url) { bearerAuth(credential.token) }
+            }
+        requireSuccess(response)
+    }
+
+    override suspend fun trash(
+        credential: DeviceCredential,
+        assetId: String,
+    ) = transport {
+        val response =
+            client.delete("${credential.endpoint().baseUrl}/assets/$assetId") {
+                bearerAuth(credential.token)
+            }
+        requireSuccess(response)
+    }
+
+    override suspend fun restore(
+        credential: DeviceCredential,
+        assetId: String,
+    ) = transport {
+        val response =
+            client.post("${credential.endpoint().baseUrl}/assets/$assetId/restore") {
+                bearerAuth(credential.token)
+            }
+        requireSuccess(response)
+    }
+
+    override suspend fun purge(
+        credential: DeviceCredential,
+        assetId: String,
+    ) = transport {
+        val response =
+            client.delete("${credential.endpoint().baseUrl}/assets/$assetId/purge") {
+                bearerAuth(credential.token)
+            }
+        requireSuccess(response)
+    }
+
+    override suspend fun listTrash(
+        credential: DeviceCredential,
+        cursor: String?,
+        limit: Int,
+    ): AssetTimelinePage =
+        transport {
+            val response =
+                client.get("${credential.endpoint().baseUrl}/trash/assets") {
+                    bearerAuth(credential.token)
+                    url {
+                        parameters.append("limit", limit.toString())
+                        cursor?.let { parameters.append("cursor", it) }
+                    }
+                }
+            response.assetPage()
+        }
+
+    override suspend fun search(
+        credential: DeviceCredential,
+        query: String,
+        mode: SearchMode,
+        limit: Int,
+    ): List<AssetTimelineItem> =
+        transport {
+            val response =
+                client.get("${credential.endpoint().baseUrl}/search") {
+                    bearerAuth(credential.token)
+                    url {
+                        parameters.append("q", query)
+                        parameters.append("mode", mode.value)
+                        parameters.append("limit", limit.toString())
+                    }
+                }
+            response.assetPage().items
+        }
+
+    override suspend fun createShare(
+        credential: DeviceCredential,
+        assetId: String,
+        expiresInSeconds: Long?,
+    ): CreatedShare =
+        transport {
+            val response =
+                client.post("${credential.endpoint().baseUrl}/assets/$assetId/shares") {
+                    bearerAuth(credential.token)
+                    header(HttpHeaders.ContentType, ContentType.Application.Json)
+                    setBody(
+                        buildJsonObject {
+                            expiresInSeconds?.let { put("expires_in_seconds", it) }
+                        },
+                    )
+                }
+            requireSuccess(response)
+            val body = parseObject(response.bodyAsText())
+            CreatedShare(
+                shareId = body.requiredString("share_id"),
+                token = body.requiredString("token"),
+                expiresAt = body.requiredString("expires_at"),
+            )
+        }
+
+    override suspend fun listPeople(credential: DeviceCredential): List<PersonSummary> =
+        transport {
+            val response =
+                client.get("${credential.endpoint().baseUrl}/people") {
+                    bearerAuth(credential.token)
+                }
+            requireSuccess(response)
+            parseArray(response.bodyAsText()).map { element ->
+                val body = element.jsonObject
+                PersonSummary(
+                    personId = body.requiredString("person_id"),
+                    displayName = body.optionalString("display_name"),
+                    reviewStatus = body.requiredString("review_status"),
+                    faceCount = body.requiredLong("face_count"),
+                )
+            }
+        }
+
+    override suspend fun personFaces(
+        credential: DeviceCredential,
+        personId: String,
+        limit: Int,
+    ): List<FaceItem> = faces(credential, "people/$personId/faces", limit)
+
+    override suspend fun unassignedFaces(
+        credential: DeviceCredential,
+        limit: Int,
+    ): List<FaceItem> = faces(credential, "people/faces/unassigned", limit)
+
+    override suspend fun renamePerson(
+        credential: DeviceCredential,
+        personId: String,
+        displayName: String,
+    ) = transport {
+        val response =
+            client.patch("${credential.endpoint().baseUrl}/people/$personId") {
+                bearerAuth(credential.token)
+                header(HttpHeaders.ContentType, ContentType.Application.Json)
+                setBody(buildJsonObject { put("display_name", displayName) })
+            }
+        requireSuccess(response)
+    }
+
+    override suspend fun hidePerson(
+        credential: DeviceCredential,
+        personId: String,
+    ) = transport {
+        val response =
+            client.post("${credential.endpoint().baseUrl}/people/$personId/hide") {
+                bearerAuth(credential.token)
+            }
+        requireSuccess(response)
+    }
+
+    private suspend fun faces(
+        credential: DeviceCredential,
+        path: String,
+        limit: Int,
+    ): List<FaceItem> =
+        transport {
+            val response =
+                client.get("${credential.endpoint().baseUrl}/$path") {
+                    bearerAuth(credential.token)
+                    url { parameters.append("limit", limit.toString()) }
+                }
+            requireSuccess(response)
+            parseArray(response.bodyAsText()).map { element ->
+                val body = element.jsonObject
+                FaceItem(
+                    faceId = body.requiredString("face_id"),
+                    assetId = body.requiredString("asset_id"),
+                    assetCreatedAt = body.requiredString("asset_created_at"),
+                    mediaType = body.requiredString("media_type"),
+                    chipAvailable = body["chip_available"]?.jsonPrimitive?.content == "true",
+                )
+            }
+        }
+
+    private suspend fun HttpResponse.assetPage(): AssetTimelinePage {
+        requireSuccess(this)
+        val body = parseObject(bodyAsText())
+        return AssetTimelinePage(
+            items =
+                body["items"]
+                    ?.jsonArray
+                    ?.map { it.assetTimelineItem() }
+                    ?: throw invalidResponse(),
+            nextCursor = body.optionalString("next_cursor"),
+        )
+    }
+
     private suspend fun requireSuccess(response: HttpResponse) {
         if (response.status.isSuccess()) {
             return
@@ -280,6 +473,7 @@ class KtorMirrorApi(
             mediaType = body.requiredString("media_type"),
             sizeBytes = body.requiredLong("size_bytes"),
             originalFilename = body.optionalString("original_filename"),
+            trashedAt = body.optionalString("trashed_at"),
             thumbnail = body["thumbnail"].assetDerivativeOrNull(),
             preview = body["preview"].assetDerivativeOrNull(),
         )
@@ -320,6 +514,15 @@ class KtorMirrorApi(
     private fun parseObject(body: String) =
         try {
             Json.parseToJsonElement(body).jsonObject
+        } catch (_: SerializationException) {
+            throw invalidResponse()
+        } catch (_: IllegalArgumentException) {
+            throw invalidResponse()
+        }
+
+    private fun parseArray(body: String) =
+        try {
+            Json.parseToJsonElement(body).jsonArray
         } catch (_: SerializationException) {
             throw invalidResponse()
         } catch (_: IllegalArgumentException) {

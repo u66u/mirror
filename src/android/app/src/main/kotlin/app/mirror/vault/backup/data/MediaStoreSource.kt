@@ -23,14 +23,18 @@ data class DiscoveredFolder(
 )
 
 /**
- * MediaStore boundary for owner-selected image folders.
+ * MediaStore boundary for owner-selected photo and video folders.
  *
  * C007: partial grants return only visible rows. Callers must surface partial
  * state and must not infer that hidden rows were deleted.
+ *
+ * [includeVideos] is consulted on every scan so the preference applies without
+ * rebuilding the source; videos are only read when that permission is granted.
  */
 @Suppress("TooManyFunctions") // MediaStore query and permission policy share one Android boundary.
 class MediaStoreSource(
     private val context: Context,
+    private val includeVideos: () -> Boolean = { true },
 ) : LocalMediaSource {
     private val resolver = context.contentResolver
 
@@ -51,10 +55,11 @@ class MediaStoreSource(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
                 arrayOf(
                     Manifest.permission.READ_MEDIA_IMAGES,
+                    Manifest.permission.READ_MEDIA_VIDEO,
                     Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
                 )
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
-                arrayOf(Manifest.permission.READ_MEDIA_IMAGES)
+                arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
             else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
 
@@ -83,7 +88,7 @@ class MediaStoreSource(
             .query(parsed, projection(), null, null, null)
             ?.use { cursor ->
                 if (cursor.moveToFirst()) {
-                    cursor.readMediaRow(COLLECTION, parsed)?.toLocalMedia()
+                    cursor.readMediaRow(IMAGE_COLLECTION, parsed)?.toLocalMedia()
                 } else {
                     null
                 }
@@ -94,47 +99,69 @@ class MediaStoreSource(
         resolver.openInputStream(uri.toUri())
             ?: throw FileNotFoundException("media is unavailable")
 
-    private fun queryMedia(bucketId: String?): List<MediaRow> {
+    private fun queryMedia(bucketId: String?): List<MediaRow> =
+        buildList {
+            addAll(queryCollection(IMAGE_COLLECTION, IMAGE_MIME_TYPES, bucketId))
+            if (includeVideos() && canReadVideos()) {
+                addAll(queryCollection(VIDEO_COLLECTION, VIDEO_MIME_TYPES, bucketId))
+            }
+        }
+
+    private fun queryCollection(
+        collection: Uri,
+        mimeTypes: List<String>,
+        bucketId: String?,
+    ): List<MediaRow> {
         val selectionParts =
             mutableListOf(
-                "${MediaStore.Images.Media.MIME_TYPE} IN (?,?,?,?)",
-                "${MediaStore.Images.Media.SIZE} > 0",
-                "${MediaStore.Images.Media.IS_PENDING} = 0",
+                "${MediaStore.MediaColumns.MIME_TYPE} IN (${mimeTypes.joinToString(",") { "?" }})",
+                "${MediaStore.MediaColumns.SIZE} > 0",
+                "${MediaStore.MediaColumns.IS_PENDING} = 0",
             )
-        val arguments = SUPPORTED_MIME_TYPES.toMutableList()
+        val arguments = mimeTypes.toMutableList()
         if (bucketId != null) {
-            selectionParts += "${MediaStore.Images.Media.BUCKET_ID} = ?"
+            selectionParts += "${MediaStore.MediaColumns.BUCKET_ID} = ?"
             arguments += bucketId
         }
 
         return resolver
             .query(
-                COLLECTION,
+                collection,
                 projection(),
                 selectionParts.joinToString(" AND "),
                 arguments.toTypedArray(),
-                "${MediaStore.Images.Media.DATE_MODIFIED} ASC, ${MediaStore.Images.Media._ID} ASC",
+                "${MediaStore.MediaColumns.DATE_MODIFIED} ASC, ${MediaStore.MediaColumns._ID} ASC",
             )?.use { cursor ->
                 buildList {
                     while (cursor.moveToNext()) {
-                        cursor.readMediaRow(COLLECTION, null)?.let(::add)
+                        cursor.readMediaRow(collection, null)?.let(::add)
                     }
                 }
             }.orEmpty()
     }
 
+    /** Videos need their own grant on Android 13+; older releases use one storage permission. */
+    fun videoPermissionGranted(): Boolean = canReadVideos()
+
+    private fun canReadVideos(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            granted(Manifest.permission.READ_MEDIA_VIDEO)
+        } else {
+            granted(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+
     private fun projection(): Array<String> =
         buildList {
-            add(MediaStore.Images.Media._ID)
-            add(MediaStore.Images.Media.DISPLAY_NAME)
-            add(MediaStore.Images.Media.MIME_TYPE)
-            add(MediaStore.Images.Media.SIZE)
-            add(MediaStore.Images.Media.DATE_MODIFIED)
-            add(MediaStore.Images.Media.BUCKET_ID)
-            add(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-            add(MediaStore.Images.Media.RELATIVE_PATH)
+            add(MediaStore.MediaColumns._ID)
+            add(MediaStore.MediaColumns.DISPLAY_NAME)
+            add(MediaStore.MediaColumns.MIME_TYPE)
+            add(MediaStore.MediaColumns.SIZE)
+            add(MediaStore.MediaColumns.DATE_MODIFIED)
+            add(MediaStore.MediaColumns.BUCKET_ID)
+            add(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+            add(MediaStore.MediaColumns.RELATIVE_PATH)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                add(MediaStore.Images.Media.GENERATION_MODIFIED)
+                add(MediaStore.MediaColumns.GENERATION_MODIFIED)
             }
         }.toTypedArray()
 
@@ -143,26 +170,26 @@ class MediaStoreSource(
         baseUri: Uri,
         exactUri: Uri?,
     ): MediaRow? {
-        val id = long(MediaStore.Images.Media._ID) ?: return null
-        val displayName = string(MediaStore.Images.Media.DISPLAY_NAME) ?: return null
-        val mimeType = string(MediaStore.Images.Media.MIME_TYPE) ?: return null
-        val sizeBytes = long(MediaStore.Images.Media.SIZE)?.takeIf { it > 0 } ?: return null
-        val bucketId = string(MediaStore.Images.Media.BUCKET_ID) ?: return null
+        val id = long(MediaStore.MediaColumns._ID) ?: return null
+        val displayName = string(MediaStore.MediaColumns.DISPLAY_NAME) ?: return null
+        val mimeType = string(MediaStore.MediaColumns.MIME_TYPE) ?: return null
+        val sizeBytes = long(MediaStore.MediaColumns.SIZE)?.takeIf { it > 0 } ?: return null
+        val bucketId = string(MediaStore.MediaColumns.BUCKET_ID) ?: return null
         return MediaRow(
             uri = (exactUri ?: ContentUris.withAppendedId(baseUri, id)).toString(),
             bucketId = bucketId,
             folderName =
-                string(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+                string(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
                     ?.takeIf(String::isNotBlank)
                     ?: "Unknown",
-            relativePath = string(MediaStore.Images.Media.RELATIVE_PATH),
+            relativePath = string(MediaStore.MediaColumns.RELATIVE_PATH),
             displayName = displayName,
             mimeType = mimeType,
             sizeBytes = sizeBytes,
-            modifiedAtSeconds = long(MediaStore.Images.Media.DATE_MODIFIED) ?: 0,
+            modifiedAtSeconds = long(MediaStore.MediaColumns.DATE_MODIFIED) ?: 0,
             generationModified =
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    long(MediaStore.Images.Media.GENERATION_MODIFIED) ?: 0
+                    long(MediaStore.MediaColumns.GENERATION_MODIFIED) ?: 0
                 } else {
                     0
                 },
@@ -206,9 +233,14 @@ class MediaStoreSource(
     }
 
     companion object {
-        private val COLLECTION =
+        private val IMAGE_COLLECTION =
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        private val SUPPORTED_MIME_TYPES =
-            listOf("image/jpeg", "image/png", "image/gif", "image/webp")
+        private val VIDEO_COLLECTION =
+            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+
+        // Mirrors the server's upload allow-list; anything else would be rejected after hashing.
+        private val IMAGE_MIME_TYPES =
+            listOf("image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/heif")
+        private val VIDEO_MIME_TYPES = listOf("video/mp4")
     }
 }

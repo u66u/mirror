@@ -1,6 +1,9 @@
 package app.mirror.vault.backup.work
 
 import android.content.Context
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.Build
 import androidx.work.Configuration
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -44,12 +47,13 @@ class BackupWorker(
         WorkManager.getInstance(applicationContext).enqueueUniqueWork(
             BackupWorkRequests.IMMEDIATE_NAME,
             ExistingWorkPolicy.APPEND_OR_REPLACE,
-            BackupWorkRequests.immediate(wifiOnly),
+            BackupWorkRequests.immediate(wifiOnly, inputData.getBoolean(INPUT_CHARGING_ONLY, false)),
         )
     }
 
     companion object {
         const val INPUT_WIFI_ONLY = "wifi_only"
+        const val INPUT_CHARGING_ONLY = "charging_only"
         const val OUTPUT_REASON = "reason"
         const val REASON_AUTHENTICATION = "authentication_required"
         const val REASON_PERMISSION = "permission_required"
@@ -72,26 +76,62 @@ class MirrorWorkerFactory(
 }
 
 object BackupWorkRequests {
-    fun immediate(wifiOnly: Boolean): OneTimeWorkRequest =
+    fun immediate(
+        wifiOnly: Boolean,
+        chargingOnly: Boolean = false,
+    ): OneTimeWorkRequest =
         OneTimeWorkRequestBuilder<BackupWorker>()
-            .setConstraints(constraints(wifiOnly))
-            .setInputData(workDataOf(BackupWorker.INPUT_WIFI_ONLY to wifiOnly))
-            .addTag(TAG)
+            .setConstraints(constraints(wifiOnly, chargingOnly))
+            .setInputData(
+                workDataOf(
+                    BackupWorker.INPUT_WIFI_ONLY to wifiOnly,
+                    BackupWorker.INPUT_CHARGING_ONLY to chargingOnly,
+                ),
+            ).addTag(TAG)
             .build()
 
-    fun periodic(wifiOnly: Boolean): PeriodicWorkRequest =
+    fun periodic(
+        wifiOnly: Boolean,
+        chargingOnly: Boolean = false,
+    ): PeriodicWorkRequest =
         PeriodicWorkRequestBuilder<BackupWorker>(PERIODIC_HOURS, TimeUnit.HOURS)
-            .setConstraints(constraints(wifiOnly))
-            .setInputData(workDataOf(BackupWorker.INPUT_WIFI_ONLY to wifiOnly))
-            .addTag(TAG)
+            .setConstraints(constraints(wifiOnly, chargingOnly))
+            .setInputData(
+                workDataOf(
+                    BackupWorker.INPUT_WIFI_ONLY to wifiOnly,
+                    BackupWorker.INPUT_CHARGING_ONLY to chargingOnly,
+                ),
+            ).addTag(TAG)
             .build()
 
-    private fun constraints(wifiOnly: Boolean): Constraints =
-        Constraints
-            .Builder()
-            .setRequiredNetworkType(
-                if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED,
-            ).build()
+    /**
+     * The vault is often LAN-only, so backup must not wait for Android's
+     * internet validation (captive-portal probe). The plain network type stays
+     * as the fallback for WorkManager's pre-API-28 path and for JVM tests.
+     */
+    private fun constraints(
+        wifiOnly: Boolean,
+        chargingOnly: Boolean,
+    ): Constraints {
+        val type = if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
+        val builder =
+            Constraints
+                .Builder()
+                .setRequiredNetworkType(type)
+                .setRequiresCharging(chargingOnly)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val request =
+                NetworkRequest
+                    .Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .removeCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                    .apply {
+                        if (wifiOnly) addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                    }.build()
+            builder.setRequiredNetworkRequest(request, type)
+        }
+        return builder.build()
+    }
 
     const val TAG = "mirror-backup"
     const val IMMEDIATE_NAME = "mirror-backup-now"
@@ -101,14 +141,23 @@ object BackupWorkRequests {
 
 class BackupScheduler(
     context: Context,
+    private val chargingOnly: () -> Boolean = { false },
 ) {
     private val workManager = WorkManager.getInstance(context.applicationContext)
 
-    fun enqueueNow(wifiOnly: Boolean) {
+    /**
+     * [replace] swaps any queued run for one with fresh constraints. Needed when
+     * the network preference changes: a kept request would stay blocked on the
+     * old constraint, and continuations append behind it.
+     */
+    fun enqueueNow(
+        wifiOnly: Boolean,
+        replace: Boolean = false,
+    ) {
         workManager.enqueueUniqueWork(
             BackupWorkRequests.IMMEDIATE_NAME,
-            ExistingWorkPolicy.KEEP,
-            BackupWorkRequests.immediate(wifiOnly),
+            if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP,
+            BackupWorkRequests.immediate(wifiOnly, chargingOnly()),
         )
     }
 
@@ -116,7 +165,7 @@ class BackupScheduler(
         workManager.enqueueUniquePeriodicWork(
             BackupWorkRequests.PERIODIC_NAME,
             ExistingPeriodicWorkPolicy.UPDATE,
-            BackupWorkRequests.periodic(wifiOnly),
+            BackupWorkRequests.periodic(wifiOnly, chargingOnly()),
         )
     }
 

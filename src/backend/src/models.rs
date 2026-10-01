@@ -341,6 +341,7 @@ pub struct ModelPackSummary {
     /// Distance metric.
     pub distance_metric: String,
     /// Last update time.
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 

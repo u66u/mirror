@@ -7,13 +7,20 @@ import app.mirror.vault.backup.BackupCounts
 import app.mirror.vault.backup.BackupFolder
 import app.mirror.vault.backup.BackupRepository
 import app.mirror.vault.backup.MediaPermissionState
+import app.mirror.vault.backup.data.LocalLibraryRow
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private const val LOCAL_LIBRARY_DEBOUNCE_MILLIS = 250L
 
 data class BackupUiState(
     val permission: MediaPermissionState = MediaPermissionState.DENIED,
@@ -22,6 +29,7 @@ data class BackupUiState(
     val wifiOnly: Boolean = true,
     val refreshing: Boolean = false,
     val error: String? = null,
+    val videoAccessMissing: Boolean = false,
 )
 
 class BackupViewModel(
@@ -32,6 +40,13 @@ class BackupViewModel(
             BackupUiState(permission = repository.permissionState()),
         )
     val state: StateFlow<BackupUiState> = mutableState.asStateFlow()
+
+    /** Device media for the merged library; debounced because uploads rewrite rows constantly. */
+    @OptIn(FlowPreview::class)
+    val localLibrary: StateFlow<List<LocalLibraryRow>> =
+        repository.localLibrary
+            .debounce(LOCAL_LIBRARY_DEBOUNCE_MILLIS)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     init {
         viewModelScope.launch {
@@ -62,15 +77,24 @@ class BackupViewModel(
             )
         }
         ioAction {
-            repository.refreshFolders()
+            // Scanning (not just folder discovery) keeps the on-device library current.
+            repository.scanSelectedFolders()
             mutableState.update {
                 it.copy(
                     permission = repository.permissionState(),
                     refreshing = false,
+                    videoAccessMissing = !repository.videoPermissionGranted(),
                 )
             }
         }
     }
+
+    /** Call after a backup preference (charging, videos) changed. */
+    fun preferencesChanged() =
+        ioAction {
+            repository.preferencesChanged()
+            mutableState.update { it.copy(videoAccessMissing = !repository.videoPermissionGranted()) }
+        }
 
     fun setFolderSelected(
         bucketId: String,

@@ -36,6 +36,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(assets::list_assets_route)
         .service(assets::list_trashed_assets_route)
         .service(assets::get_derivative)
+        .service(assets::get_original)
         .service(assets::trash_asset_route)
         .service(assets::restore_asset_route)
         .service(assets::favorite_asset_route)

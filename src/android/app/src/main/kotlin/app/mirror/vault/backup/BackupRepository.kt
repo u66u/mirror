@@ -4,6 +4,7 @@ import app.mirror.vault.auth.DeviceCredential
 import app.mirror.vault.backup.data.BackupDao
 import app.mirror.vault.backup.data.BackupFolderEntity
 import app.mirror.vault.backup.data.BackupSettingsEntity
+import app.mirror.vault.backup.data.LocalLibraryRow
 import app.mirror.vault.backup.data.MediaStoreSource
 import app.mirror.vault.backup.work.BackupScheduler
 import kotlinx.coroutines.flow.Flow
@@ -37,6 +38,7 @@ class BackupRepository(
             )
         }
     val wifiOnly: Flow<Boolean> = dao.observeWifiOnly()
+    val localLibrary: Flow<List<LocalLibraryRow>> = dao.observeLocalLibrary()
 
     override fun permissionState(): MediaPermissionState = mediaStore.permissionState()
 
@@ -130,10 +132,24 @@ class BackupRepository(
         }
     }
 
+    /** Re-applies schedule constraints (charging) and rescans after a preference changed. */
+    suspend fun preferencesChanged() {
+        ensureSettings()
+        val wifiOnly = dao.wifiOnly()
+        scheduler.schedulePeriodic(wifiOnly)
+        if (permissionState() != MediaPermissionState.DENIED) {
+            refreshFolders()
+            scheduler.enqueueNow(wifiOnly, replace = true)
+        }
+    }
+
+    fun videoPermissionGranted(): Boolean = mediaStore.videoPermissionGranted()
+
     suspend fun setWifiOnly(wifiOnly: Boolean) {
         ensureSettings()
         dao.setWifiOnly(wifiOnly)
         scheduler.schedulePeriodic(wifiOnly)
+        scheduler.enqueueNow(wifiOnly, replace = true)
     }
 
     suspend fun runNow() {

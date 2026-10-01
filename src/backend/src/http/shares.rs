@@ -34,6 +34,7 @@ pub struct CreateShareResponse {
     /// Raw share token returned once.
     pub token: String,
     /// Share expiration.
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
     /// Original-download policy.
     pub allow_original_download: bool,
@@ -55,6 +56,7 @@ pub struct ShareResponse {
     /// Original-download policy.
     pub allow_original_download: bool,
     /// Share expiration.
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
 }
 

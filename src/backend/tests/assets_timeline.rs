@@ -141,8 +141,117 @@ async fn assets_route_returns_authenticated_owner_timeline() -> TestResult {
     assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
     assert_eq!(body["items"][0]["media_type"], "image/jpeg");
     assert_eq!(body["items"][0]["original_filename"], "route.jpg");
+    // Clients parse timestamps as RFC 3339 strings; the default `time` serde
+    // form is a numeric tuple that breaks them.
+    let created_at = body["items"][0]["created_at"].as_str().unwrap_or_default();
+    assert!(
+        !created_at.is_empty(),
+        "created_at must serialize as a string"
+    );
+    assert!(
+        time::OffsetDateTime::parse(created_at, &time::format_description::well_known::Rfc3339)
+            .is_ok()
+    );
     assert_eq!(body["items"][0]["thumbnail"]["format"], "webp");
     assert_eq!(body["items"][0]["preview"]["width"], 1600);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MIRROR_TEST_DATABASE_URL pointing at a dedicated test database"]
+async fn original_route_serves_seekable_byte_ranges() -> TestResult {
+    let deps = storage_test_deps().await?;
+    let public_id = create_promoted_asset(&deps, "range.jpg").await?.public_id;
+    let storage_key: String = sqlx::query_scalar!(
+        r#"
+        SELECT o.storage_key
+        FROM assets a
+        JOIN originals o ON o.id = a.original_id
+        WHERE a.public_id = $1
+        "#,
+        public_id
+    )
+    .fetch_one(&deps.pool)
+    .await?;
+    let expected = deps
+        .storage
+        .read(&mirror_backend::storage::StorageKey::new(storage_key)?)
+        .await?;
+    assert!(expected.len() > 3, "fixture must be larger than the ranges");
+    let last = expected.len() - 2;
+    let session = create_session(
+        &deps.pool,
+        SessionCreateInput {
+            owner_id: 1,
+            user_agent: Some("original-range-test".to_owned()),
+            device_name: Some("test browser".to_owned()),
+        },
+    )
+    .await?;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                config: Config::from_env()?,
+                db: Some(deps.pool.clone()),
+                setup: SetupState::Disabled,
+                storage: Some(deps.storage.clone()),
+            }))
+            .configure(http::configure),
+    )
+    .await;
+    let cookie = || Cookie::new("mirror_session", session.token.expose().to_owned());
+    let uri = format!("/assets/{public_id}/original");
+
+    let partial = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("range", format!("bytes=1-{last}")))
+            .cookie(cookie())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        partial
+            .headers()
+            .get("content-range")
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("bytes 1-{last}/{}", expected.len()).as_str())
+    );
+    assert_eq!(test::read_body(partial).await.as_ref(), &expected[1..=last]);
+
+    let full = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&uri)
+            .cookie(cookie())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(
+        full.headers()
+            .get("accept-ranges")
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes")
+    );
+    assert_eq!(test::read_body(full).await.as_ref(), expected.as_slice());
+
+    let outside = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("range", format!("bytes={}-", expected.len())))
+            .cookie(cookie())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(outside.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+    let anonymous = test::call_service(&app, test::TestRequest::get().uri(&uri).to_request()).await;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
 
     Ok(())
 }
@@ -203,6 +312,13 @@ async fn derivative_route_returns_authenticated_derivative_bytes() -> TestResult
             .get("content-type")
             .and_then(|value| value.to_str().ok()),
         Some("image/webp")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("private, max-age=86400")
     );
     assert_eq!(test::read_body(response).await, "thumbnail");
 

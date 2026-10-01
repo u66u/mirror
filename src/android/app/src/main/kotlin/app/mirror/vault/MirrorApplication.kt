@@ -14,7 +14,10 @@ import app.mirror.vault.backup.data.RoomUploadQueue
 import app.mirror.vault.backup.work.BackupScheduler
 import app.mirror.vault.backup.work.MirrorWorkerFactory
 import app.mirror.vault.backup.work.workManagerConfiguration
+import app.mirror.vault.library.LibraryRepository
 import app.mirror.vault.network.KtorMirrorApi
+import app.mirror.vault.settings.AppPreferences
+import app.mirror.vault.timeline.TimelineCache
 import app.mirror.vault.timeline.TimelineRepository
 
 class MirrorApplication :
@@ -23,9 +26,12 @@ class MirrorApplication :
     private val api by lazy { KtorMirrorApi() }
     private val tokenStore by lazy { AndroidKeystoreTokenStore(this) }
     private val database by lazy { MirrorDatabase.create(this) }
-    private val mediaStore by lazy { MediaStoreSource(this) }
+    val appPreferences: AppPreferences by lazy { AppPreferences(this) }
+    private val mediaStore by lazy { MediaStoreSource(this, includeVideos = { appPreferences.current.backupVideos }) }
     private val uploadQueue by lazy { RoomUploadQueue(database.backupDao()) }
-    private val backupScheduler by lazy { BackupScheduler(this) }
+    private val backupScheduler by lazy {
+        BackupScheduler(this, chargingOnly = { appPreferences.current.backupOnlyWhileCharging })
+    }
 
     val authRepository: AuthRepository by lazy {
         AuthRepository(
@@ -44,6 +50,12 @@ class MirrorApplication :
 
     val timelineRepository: TimelineRepository by lazy {
         TimelineRepository(api = api)
+    }
+
+    val timelineCache: TimelineCache by lazy { TimelineCache(this) }
+
+    val libraryRepository: LibraryRepository by lazy {
+        LibraryRepository(api = api, shareLifetimeSeconds = { appPreferences.current.shareExpiry.seconds })
     }
 
     private val backupRunner: BackupRunner by lazy {

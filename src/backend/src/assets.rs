@@ -57,8 +57,10 @@ pub struct AssetTimelineItem {
     /// Stable asset ID for API clients.
     pub asset_id: Uuid,
     /// Asset creation time used for timeline ordering.
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     /// Favorite marker if set.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub favorite_at: Option<OffsetDateTime>,
     /// Original BLAKE3 content digest.
     pub original_blake3: String,
@@ -80,10 +82,13 @@ pub struct TrashedAssetTimelineItem {
     /// Stable asset ID for API clients.
     pub asset_id: Uuid,
     /// Asset creation time.
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     /// When the asset entered trash.
+    #[serde(with = "time::serde::rfc3339")]
     pub trashed_at: OffsetDateTime,
     /// Favorite marker if set.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub favorite_at: Option<OffsetDateTime>,
     /// Original BLAKE3 content digest.
     pub original_blake3: String,

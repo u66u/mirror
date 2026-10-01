@@ -106,10 +106,13 @@ pub struct SessionResponse {
     /// User-agent metadata.
     pub user_agent: Option<String>,
     /// Creation timestamp.
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     /// Last successful authentication timestamp.
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_seen_at: Option<OffsetDateTime>,
     /// Expiration timestamp.
+    #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
     /// Whether this row is the caller's session.
     pub is_current: bool,

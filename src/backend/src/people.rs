@@ -137,6 +137,7 @@ pub struct FaceAlbumItem {
     /// Public asset ID containing the face.
     pub asset_id: Uuid,
     /// Asset creation time for album ordering.
+    #[serde(with = "time::serde::rfc3339")]
     pub asset_created_at: OffsetDateTime,
     /// Original media type.
     pub media_type: String,

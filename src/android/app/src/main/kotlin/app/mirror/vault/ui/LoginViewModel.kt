@@ -24,6 +24,7 @@ class LoginViewModel(
     private val repository: AuthRepository,
     private val backupRepository: BackupRepository,
     val defaultDeviceName: String,
+    private val onSignedOut: () -> Unit = {},
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(LoginUiState())
     val state: StateFlow<LoginUiState> = mutableState.asStateFlow()
@@ -92,6 +93,7 @@ class LoginViewModel(
                 }
             }.onSuccess { result ->
                 backupRepository.signedOut()
+                onSignedOut()
                 mutableState.value =
                     LoginUiState(
                         loading = false,
@@ -127,10 +129,11 @@ class LoginViewModelFactory(
     private val repository: AuthRepository,
     private val backupRepository: BackupRepository,
     private val defaultDeviceName: String,
+    private val onSignedOut: () -> Unit = {},
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(LoginViewModel::class.java))
-        return LoginViewModel(repository, backupRepository, defaultDeviceName) as T
+        return LoginViewModel(repository, backupRepository, defaultDeviceName, onSignedOut) as T
     }
 }

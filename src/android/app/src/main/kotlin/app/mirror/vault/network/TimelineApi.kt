@@ -8,6 +8,21 @@ data class AssetDerivative(
     val height: Int,
 )
 
+/** Where an item stands with respect to the vault. */
+enum class BackupState {
+    /** Stored in the vault (and possibly also on this device). */
+    IN_VAULT,
+
+    /** On this device only, queued for backup. */
+    WAITING,
+
+    /** On this device only, uploading right now. */
+    UPLOADING,
+
+    /** On this device only; the last upload attempt failed. */
+    FAILED,
+}
+
 data class AssetTimelineItem(
     val assetId: String,
     val createdAt: String,
@@ -18,6 +33,10 @@ data class AssetTimelineItem(
     val originalFilename: String?,
     val thumbnail: AssetDerivative?,
     val preview: AssetDerivative?,
+    val trashedAt: String? = null,
+    /** Content URI of a copy on this device, when there is one. */
+    val localUri: String? = null,
+    val backupState: BackupState = BackupState.IN_VAULT,
 )
 
 data class AssetTimelinePage(

@@ -23,6 +23,7 @@ pub struct ExportManifestInput {
 #[derive(Debug, Serialize, PartialEq, Eq, Clone)]
 pub struct ExportManifest {
     /// Manifest generation timestamp.
+    #[serde(with = "time::serde::rfc3339")]
     pub generated_at: OffsetDateTime,
     /// Manifest schema marker.
     pub manifest_version: &'static str,
@@ -46,6 +47,7 @@ pub struct ExportManifestItem {
     /// First recorded source filename.
     pub original_filename: Option<String>,
     /// Asset creation timestamp.
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
 

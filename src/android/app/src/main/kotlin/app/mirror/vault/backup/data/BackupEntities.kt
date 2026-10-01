@@ -58,6 +58,17 @@ data class BackupCountsRow(
     val failed: Long,
 )
 
+/** One device photo or video as shown in the merged library. */
+data class LocalLibraryRow(
+    val uri: String,
+    val displayName: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val modifiedAtSeconds: Long,
+    val state: String,
+    val assetId: String?,
+)
+
 data class RemoteStateRow(
     val remoteScope: String?,
     val remoteGeneration: Long,

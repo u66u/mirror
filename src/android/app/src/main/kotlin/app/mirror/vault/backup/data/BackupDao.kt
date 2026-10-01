@@ -426,6 +426,29 @@ abstract class BackupDao {
     @Query("SELECT remoteGeneration FROM backup_settings WHERE id = 1")
     abstract suspend fun remoteGeneration(): Long
 
+    /**
+     * Device media in the folders chosen for backup, newest first. Read-only
+     * view over the upload queue so the library can show local photos instantly
+     * and offline, tagged with their backup state.
+     */
+    @Query(
+        """
+        SELECT media.uri, media.displayName, media.mimeType, media.sizeBytes,
+               media.modifiedAtSeconds, media.state, media.assetId
+        FROM backup_media AS media
+        JOIN backup_folders AS folder
+          ON folder.bucketId = media.bucketId
+        JOIN backup_settings AS settings
+          ON settings.id = 1
+         AND settings.remoteGeneration = media.remoteGeneration
+        WHERE media.present = 1
+          AND folder.selected = 1
+          AND folder.available = 1
+        ORDER BY media.modifiedAtSeconds DESC, media.uri DESC
+        """,
+    )
+    abstract fun observeLocalLibrary(): Flow<List<LocalLibraryRow>>
+
     @Query(
         """
         UPDATE backup_media
