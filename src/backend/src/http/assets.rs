@@ -112,6 +112,41 @@ pub async fn get_derivative(
         .body(bytes))
 }
 
+/// Returns derivative bytes for a trashed owner asset (thumbnails in the trash view).
+#[get("/trash/assets/{asset_id}/derivatives/{kind}")]
+pub async fn get_trashed_derivative(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    path: web::Path<(Uuid, String)>,
+) -> Result<HttpResponse, ApiError> {
+    let Some(pool) = state.db.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "database_unavailable",
+            "database is unavailable",
+        ));
+    };
+    let Some(storage) = state.storage.as_ref() else {
+        return Err(ApiError::ServiceUnavailable(
+            "storage_unavailable",
+            "storage is unavailable",
+        ));
+    };
+    let current = auth::require_owner(pool, &req).await?;
+    let (asset_id, kind) = path.into_inner();
+    let derivative =
+        assets::load_trashed_derivative_blob(pool, current.owner_id(), asset_id, &kind).await?;
+    let key =
+        crate::storage::StorageKey::new(derivative.storage_key).map_err(|_| ApiError::Internal)?;
+    let bytes = storage.read(&key).await.map_err(|_| ApiError::Internal)?;
+
+    // Derivatives are private to the owner but safe to keep client-side for a
+    // day, which is what lets apps show already-seen thumbnails while offline.
+    Ok(HttpResponse::Ok()
+        .insert_header(("cache-control", "private, max-age=86400"))
+        .content_type(derivative.content_type)
+        .body(bytes))
+}
+
 /// Moves an owner asset to trash.
 #[delete("/assets/{asset_id}")]
 pub async fn trash_asset_route(

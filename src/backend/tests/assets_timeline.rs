@@ -545,6 +545,17 @@ async fn trash_route_hides_timeline_and_derivatives_until_restore() -> TestResul
         StatusCode::NOT_FOUND
     );
 
+    // The trash view gets its own route, so thumbnails show there without
+    // trashed assets becoming reachable through the active-asset route.
+    let trashed_thumbnail = test::TestRequest::get()
+        .uri(&format!("/trash/assets/{public_id}/derivatives/thumbnail"))
+        .cookie(session_cookie.clone())
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, trashed_thumbnail).await.status(),
+        StatusCode::OK
+    );
+
     let restore = test::TestRequest::post()
         .uri(&format!("/assets/{public_id}/restore"))
         .cookie(session_cookie.clone())
@@ -553,6 +564,16 @@ async fn trash_route_hides_timeline_and_derivatives_until_restore() -> TestResul
     assert_eq!(
         test::call_service(&app, restore).await.status(),
         StatusCode::NO_CONTENT
+    );
+
+    let active_only = test::TestRequest::get()
+        .uri(&format!("/trash/assets/{public_id}/derivatives/thumbnail"))
+        .cookie(session_cookie.clone())
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, active_only).await.status(),
+        StatusCode::NOT_FOUND,
+        "restored assets must not resolve through the trash route"
     );
 
     let restored = test::TestRequest::get()

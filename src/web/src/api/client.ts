@@ -328,6 +328,11 @@ export function derivativeUrl(assetId: string, kind: "thumbnail" | "preview"): s
   return `/assets/${assetId}/derivatives/${kind}`;
 }
 
+/** Trashed assets are served from their own route; the active-asset route 404s for them. */
+export function trashedDerivativeUrl(assetId: string, kind: "thumbnail" | "preview"): string {
+  return `/trash/assets/${assetId}/derivatives/${kind}`;
+}
+
 export type UploadSession = {
   uploadId: string;
   status: string;

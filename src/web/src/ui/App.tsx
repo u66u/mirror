@@ -37,6 +37,7 @@ import {
   activateModelPack,
   createDeviceToken,
   derivativeUrl,
+  trashedDerivativeUrl,
   disableTotp,
   enableTotp,
   favoriteAsset,
@@ -1667,7 +1668,7 @@ function AssetActionRow(props: {
             <img
               alt={label}
               className="size-full object-cover"
-              src={derivativeUrl(props.asset.assetId, "thumbnail")}
+              src={trashedDerivativeUrl(props.asset.assetId, "thumbnail")}
             />
           ) : null}
         </div>

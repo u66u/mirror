@@ -324,11 +324,34 @@ pub async fn list_trashed_assets(
 }
 
 /// Loads derivative storage metadata by public asset ID after owner scoping.
+///
+/// Only active assets resolve; trashed assets are served by
+/// [`load_trashed_derivative_blob`] so the two views never leak into each other.
 pub async fn load_derivative_blob(
     pool: &PgPool,
     owner_id: i16,
     asset_public_id: Uuid,
     kind: &str,
+) -> Result<AssetDerivativeBlob, AssetReadError> {
+    load_derivative_blob_scoped(pool, owner_id, asset_public_id, kind, false).await
+}
+
+/// Same lookup restricted to trashed assets, so the trash view can show thumbnails.
+pub async fn load_trashed_derivative_blob(
+    pool: &PgPool,
+    owner_id: i16,
+    asset_public_id: Uuid,
+    kind: &str,
+) -> Result<AssetDerivativeBlob, AssetReadError> {
+    load_derivative_blob_scoped(pool, owner_id, asset_public_id, kind, true).await
+}
+
+async fn load_derivative_blob_scoped(
+    pool: &PgPool,
+    owner_id: i16,
+    asset_public_id: Uuid,
+    kind: &str,
+    trashed: bool,
 ) -> Result<AssetDerivativeBlob, AssetReadError> {
     if !public_derivatives::public_kind_allowed(kind) {
         return Err(AssetReadError::InvalidInput);
@@ -340,14 +363,15 @@ pub async fn load_derivative_blob(
         JOIN derivatives d ON d.asset_id = a.id
         WHERE a.owner_id = $1
           AND a.public_id = $2
-          AND a.trashed_at IS NULL
+          AND (a.trashed_at IS NOT NULL) = $4
           AND d.kind = $3
         ORDER BY d.created_at DESC
         LIMIT 1
         "#,
         owner_id,
         asset_public_id,
-        kind
+        kind,
+        trashed
     )
     .fetch_optional(pool)
     .await
